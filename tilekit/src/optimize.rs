@@ -1,3 +1,4 @@
+use crate::modelfile::Modelfile;
 use bon::Builder;
 use dspy_rs::{
     COPRO, ChatAdapter, Evaluator, Example, LM, MetaSignature, Module, Optimizable, Optimizer,
@@ -7,7 +8,6 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
-use tilekit::modelfile::Modelfile;
 
 #[derive(Debug, Deserialize)]
 struct TrainingExample {
@@ -232,11 +232,60 @@ pub async fn optimize(modelfile_path: String, data_path: Option<String>, model: 
     println!("New SYSTEM prompt: \n{}", optimized_instructions);
 
     // 5. Update Modelfile
-    modelfile.update_system(&optimized_instructions);
+    let _ = modelfile.add_system(&optimized_instructions);
 
     match fs::write(&modelfile_path, modelfile.to_string()) {
         Ok(_) => println!("Successfully updated {}", modelfile_path),
         Err(e) => eprintln!("Error writing Modelfile: {}", e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dspy_rs::{LmUsage, Prediction};
+    use std::collections::HashMap;
+
+    #[tokio::test]
+    async fn test_metric_exact_match() {
+        let module = PromptOptimizerModule::builder().build();
+        let example = example! {
+            "ai_response" : "output" => "Hello world",
+        };
+        let mut data = HashMap::new();
+        data.insert("ai_response".to_string(), "Hello world".into());
+        let prediction = Prediction::new(data, LmUsage::default());
+
+        let score = module.metric(&example, &prediction).await;
+        assert!(score >= 0.6);
+    }
+
+    #[tokio::test]
+    async fn test_metric_no_match() {
+        let module = PromptOptimizerModule::builder().build();
+        let example = example! {
+            "ai_response" : "output" => "Hello world",
+        };
+        let mut data = HashMap::new();
+        data.insert("ai_response".to_string(), "Goodbye universe".into());
+        let prediction = Prediction::new(data, LmUsage::default());
+
+        let score = module.metric(&example, &prediction).await;
+        assert!(score <= 0.2);
+    }
+
+    #[tokio::test]
+    async fn test_metric_persona() {
+        let module = PromptOptimizerModule::builder().build();
+        let example = example! {
+            "ai_response" : "output" => "Hello",
+        };
+        let mut data = HashMap::new();
+        data.insert("ai_response".to_string(), "Act as an assistant".into());
+        let prediction = Prediction::new(data, LmUsage::default());
+
+        let score = module.metric(&example, &prediction).await;
+        assert!(score >= 0.3);
     }
 }
 

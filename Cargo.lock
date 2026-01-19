@@ -3299,7 +3299,14 @@ dependencies = [
 name = "tilekit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "bon",
+ "dspy-rs",
+ "indexmap",
  "nom 8.0.0",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -3307,12 +3314,9 @@ name = "tiles"
 version = "0.3.1"
 dependencies = [
  "anyhow",
- "bon",
  "clap",
- "dspy-rs",
  "futures-util",
  "hf-hub",
- "indexmap",
  "owo-colors",
  "reqwest",
  "rustyline",

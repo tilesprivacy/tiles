@@ -167,23 +167,6 @@ impl Modelfile {
     }
 
     pub fn add_system(&mut self, value: &str) -> Result<(), String> {
-        if self.system.is_some() {
-            let error = "Modelfile can only have one SYSTEM instruction".to_owned();
-            self.errors.push(error.clone());
-            Err(error)
-        } else {
-            self.system = Some(value.to_owned());
-            let formatted = if value.contains('"') {
-                format!("SYSTEM \"\"\"{}\"\"\"", value)
-            } else {
-                format!("SYSTEM \"{}\"", value)
-            };
-            self.data.push(formatted);
-            Ok(())
-        }
-    }
-
-    pub fn update_system(&mut self, value: &str) {
         self.system = Some(value.to_owned());
         let formatted = if value.contains('"') {
             format!("SYSTEM \"\"\"{}\"\"\"", value)
@@ -203,6 +186,7 @@ impl Modelfile {
         if !found {
             self.data.push(formatted);
         }
+        Ok(())
     }
 
     pub fn add_comment(&mut self, value: &str) -> Result<(), String> {
