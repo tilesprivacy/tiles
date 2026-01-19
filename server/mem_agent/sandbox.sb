@@ -1,0 +1,81 @@
+;; Tiles Code Interpreter Sandbox Profile
+;; This profile provides kernel-level isolation for code execution
+;; Uses Apple's sandbox-exec for maximum security on macOS
+;;
+;; Template variables (replaced at runtime):
+;;   ${VENV_PATH} - Path to the session's virtual environment
+;;   ${WORKSPACE_PATH} - Path to the user's workspace directory
+
+(version 1)
+
+;; Default: deny all operations
+(deny default)
+
+;; Allow reading system libraries and frameworks
+(allow file-read*
+    (subpath "/usr/lib")
+    (subpath "/usr/share")
+    (subpath "/System/Library")
+    (subpath "/Library/Frameworks")
+    (subpath "/Applications/Xcode.app/Contents/Developer")
+)
+
+;; Allow reading Python installation (Homebrew and system)
+(allow file-read*
+    (subpath "/opt/homebrew")
+    (subpath "/usr/local")
+    (subpath "/usr/bin")
+)
+
+;; Allow read/write to the virtual environment
+(allow file-read* file-write*
+    (subpath "${VENV_PATH}")
+)
+
+;; Allow read/write to the user's workspace
+(allow file-read* file-write*
+    (subpath "${WORKSPACE_PATH}")
+)
+
+;; Allow temporary file operations
+(allow file-read* file-write*
+    (subpath "/private/var/folders")
+    (subpath "/tmp")
+)
+
+;; Allow process execution for Python
+(allow process-exec
+    (subpath "${VENV_PATH}")
+    (subpath "/opt/homebrew")
+    (subpath "/usr/local")
+    (subpath "/usr/bin")
+)
+
+;; Allow forking for subprocess
+(allow process-fork)
+
+;; Allow mach services needed for basic operation
+(allow mach-lookup
+    (global-name "com.apple.system.logger")
+    (global-name "com.apple.system.notification_center")
+)
+
+;; Allow sysctl for system info
+(allow sysctl-read)
+
+;; Allow reading and writing to standard devices
+(allow file-read* file-write*
+    (literal "/dev/null")
+    (literal "/dev/zero")
+    (literal "/dev/urandom")
+    (literal "/dev/random")
+    (literal "/dev/stdin")
+    (literal "/dev/stdout")
+    (literal "/dev/stderr")
+)
+
+;; DENY network access entirely - code execution should be isolated
+(deny network*)
+
+;; Log denied operations for debugging (can be removed in production)
+(trace deny)
