@@ -1,0 +1,76 @@
+# Tiles Code Interpreter Environment Stack
+#
+# This defines portable, layered Python environments for code execution:
+# - Runtime: Base Python with core scientific packages
+# - Framework: Data science packages (numpy, pandas, matplotlib, etc.)
+# - Application: Per-session lightweight environments
+#
+# Build with: venvstacks build mem_agent/venvstacks.toml
+# Export with: venvstacks local-export --output-dir .tiles_stacks mem_agent/venvstacks.toml
+
+[[runtimes]]
+name = "cpython-3.13"
+python_implementation = "cpython@3.13"
+# Core packages needed by the interpreter itself
+requirements = []
+
+[[frameworks]]
+name = "datascience"
+runtime = "cpython-3.13"
+requirements = [
+    # Core scientific computing
+    "numpy",
+    "scipy",
+    # Data manipulation
+    "pandas",
+    # Visualization
+    "matplotlib",
+    "seaborn",
+    # Machine learning basics
+    "scikit-learn",
+    # Utilities
+    "requests",
+    "pillow",
+    "sympy",
+]
+platforms = [
+    "macosx_arm64",
+    "macosx_x86_64",
+    "linux_x86_64",
+    "linux_aarch64",
+    "win_amd64",
+]
+
+[[frameworks]]
+name = "minimal"
+runtime = "cpython-3.13"
+# Minimal framework for lightweight code execution
+requirements = [
+    "numpy",
+    "requests",
+]
+platforms = [
+    "macosx_arm64",
+    "macosx_x86_64", 
+    "linux_x86_64",
+    "linux_aarch64",
+    "win_amd64",
+]
+
+[[applications]]
+name = "interpreter"
+# Full-featured interpreter with data science stack
+frameworks = ["datascience"]
+launch_module = "tiles_interpreter"
+requirements = []
+
+[[applications]]
+name = "interpreter-minimal"
+# Lightweight interpreter for quick tasks
+frameworks = ["minimal"]
+launch_module = "tiles_interpreter"
+requirements = []
+
+[tool.uv]
+# Lock to a specific date for reproducibility
+exclude-newer = "2026-01-20T00:00:00Z"

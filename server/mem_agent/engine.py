@@ -13,7 +13,10 @@ import tempfile
 import shutil
 import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple, Set
+from typing import Optional, Dict, Any, Tuple, Set, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .venvstacks_manager import VenvStacksManager
 
 SANDBOX_TIMEOUT = 10
 SANDBOX_PROFILE_PATH = Path(__file__).parent / "sandbox.sb"
@@ -502,10 +505,17 @@ class VenvStackExecutor:
     """Secure code executor with isolated virtual environments and Apple sandbox-exec.
 
     Provides:
-    - Isolated Python virtual environments per session
+    - Shared venvstacks-based Python environments (when available)
+    - Fallback to per-session virtual environments
     - Kernel-level sandboxing via Apple's sandbox-exec (macOS)
     - Persistent state across tool calls within a session
     - Automatic package installation
+
+    Architecture:
+    - When venvstacks are built/exported, uses shared Python from the
+      application layer (datascience or minimal framework)
+    - When venvstacks are not available, falls back to creating a
+      per-session virtual environment with python -m venv
     """
 
     def __init__(
@@ -513,13 +523,15 @@ class VenvStackExecutor:
         session_id: str,
         workspace_path: str,
         base_venv_path: Optional[str] = None,
+        framework: str = "datascience",
     ):
         """Initialize the executor.
 
         Args:
             session_id: Unique identifier for this execution session
             workspace_path: Directory the code is allowed to access
-            base_venv_path: Optional base path for virtual environments
+            base_venv_path: Optional base path for fallback virtual environments
+            framework: Which venvstacks framework to use ("datascience" or "minimal")
 
         Raises:
             ValueError: If session_id is invalid or paths fail validation
@@ -530,8 +542,9 @@ class VenvStackExecutor:
         self.base_venv_path = base_venv_path or os.path.join(
             tempfile.gettempdir(), "tiles_venvstacks"
         )
+        self.framework = framework
 
-        # Compute venv_path with sanitized session_id
+        # Compute venv_path with sanitized session_id (for fallback mode)
         self.venv_path = os.path.join(self.base_venv_path, self.session_id)
 
         # Verify venv_path is inside base_venv_path (prevent path traversal)
@@ -548,9 +561,20 @@ class VenvStackExecutor:
 
         self._session_state: Dict[str, Any] = {}
         self._initialized = False
+        self._using_venvstacks = False
+        self._venvstacks_python: Optional[Path] = None
+        self._venvstacks_manager: Optional["VenvStacksManager"] = None
 
     def _get_python_path(self) -> str:
-        """Get the path to the Python executable in the venv."""
+        """Get the path to the Python executable.
+
+        Returns venvstacks Python if available, otherwise the fallback venv Python.
+        """
+        # If using venvstacks, return the shared Python path
+        if self._using_venvstacks and self._venvstacks_python:
+            return str(self._venvstacks_python)
+
+        # Fallback: return per-session venv Python
         bin_dir = _get_venv_bin_dir()
         python_name = "python.exe" if sys.platform == "win32" else "python3"
         return os.path.join(self.venv_path, bin_dir, python_name)
@@ -562,14 +586,28 @@ class VenvStackExecutor:
         return os.path.join(self.venv_path, bin_dir, pip_name)
 
     def _ensure_venv(self) -> None:
-        """Ensure the virtual environment exists."""
+        """Ensure a Python environment is available.
+
+        Tries venvstacks first (shared, pre-built environments with data science
+        packages), then falls back to creating a per-session venv if venvstacks
+        are not available.
+        """
         if self._initialized:
             return
 
-        os.makedirs(self.venv_path, exist_ok=True)
-
         # Create session-specific temp directory
         os.makedirs(self.session_temp_path, exist_ok=True)
+
+        # Try venvstacks first
+        if self._try_init_venvstacks():
+            self._initialized = True
+            return
+
+        # Fallback: create per-session venv
+        logger.info(
+            f"Venvstacks not available, creating per-session venv for {self.session_id}"
+        )
+        os.makedirs(self.venv_path, exist_ok=True)
 
         # Check if venv already exists
         python_path = self._get_python_path()
@@ -581,9 +619,55 @@ class VenvStackExecutor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-            logger.info(f"Created venv at {self.venv_path}")
+            logger.info(f"Created fallback venv at {self.venv_path}")
 
         self._initialized = True
+
+    def _try_init_venvstacks(self) -> bool:
+        """Try to initialize using venvstacks.
+
+        Returns:
+            True if venvstacks are available and initialized, False otherwise
+        """
+        try:
+            from .venvstacks_manager import VenvStacksManager, VenvStacksError
+        except ImportError:
+            logger.debug("venvstacks_manager not available")
+            return False
+
+        try:
+            self._venvstacks_manager = VenvStacksManager()
+
+            # Check if stacks are exported or built
+            if not (
+                self._venvstacks_manager.is_exported()
+                or self._venvstacks_manager.is_built()
+            ):
+                logger.debug("Venvstacks not built or exported yet")
+                return False
+
+            # Get Python path from the appropriate application layer
+            python_path = self._venvstacks_manager.get_interpreter_python(
+                self.framework
+            )
+
+            if python_path and python_path.exists():
+                self._venvstacks_python = python_path
+                self._using_venvstacks = True
+                logger.info(f"Using venvstacks Python: {python_path}")
+                return True
+            else:
+                logger.debug(
+                    f"Venvstacks Python not found for framework: {self.framework}"
+                )
+                return False
+
+        except VenvStacksError as e:
+            logger.warning(f"Failed to initialize venvstacks: {e}")
+            return False
+        except Exception as e:
+            logger.debug(f"Unexpected error initializing venvstacks: {e}")
+            return False
 
     def _get_sandbox_profile(self) -> str:
         """Generate sandbox profile with paths substituted.
@@ -598,9 +682,17 @@ class VenvStackExecutor:
             logger.warning("Sandbox profile not found, running without sandbox")
             return ""
 
+        # Determine the Python environment path for sandbox rules
+        # When using venvstacks, use the export directory
+        # When using fallback, use the per-session venv path
+        if self._using_venvstacks and self._venvstacks_manager:
+            python_env_path = str(self._venvstacks_manager.export_dir)
+        else:
+            python_env_path = self.venv_path
+
         # Validate all paths before substitution to prevent sandbox bypass
         paths_to_validate = [
-            ("venv_path", self.venv_path),
+            ("venv_path", python_env_path),
             ("workspace_path", self.workspace_path),
             ("session_temp_path", self.session_temp_path),
         ]
@@ -614,13 +706,17 @@ class VenvStackExecutor:
                 return ""
 
         profile = SANDBOX_PROFILE_PATH.read_text()
-        profile = profile.replace("${VENV_PATH}", self.venv_path)
+        profile = profile.replace("${VENV_PATH}", python_env_path)
         profile = profile.replace("${WORKSPACE_PATH}", self.workspace_path)
         profile = profile.replace("${SESSION_TEMP_PATH}", self.session_temp_path)
         return profile
 
     def install_package(self, package: str) -> Tuple[bool, str]:
-        """Install a package in the session's venv.
+        """Install a package in the session's environment.
+
+        Note: When using venvstacks, package installation is not supported
+        because the shared environments should not be modified. Use the
+        fallback venv mode for custom package installation.
 
         Args:
             package: Package name to install
@@ -629,6 +725,18 @@ class VenvStackExecutor:
             Tuple of (success, message)
         """
         self._ensure_venv()
+
+        # Venvstacks environments are shared and should not be modified
+        if self._using_venvstacks:
+            return (
+                False,
+                f"Cannot install '{package}': using shared venvstacks environment. "
+                f"Pre-installed packages: numpy, pandas, matplotlib, scikit-learn, "
+                f"scipy, seaborn, requests, pillow, sympy (datascience framework) "
+                f"or numpy, requests (minimal framework). "
+                f"To install custom packages, rebuild without venvstacks.",
+            )
+
         pip_path = self._get_pip_path()
 
         try:
@@ -795,22 +903,38 @@ sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
                     pass
 
     def cleanup(self) -> None:
-        """Clean up the session's virtual environment and temp directory."""
-        # Clean up venv
-        if os.path.exists(self.venv_path):
+        """Clean up the session's resources.
+
+        When using venvstacks: Only cleans up the session temp directory
+        (the venvstacks Python environment is shared and should not be deleted).
+
+        When using fallback venv: Cleans up both the per-session venv and
+        the session temp directory.
+        """
+        # Only clean up per-session venv if we're NOT using venvstacks
+        # (venvstacks environments are shared across sessions)
+        if not self._using_venvstacks and os.path.exists(self.venv_path):
             try:
                 shutil.rmtree(self.venv_path)
-                logger.info(f"Cleaned up venv at {self.venv_path}")
+                logger.info(f"Cleaned up fallback venv at {self.venv_path}")
             except Exception as e:
                 logger.warning(f"Failed to cleanup venv: {e}")
 
-        # Clean up session temp directory
+        # Always clean up session temp directory
         if os.path.exists(self.session_temp_path):
             try:
                 shutil.rmtree(self.session_temp_path)
                 logger.info(f"Cleaned up session temp at {self.session_temp_path}")
             except Exception as e:
                 logger.warning(f"Failed to cleanup session temp: {e}")
+
+        # Clear session state
+        self._session_state.clear()
+
+    @property
+    def using_venvstacks(self) -> bool:
+        """Check if this executor is using venvstacks (vs fallback venv)."""
+        return self._using_venvstacks
 
 
 # Session executor cache with thread-safe access

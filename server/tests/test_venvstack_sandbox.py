@@ -5,12 +5,14 @@ Verifies:
 - Network access denial
 - File system restriction
 - State persistence across executions
+- VenvStacks integration
 """
 
 import os
 import sys
 import tempfile
 import pytest
+from unittest import mock
 
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -19,6 +21,9 @@ from mem_agent.engine import (
     VenvStackExecutor,
     execute_sandboxed_venvstack,
     cleanup_executor,
+    _sanitize_session_id,
+    _validate_sandbox_path,
+    _validate_path_containment,
 )
 
 
@@ -202,3 +207,166 @@ class TestExecuteSandboxedVenvstack:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestSecurityHelpers:
+    """Test security helper functions."""
+
+    def test_sanitize_session_id_valid(self):
+        """Test that valid session IDs pass through unchanged."""
+        assert _sanitize_session_id("abc123") == "abc123"
+        assert _sanitize_session_id("test_session") == "test_session"
+        assert _sanitize_session_id("session-123") == "session-123"
+
+    def test_sanitize_session_id_invalid_chars(self):
+        """Test that invalid characters are replaced."""
+        assert _sanitize_session_id("abc/123") == "abc_123"
+        assert _sanitize_session_id("session..id") == "session__id"
+        assert _sanitize_session_id("test@user") == "test_user"
+
+    def test_sanitize_session_id_empty(self):
+        """Test that empty session IDs raise ValueError."""
+        with pytest.raises(ValueError):
+            _sanitize_session_id("")
+
+    def test_validate_sandbox_path_valid(self):
+        """Test valid paths pass validation."""
+        assert _validate_sandbox_path("/tmp/test") is True
+        assert _validate_sandbox_path("/Users/test/workspace") is True
+        assert _validate_sandbox_path("/var/folders/abc-123") is True
+
+    def test_validate_sandbox_path_invalid(self):
+        """Test paths with dangerous characters fail validation."""
+        assert _validate_sandbox_path("/tmp/test; rm -rf /") is False
+        assert _validate_sandbox_path("/tmp/test\ninjection") is False
+        assert _validate_sandbox_path("/tmp/test'quote") is False
+        assert _validate_sandbox_path("") is False
+
+    def test_validate_path_containment_valid(self):
+        """Test valid contained paths."""
+        assert _validate_path_containment("/tmp/parent/child", "/tmp/parent") is True
+        assert _validate_path_containment("/tmp/parent", "/tmp/parent") is True
+
+    def test_validate_path_containment_invalid(self):
+        """Test path traversal is blocked."""
+        assert _validate_path_containment("/tmp/other", "/tmp/parent") is False
+        assert (
+            _validate_path_containment("/tmp/parent/../other", "/tmp/parent") is False
+        )
+
+
+class TestVenvStacksIntegration:
+    """Test VenvStacks integration."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        """Clean up after tests."""
+        import shutil
+
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def test_executor_falls_back_when_no_venvstacks(self):
+        """Test that executor falls back to per-session venv when venvstacks not available."""
+        executor = VenvStackExecutor(
+            session_id="test_fallback",
+            workspace_path=self.temp_dir,
+        )
+
+        # Execute to trigger initialization
+        result, error = executor.execute("x = 1", use_sandbox=False)
+
+        # Should work (using fallback venv)
+        assert error == ""
+        assert result is not None
+        assert result.get("x") == 1
+
+        # Check that we're NOT using venvstacks (since they're not built)
+        assert executor.using_venvstacks is False
+
+        executor.cleanup()
+
+    def test_executor_framework_parameter(self):
+        """Test that framework parameter is stored correctly."""
+        executor = VenvStackExecutor(
+            session_id="test_framework",
+            workspace_path=self.temp_dir,
+            framework="minimal",
+        )
+
+        assert executor.framework == "minimal"
+        executor.cleanup()
+
+    def test_install_package_denied_with_venvstacks(self):
+        """Test that package installation is denied when using venvstacks."""
+        executor = VenvStackExecutor(
+            session_id="test_install_denied",
+            workspace_path=self.temp_dir,
+        )
+
+        # Mock venvstacks being available
+        executor._using_venvstacks = True
+        executor._initialized = True
+
+        success, message = executor.install_package("some-package")
+
+        assert success is False
+        assert "Cannot install" in message
+        assert "shared venvstacks" in message
+
+        executor.cleanup()
+
+
+class TestVenvStacksManager:
+    """Test VenvStacksManager class."""
+
+    def setup_method(self):
+        """Set up test fixtures."""
+        self.temp_dir = tempfile.mkdtemp()
+
+    def teardown_method(self):
+        """Clean up after tests."""
+        import shutil
+
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir)
+
+    def test_manager_creation(self):
+        """Test VenvStacksManager can be created."""
+        try:
+            from mem_agent.venvstacks_manager import (
+                VenvStacksManager,
+                VENVSTACKS_CONFIG,
+            )
+
+            # Only test if config exists
+            if VENVSTACKS_CONFIG.exists():
+                manager = VenvStacksManager()
+                assert manager.config_path == VENVSTACKS_CONFIG
+        except ImportError:
+            pytest.skip("venvstacks_manager not available")
+
+    def test_manager_not_built_initially(self):
+        """Test that is_built returns False when nothing is built."""
+        try:
+            from mem_agent.venvstacks_manager import (
+                VenvStacksManager,
+                VENVSTACKS_CONFIG,
+            )
+            from pathlib import Path
+
+            if not VENVSTACKS_CONFIG.exists():
+                pytest.skip("venvstacks.toml not found")
+
+            manager = VenvStacksManager(
+                build_dir=Path(self.temp_dir) / "build",
+                export_dir=Path(self.temp_dir) / "export",
+            )
+
+            assert manager.is_built() is False
+            assert manager.is_exported() is False
+        except ImportError:
+            pytest.skip("venvstacks_manager not available")
