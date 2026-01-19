@@ -15,7 +15,11 @@ import pytest
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from mem_agent.engine import VenvStackExecutor, execute_sandboxed_venvstack
+from mem_agent.engine import (
+    VenvStackExecutor,
+    execute_sandboxed_venvstack,
+    cleanup_executor,
+)
 
 
 class TestVenvStackExecutor:
@@ -177,6 +181,8 @@ class TestExecuteSandboxedVenvstack:
         """Clean up after tests."""
         import shutil
 
+        # Clean up executor from cache
+        cleanup_executor("convenience_test")
         if os.path.exists(self.temp_dir):
             shutil.rmtree(self.temp_dir)
 

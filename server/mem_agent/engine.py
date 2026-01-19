@@ -4,7 +4,6 @@ import logging
 import os
 import sys
 import traceback
-import types
 import pickle
 import subprocess
 import base64
@@ -341,16 +340,21 @@ if __name__ == "__main__":
 
 
 # =============================================================================
-# VenvStackExecutor: Secure, stateful code execution with venvstacks
+# VenvStackExecutor: Secure, stateful code execution with isolated environments
 # =============================================================================
 
 
+def _get_venv_bin_dir() -> str:
+    """Get the correct bin directory name for the current platform."""
+    return "Scripts" if sys.platform == "win32" else "bin"
+
+
 class VenvStackExecutor:
-    """Secure code executor using venvstacks and Apple sandbox-exec.
+    """Secure code executor with isolated virtual environments and Apple sandbox-exec.
 
     Provides:
-    - Isolated Python virtual environments via venvstacks
-    - Kernel-level sandboxing via Apple's sandbox-exec
+    - Isolated Python virtual environments per session
+    - Kernel-level sandboxing via Apple's sandbox-exec (macOS)
     - Persistent state across tool calls within a session
     - Automatic package installation
     """
@@ -377,6 +381,18 @@ class VenvStackExecutor:
         self._session_state: Dict[str, Any] = {}
         self._initialized = False
 
+    def _get_python_path(self) -> str:
+        """Get the path to the Python executable in the venv."""
+        bin_dir = _get_venv_bin_dir()
+        python_name = "python.exe" if sys.platform == "win32" else "python3"
+        return os.path.join(self.venv_path, bin_dir, python_name)
+
+    def _get_pip_path(self) -> str:
+        """Get the path to pip in the venv."""
+        bin_dir = _get_venv_bin_dir()
+        pip_name = "pip.exe" if sys.platform == "win32" else "pip"
+        return os.path.join(self.venv_path, bin_dir, pip_name)
+
     def _ensure_venv(self) -> None:
         """Ensure the virtual environment exists."""
         if self._initialized:
@@ -385,7 +401,7 @@ class VenvStackExecutor:
         os.makedirs(self.venv_path, exist_ok=True)
 
         # Check if venv already exists
-        python_path = os.path.join(self.venv_path, "bin", "python3")
+        python_path = self._get_python_path()
         if not os.path.exists(python_path):
             # Create venv using system Python
             subprocess.run(
@@ -419,7 +435,7 @@ class VenvStackExecutor:
             Tuple of (success, message)
         """
         self._ensure_venv()
-        pip_path = os.path.join(self.venv_path, "bin", "pip")
+        pip_path = self._get_pip_path()
 
         try:
             result = subprocess.run(
@@ -441,14 +457,15 @@ class VenvStackExecutor:
         self,
         code: str,
         timeout: int = SANDBOX_TIMEOUT,
-        use_sandbox: bool = False,  # Disabled by default until sandbox profile is fixed
+        use_sandbox: bool = False,
     ) -> Tuple[Optional[Dict[str, Any]], str]:
         """Execute code in the sandboxed environment.
 
         Args:
             code: Python code to execute
             timeout: Maximum execution time in seconds
-            use_sandbox: Whether to use Apple sandbox-exec (macOS only)
+            use_sandbox: Whether to use Apple sandbox-exec (macOS only).
+                        Defaults to False as sandbox profile may need configuration.
 
         Returns:
             Tuple of (locals_dict, error_message)
@@ -457,17 +474,22 @@ class VenvStackExecutor:
 
         self._ensure_venv()
 
-        python_path = os.path.join(self.venv_path, "bin", "python3")
+        python_path = self._get_python_path()
         logger.debug(f"[SANDBOX] Using python at: {python_path}")
 
+        # Serialize state using base64+pickle for safe transfer (avoids repr issues)
+        state_b64 = base64.b64encode(pickle.dumps(self._session_state)).decode()
+
         # Prepare code with state restoration/saving
-        wrapped_code = f"""
+        wrapped_code = f'''
 import pickle
+import base64
 import sys
 import os
 
-# Restore session state
-_session_state = {repr(self._session_state)}
+# Restore session state safely via pickle
+_state_b64 = "{state_b64}"
+_session_state = pickle.loads(base64.b64decode(_state_b64))
 
 # Make session state available as globals
 globals().update(_session_state)
@@ -485,12 +507,12 @@ for k, v in dict(locals()).items():
         try:
             pickle.dumps(v)
             _new_state[k] = v
-        except:
+        except Exception:
             pass
 
 # Output state
 sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
-"""
+'''
 
         # Write code to temp file
         with tempfile.NamedTemporaryFile(
@@ -501,6 +523,7 @@ sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
 
         logger.debug(f"[SANDBOX] Wrote wrapped code to: {temp_script}")
 
+        profile_path: Optional[str] = None
         try:
             # Build command
             cmd = [python_path, temp_script]
@@ -562,10 +585,13 @@ sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
             # Cleanup temp files
             try:
                 os.unlink(temp_script)
-                if "profile_path" in locals():
-                    os.unlink(profile_path)
-            except:
+            except OSError:
                 pass
+            if profile_path:
+                try:
+                    os.unlink(profile_path)
+                except OSError:
+                    pass
 
     def cleanup(self) -> None:
         """Clean up the session's virtual environment."""
@@ -588,23 +614,32 @@ def get_or_create_executor(session_id: str, workspace_path: str) -> VenvStackExe
     return _executor_cache[session_id]
 
 
+def cleanup_executor(session_id: str) -> None:
+    """Clean up and remove an executor from the cache."""
+    if session_id in _executor_cache:
+        _executor_cache[session_id].cleanup()
+        del _executor_cache[session_id]
+
+
 def execute_sandboxed_venvstack(
     code: str,
     session_id: str,
     workspace_path: str,
     timeout: int = SANDBOX_TIMEOUT,
-    use_sandbox: bool = True,
+    use_sandbox: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Execute code using VenvStackExecutor.
 
-    This is the new recommended entry point for sandboxed code execution.
+    This is the recommended entry point for sandboxed code execution with
+    state persistence across calls.
 
     Args:
         code: Python code to execute
         session_id: Session identifier for state persistence
         workspace_path: Directory the code is allowed to access
         timeout: Maximum execution time
-        use_sandbox: Whether to use Apple sandbox-exec
+        use_sandbox: Whether to use Apple sandbox-exec (macOS only).
+                    Defaults to False as sandbox profile may need configuration.
 
     Returns:
         Tuple of (locals_dict, error_message)
