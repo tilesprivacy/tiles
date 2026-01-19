@@ -208,15 +208,18 @@ class VenvStacksManager:
     def is_built(self) -> bool:
         """Check if stacks have been built.
 
+        The venvstacks CLI writes output into a "__venvstacks__" subfolder,
+        so we check for that marker directory.
+
         Returns:
             True if build directory exists with environments
         """
         if not self.build_dir.exists():
             return False
 
-        # Check for at least one runtime directory
-        runtimes_dir = self.build_dir / "runtimes"
-        return runtimes_dir.exists() and any(runtimes_dir.iterdir())
+        # The venvstacks CLI creates a __venvstacks__ subfolder with metadata
+        venvstacks_marker = self.build_dir / "__venvstacks__"
+        return venvstacks_marker.exists()
 
     def is_exported(self) -> bool:
         """Check if stacks have been exported.
@@ -368,10 +371,24 @@ def ensure_stacks_ready(
     """
     manager = get_venvstacks_manager()
 
-    if manager.is_exported() and not force_rebuild:
+    def _validate_interpreter() -> Tuple[bool, str]:
+        """Validate that the interpreter exists and is usable."""
         python = manager.get_interpreter_python(framework)
         if python and python.exists():
             return True, f"Stacks ready at {manager.export_dir}"
+        return False, (
+            f"Interpreter not found for framework '{framework}' at {manager.export_dir}. "
+            f"Expected Python at: {python}"
+        )
+
+    # Check if already exported and valid
+    if manager.is_exported() and not force_rebuild:
+        valid, msg = _validate_interpreter()
+        if valid:
+            return True, msg
+        # Interpreter missing despite being exported - attempt rebuild
+        logger.warning(f"Exported stacks invalid: {msg}. Attempting rebuild...")
+        force_rebuild = True
 
     try:
         # Build stacks
@@ -385,6 +402,11 @@ def ensure_stacks_ready(
             logger.info("Exporting venvstacks for deployment...")
             if not manager.export_stacks():
                 return False, "Failed to export venvstacks"
+
+        # Validate interpreter after build/export
+        valid, msg = _validate_interpreter()
+        if not valid:
+            return False, msg
 
         return True, f"Stacks ready at {manager.export_dir}"
 

@@ -1,10 +1,12 @@
 import builtins
+import hashlib
 import importlib
 import io
 import logging
 import os
 import re
 import sys
+import textwrap
 import traceback
 import pickle
 import subprocess
@@ -21,9 +23,9 @@ if TYPE_CHECKING:
 SANDBOX_TIMEOUT = 10
 SANDBOX_PROFILE_PATH = Path(__file__).parent / "sandbox.sb"
 
-# Pattern for validating safe paths (alphanumerics, hyphen, underscore, dot, slash)
+# Pattern for validating safe paths (alphanumerics, hyphen, underscore, dot, slash, space)
 # Rejects sandbox-significant characters: quotes, parentheses, semicolons, newlines, backslashes
-_SAFE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/\-]+$")
+_SAFE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/\- ]+$")
 
 # Pattern for validating session IDs (alphanumerics, hyphen, underscore only)
 _SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
@@ -384,7 +386,8 @@ def _sanitize_session_id(session_id: str) -> str:
     """Sanitize a session ID to prevent path traversal attacks.
 
     Only allows alphanumerics, hyphens, and underscores.
-    Invalid characters are replaced with underscores.
+    Invalid characters are replaced with underscores, and a hash suffix
+    is appended to preserve uniqueness when sanitization changes the input.
 
     Args:
         session_id: The raw session ID
@@ -407,6 +410,11 @@ def _sanitize_session_id(session_id: str) -> str:
 
     # Ensure we don't have path traversal attempts
     sanitized = sanitized.replace("..", "__")
+
+    # Append a hash suffix to preserve uniqueness when sanitization changes input
+    # This prevents collisions like "a/b" and "a_b" mapping to the same sanitized ID
+    hash_suffix = hashlib.sha256(session_id.encode()).hexdigest()[:8]
+    sanitized = f"{sanitized}_{hash_suffix}"
 
     return sanitized
 
@@ -669,36 +677,61 @@ class VenvStackExecutor:
             logger.debug(f"Unexpected error initializing venvstacks: {e}")
             return False
 
-    def _get_sandbox_profile(self) -> str:
+    def _get_sandbox_profile(self, use_sandbox: bool = True) -> str:
         """Generate sandbox profile with paths substituted.
 
         Validates paths before substitution to prevent sandbox rule injection.
+        Fails closed (raises exception) when use_sandbox is True but validation
+        fails, rather than silently disabling the sandbox.
+
+        Args:
+            use_sandbox: Whether sandboxing is required. If True and validation
+                        fails, raises an exception instead of returning empty.
 
         Returns:
-            The sandbox profile with paths substituted, or empty string if
-            the profile is not found or paths fail validation.
+            The sandbox profile with paths substituted.
+
+        Raises:
+            RuntimeError: If use_sandbox is True and the sandbox profile is not
+                         found or path validation fails.
         """
         if not SANDBOX_PROFILE_PATH.exists():
+            if use_sandbox:
+                raise RuntimeError(
+                    f"Sandbox profile not found at {SANDBOX_PROFILE_PATH}. "
+                    "Cannot run with use_sandbox=True."
+                )
             logger.warning("Sandbox profile not found, running without sandbox")
             return ""
 
         # Determine the Python environment path for sandbox rules
-        # When using venvstacks, use the export directory
+        # When using venvstacks, prefer export_dir if exported, else build_dir
         # When using fallback, use the per-session venv path
         if self._using_venvstacks and self._venvstacks_manager:
-            python_env_path = str(self._venvstacks_manager.export_dir)
+            if self._venvstacks_manager.is_exported():
+                python_env_path = str(self._venvstacks_manager.export_dir)
+            elif self._venvstacks_manager.is_built():
+                python_env_path = str(self._venvstacks_manager.build_dir)
+            else:
+                # Shouldn't happen if _using_venvstacks is True, but fallback
+                python_env_path = self.venv_path
         else:
             python_env_path = self.venv_path
 
         # Validate all paths before substitution to prevent sandbox bypass
         paths_to_validate = [
-            ("venv_path", python_env_path),
+            ("python_env_path", python_env_path),
             ("workspace_path", self.workspace_path),
             ("session_temp_path", self.session_temp_path),
         ]
 
         for name, path in paths_to_validate:
             if not _validate_sandbox_path(path):
+                if use_sandbox:
+                    raise ValueError(
+                        f"Sandbox path validation failed for {name}: {path!r} "
+                        "contains unsafe characters. Cannot run with use_sandbox=True."
+                    )
                 logger.warning(
                     f"{name} contains unsafe characters, running without sandbox: "
                     f"{path!r}"
@@ -772,7 +805,16 @@ class VenvStackExecutor:
         Returns:
             Tuple of (locals_dict, error_message)
         """
-        logger.info(f"[SANDBOX] execute() called with code:\n{code[:500]}...")
+        # Log only safe metadata to avoid leaking secrets in user code
+        logger.info("[SANDBOX] execute() called, code_length=%d", len(code))
+        if logger.isEnabledFor(logging.DEBUG):
+            # Redact potential secrets in debug preview
+            redacted_preview = (
+                code[:100].replace("\n", "\\n") + "..."
+                if len(code) > 100
+                else code.replace("\n", "\\n")
+            )
+            logger.debug(f"[SANDBOX] Code preview (redacted): {redacted_preview}")
 
         self._ensure_venv()
 
@@ -783,8 +825,8 @@ class VenvStackExecutor:
         state_b64 = base64.b64encode(pickle.dumps(self._session_state)).decode()
 
         # Prepare code with state restoration/saving
-        wrapped_code = f'''
-import pickle
+        # Build the wrapper script without leading indentation
+        wrapped_code = f"""import pickle
 import base64
 import sys
 import os
@@ -814,7 +856,7 @@ for k, v in dict(locals()).items():
 
 # Output state
 sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
-'''
+"""
 
         # Write code to temp file
         with tempfile.NamedTemporaryFile(
@@ -832,16 +874,15 @@ sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
 
             # Use sandbox-exec on macOS if available and enabled
             if use_sandbox and sys.platform == "darwin":
-                profile = self._get_sandbox_profile()
-                if profile:
-                    # Write profile to temp file
-                    with tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".sb", delete=False
-                    ) as pf:
-                        pf.write(profile)
-                        profile_path = pf.name
-                    cmd = ["sandbox-exec", "-f", profile_path] + cmd
-                    logger.debug(f"[SANDBOX] Using sandbox profile: {profile_path}")
+                profile = self._get_sandbox_profile(use_sandbox=True)
+                # Write profile to temp file
+                with tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".sb", delete=False
+                ) as pf:
+                    pf.write(profile)
+                    profile_path = pf.name
+                cmd = ["sandbox-exec", "-f", profile_path] + cmd
+                logger.debug(f"[SANDBOX] Using sandbox profile: {profile_path}")
 
             logger.info(f"[SANDBOX] Executing command: {' '.join(cmd)}")
 

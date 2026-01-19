@@ -149,7 +149,7 @@ try:
 except Exception:
     network_allowed = False
 """
-        result, error = self.executor.execute(code, use_sandbox=True)
+        result, _error = self.executor.execute(code, use_sandbox=True)
 
         # Either the sandbox blocks it or we get an error
         if result is not None:
@@ -169,7 +169,7 @@ try:
 except Exception:
     file_access_denied = True
 """
-        result, error = self.executor.execute(code, use_sandbox=True)
+        result, _error = self.executor.execute(code, use_sandbox=True)
 
         if result is not None:
             assert result.get("file_access_denied") is True
@@ -219,10 +219,24 @@ class TestSecurityHelpers:
         assert _sanitize_session_id("session-123") == "session-123"
 
     def test_sanitize_session_id_invalid_chars(self):
-        """Test that invalid characters are replaced."""
-        assert _sanitize_session_id("abc/123") == "abc_123"
-        assert _sanitize_session_id("session..id") == "session__id"
-        assert _sanitize_session_id("test@user") == "test_user"
+        """Test that invalid characters are replaced and hash suffix added."""
+        import hashlib
+
+        # When sanitization changes input, a hash suffix is appended for uniqueness
+        result1 = _sanitize_session_id("abc/123")
+        assert result1.startswith("abc_123_")
+        expected_hash1 = hashlib.sha256("abc/123".encode()).hexdigest()[:8]
+        assert result1 == f"abc_123_{expected_hash1}"
+
+        result2 = _sanitize_session_id("session..id")
+        assert result2.startswith("session__id_")
+        expected_hash2 = hashlib.sha256("session..id".encode()).hexdigest()[:8]
+        assert result2 == f"session__id_{expected_hash2}"
+
+        result3 = _sanitize_session_id("test@user")
+        assert result3.startswith("test_user_")
+        expected_hash3 = hashlib.sha256("test@user".encode()).hexdigest()[:8]
+        assert result3 == f"test_user_{expected_hash3}"
 
     def test_sanitize_session_id_empty(self):
         """Test that empty session IDs raise ValueError."""
@@ -234,6 +248,8 @@ class TestSecurityHelpers:
         assert _validate_sandbox_path("/tmp/test") is True
         assert _validate_sandbox_path("/Users/test/workspace") is True
         assert _validate_sandbox_path("/var/folders/abc-123") is True
+        # Spaces are now allowed
+        assert _validate_sandbox_path("/Users/test/My Documents") is True
 
     def test_validate_sandbox_path_invalid(self):
         """Test paths with dangerous characters fail validation."""
