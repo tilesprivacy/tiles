@@ -1,7 +1,9 @@
 import builtins
 import importlib
+import io
 import logging
 import os
+import re
 import sys
 import traceback
 import pickle
@@ -9,11 +11,19 @@ import subprocess
 import base64
 import tempfile
 import shutil
+import threading
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Set
 
 SANDBOX_TIMEOUT = 10
 SANDBOX_PROFILE_PATH = Path(__file__).parent / "sandbox.sb"
+
+# Pattern for validating safe paths (alphanumerics, hyphen, underscore, dot, slash)
+# Rejects sandbox-significant characters: quotes, parentheses, semicolons, newlines, backslashes
+_SAFE_PATH_PATTERN = re.compile(r"^[A-Za-z0-9._/\-]+$")
+
+# Pattern for validating session IDs (alphanumerics, hyphen, underscore only)
+_SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]+$")
 
 # Configure a logger for the sandbox (in real use, configure handlers/level as needed)
 logger = logging.getLogger(__name__)
@@ -349,6 +359,145 @@ def _get_venv_bin_dir() -> str:
     return "Scripts" if sys.platform == "win32" else "bin"
 
 
+def _validate_sandbox_path(path: str) -> bool:
+    """Validate a path is safe for sandbox profile substitution.
+
+    Rejects paths containing sandbox-significant characters that could
+    enable sandbox rule injection: quotes, parentheses, semicolons,
+    newlines, backslashes, and other metacharacters.
+
+    Args:
+        path: The path to validate
+
+    Returns:
+        True if the path is safe, False otherwise
+    """
+    if not path:
+        return False
+    return bool(_SAFE_PATH_PATTERN.match(path))
+
+
+def _sanitize_session_id(session_id: str) -> str:
+    """Sanitize a session ID to prevent path traversal attacks.
+
+    Only allows alphanumerics, hyphens, and underscores.
+    Invalid characters are replaced with underscores.
+
+    Args:
+        session_id: The raw session ID
+
+    Returns:
+        Sanitized session ID safe for use in paths
+
+    Raises:
+        ValueError: If session_id is empty or None
+    """
+    if not session_id:
+        raise ValueError("session_id cannot be empty")
+
+    # If already safe, return as-is
+    if _SAFE_SESSION_ID_PATTERN.match(session_id):
+        return session_id
+
+    # Replace unsafe characters with underscores
+    sanitized = re.sub(r"[^A-Za-z0-9_\-]", "_", session_id)
+
+    # Ensure we don't have path traversal attempts
+    sanitized = sanitized.replace("..", "__")
+
+    return sanitized
+
+
+def _validate_path_containment(child_path: str, parent_path: str) -> bool:
+    """Verify that child_path is contained within parent_path.
+
+    Uses secure path normalization to prevent path traversal attacks.
+
+    Args:
+        child_path: The path that should be inside parent_path
+        parent_path: The containing directory
+
+    Returns:
+        True if child_path is inside parent_path, False otherwise
+    """
+    try:
+        child_normalized = os.path.normpath(os.path.abspath(child_path))
+        parent_normalized = os.path.normpath(os.path.abspath(parent_path))
+        common = os.path.commonpath([child_normalized, parent_normalized])
+        return common == parent_normalized
+    except (ValueError, TypeError):
+        return False
+
+
+# Allowed types for RestrictedUnpickler - only safe, basic types
+_PICKLE_SAFE_TYPES: Set[Tuple[str, str]] = {
+    ("builtins", "dict"),
+    ("builtins", "list"),
+    ("builtins", "tuple"),
+    ("builtins", "set"),
+    ("builtins", "frozenset"),
+    ("builtins", "str"),
+    ("builtins", "bytes"),
+    ("builtins", "bytearray"),
+    ("builtins", "int"),
+    ("builtins", "float"),
+    ("builtins", "complex"),
+    ("builtins", "bool"),
+    ("builtins", "type"),
+    ("builtins", "NoneType"),
+    # Allow common safe stdlib types
+    ("datetime", "datetime"),
+    ("datetime", "date"),
+    ("datetime", "time"),
+    ("datetime", "timedelta"),
+    ("decimal", "Decimal"),
+    ("fractions", "Fraction"),
+    ("collections", "OrderedDict"),
+    ("collections", "defaultdict"),
+    ("collections", "Counter"),
+}
+
+
+class RestrictedUnpickler(pickle.Unpickler):
+    """Restricted unpickler that only allows safe types.
+
+    This prevents arbitrary code execution via pickle deserialization
+    by only allowing a whitelist of safe, basic types.
+
+    Security Note:
+        The subprocess runs user code, so if the sandbox is bypassed,
+        malicious pickle data could be returned. This unpickler limits
+        the damage by preventing deserialization of dangerous types
+        like code objects, functions, or classes.
+    """
+
+    def find_class(self, module: str, name: str) -> type:
+        """Only allow safe types to be unpickled."""
+        if (module, name) in _PICKLE_SAFE_TYPES:
+            return getattr(__import__(module, fromlist=[name]), name)
+
+        # Special case for NoneType which isn't directly importable
+        if module == "builtins" and name == "NoneType":
+            return type(None)
+
+        raise pickle.UnpicklingError(f"Forbidden type in pickle data: {module}.{name}")
+
+
+def _safe_pickle_loads(data: bytes) -> Any:
+    """Safely deserialize pickle data using RestrictedUnpickler.
+
+    Args:
+        data: Pickle-serialized bytes
+
+    Returns:
+        The deserialized object
+
+    Raises:
+        pickle.UnpicklingError: If data contains forbidden types
+    """
+    return RestrictedUnpickler(io.BytesIO(data)).load()
+
+
 class VenvStackExecutor:
     """Secure code executor with isolated virtual environments and Apple sandbox-exec.
 
@@ -371,13 +520,32 @@ class VenvStackExecutor:
             session_id: Unique identifier for this execution session
             workspace_path: Directory the code is allowed to access
             base_venv_path: Optional base path for virtual environments
+
+        Raises:
+            ValueError: If session_id is invalid or paths fail validation
         """
-        self.session_id = session_id
+        # Sanitize session_id to prevent path traversal
+        self.session_id = _sanitize_session_id(session_id)
         self.workspace_path = os.path.abspath(workspace_path)
         self.base_venv_path = base_venv_path or os.path.join(
             tempfile.gettempdir(), "tiles_venvstacks"
         )
-        self.venv_path = os.path.join(self.base_venv_path, session_id)
+
+        # Compute venv_path with sanitized session_id
+        self.venv_path = os.path.join(self.base_venv_path, self.session_id)
+
+        # Verify venv_path is inside base_venv_path (prevent path traversal)
+        if not _validate_path_containment(self.venv_path, self.base_venv_path):
+            raise ValueError(
+                f"Invalid session_id: resulting venv_path escapes base directory"
+            )
+
+        # Session-specific temp directory for sandbox isolation
+        # This prevents cross-session data exposure via temp files
+        self.session_temp_path = os.path.join(
+            tempfile.gettempdir(), "tiles_sessions", self.session_id
+        )
+
         self._session_state: Dict[str, Any] = {}
         self._initialized = False
 
@@ -400,6 +568,9 @@ class VenvStackExecutor:
 
         os.makedirs(self.venv_path, exist_ok=True)
 
+        # Create session-specific temp directory
+        os.makedirs(self.session_temp_path, exist_ok=True)
+
         # Check if venv already exists
         python_path = self._get_python_path()
         if not os.path.exists(python_path):
@@ -415,14 +586,37 @@ class VenvStackExecutor:
         self._initialized = True
 
     def _get_sandbox_profile(self) -> str:
-        """Generate sandbox profile with paths substituted."""
+        """Generate sandbox profile with paths substituted.
+
+        Validates paths before substitution to prevent sandbox rule injection.
+
+        Returns:
+            The sandbox profile with paths substituted, or empty string if
+            the profile is not found or paths fail validation.
+        """
         if not SANDBOX_PROFILE_PATH.exists():
             logger.warning("Sandbox profile not found, running without sandbox")
             return ""
 
+        # Validate all paths before substitution to prevent sandbox bypass
+        paths_to_validate = [
+            ("venv_path", self.venv_path),
+            ("workspace_path", self.workspace_path),
+            ("session_temp_path", self.session_temp_path),
+        ]
+
+        for name, path in paths_to_validate:
+            if not _validate_sandbox_path(path):
+                logger.warning(
+                    f"{name} contains unsafe characters, running without sandbox: "
+                    f"{path!r}"
+                )
+                return ""
+
         profile = SANDBOX_PROFILE_PATH.read_text()
         profile = profile.replace("${VENV_PATH}", self.venv_path)
         profile = profile.replace("${WORKSPACE_PATH}", self.workspace_path)
+        profile = profile.replace("${SESSION_TEMP_PATH}", self.session_temp_path)
         return profile
 
     def install_package(self, package: str) -> Tuple[bool, str]:
@@ -559,15 +753,22 @@ sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
                 logger.error(f"[SANDBOX] Execution failed: {error_msg}")
                 return None, error_msg
 
-            # Parse output
+            # Parse output using RestrictedUnpickler for safety
+            # Security Note: The subprocess runs user code. If the sandbox is
+            # bypassed, malicious pickle data could be returned. Using
+            # RestrictedUnpickler limits damage by only allowing safe types.
             try:
-                new_state, error = pickle.loads(result.stdout)
+                new_state, error = _safe_pickle_loads(result.stdout)
                 if new_state:
                     self._session_state.update(new_state)
                 logger.info(
                     f"[SANDBOX] Execution success: vars={list(new_state.keys())}, error={error}"
                 )
                 return new_state, error or ""
+            except pickle.UnpicklingError as e:
+                error_msg = f"Unsafe pickle data rejected: {e}"
+                logger.error(f"[SANDBOX] Security: {error_msg}")
+                return None, error_msg
             except Exception as e:
                 error_msg = (
                     f"Failed to parse output: {e}\nStderr: {result.stderr.decode()}"
@@ -594,7 +795,8 @@ sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
                     pass
 
     def cleanup(self) -> None:
-        """Clean up the session's virtual environment."""
+        """Clean up the session's virtual environment and temp directory."""
+        # Clean up venv
         if os.path.exists(self.venv_path):
             try:
                 shutil.rmtree(self.venv_path)
@@ -602,23 +804,54 @@ sys.stdout.buffer.write(pickle.dumps((_new_state, None)))
             except Exception as e:
                 logger.warning(f"Failed to cleanup venv: {e}")
 
+        # Clean up session temp directory
+        if os.path.exists(self.session_temp_path):
+            try:
+                shutil.rmtree(self.session_temp_path)
+                logger.info(f"Cleaned up session temp at {self.session_temp_path}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup session temp: {e}")
 
-# Session executor cache
+
+# Session executor cache with thread-safe access
 _executor_cache: Dict[str, VenvStackExecutor] = {}
+_executor_cache_lock = threading.Lock()
 
 
 def get_or_create_executor(session_id: str, workspace_path: str) -> VenvStackExecutor:
-    """Get or create an executor for a session."""
-    if session_id not in _executor_cache:
-        _executor_cache[session_id] = VenvStackExecutor(session_id, workspace_path)
-    return _executor_cache[session_id]
+    """Get or create an executor for a session (thread-safe).
+
+    Args:
+        session_id: Session identifier (will be sanitized)
+        workspace_path: Directory the code is allowed to access
+
+    Returns:
+        VenvStackExecutor instance for the session
+    """
+    # Sanitize session_id to get the key that VenvStackExecutor will use
+    sanitized_id = _sanitize_session_id(session_id)
+
+    with _executor_cache_lock:
+        if sanitized_id not in _executor_cache:
+            _executor_cache[sanitized_id] = VenvStackExecutor(
+                session_id, workspace_path
+            )
+        return _executor_cache[sanitized_id]
 
 
 def cleanup_executor(session_id: str) -> None:
-    """Clean up and remove an executor from the cache."""
-    if session_id in _executor_cache:
-        _executor_cache[session_id].cleanup()
-        del _executor_cache[session_id]
+    """Clean up and remove an executor from the cache (thread-safe).
+
+    Args:
+        session_id: Session identifier (will be sanitized)
+    """
+    # Sanitize session_id to match the key in cache
+    sanitized_id = _sanitize_session_id(session_id)
+
+    with _executor_cache_lock:
+        if sanitized_id in _executor_cache:
+            _executor_cache[sanitized_id].cleanup()
+            del _executor_cache[sanitized_id]
 
 
 def execute_sandboxed_venvstack(

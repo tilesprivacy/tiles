@@ -5,6 +5,12 @@
 ;; Template variables (replaced at runtime):
 ;;   ${VENV_PATH} - Path to the session's virtual environment
 ;;   ${WORKSPACE_PATH} - Path to the user's workspace directory
+;;   ${SESSION_TEMP_PATH} - Session-specific temp directory
+;;
+;; Security Notes:
+;; - All paths are validated before substitution to prevent injection
+;; - Network access is completely denied
+;; - File access is restricted to session-specific directories
 
 (version 1)
 
@@ -37,10 +43,10 @@
     (subpath "${WORKSPACE_PATH}")
 )
 
-;; Allow temporary file operations
+;; Allow temporary file operations ONLY in the session-specific temp directory
+;; This prevents cross-session data exposure
 (allow file-read* file-write*
-    (subpath "/private/var/folders")
-    (subpath "/tmp")
+    (subpath "${SESSION_TEMP_PATH}")
 )
 
 ;; Allow process execution for Python
