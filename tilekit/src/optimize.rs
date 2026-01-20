@@ -112,67 +112,47 @@ impl Evaluator for PromptOptimizerModule {
     }
 }
 
-pub async fn optimize(modelfile_path: String, data_path: Option<String>, model: String) {
+pub async fn optimize(
+    modelfile_path: String,
+    data_path: Option<String>,
+    model: String,
+) -> Result<Modelfile, String> {
     println!("Optimizing Modelfile: {}", modelfile_path);
 
     // 1. Read Modelfile
-    let content = match fs::read_to_string(&modelfile_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading Modelfile: {}", e);
-            return;
-        }
-    };
+    let content = fs::read_to_string(&modelfile_path)
+        .map_err(|e| format!("Error reading Modelfile: {}", e))?;
 
-    let mut modelfile: Modelfile = match content.parse() {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Error parsing Modelfile: {}", e);
-            return;
-        }
-    };
+    let mut modelfile: Modelfile = content
+        .parse()
+        .map_err(|e| format!("Error parsing Modelfile: {}", e))?;
 
     let system_prompt = modelfile.system.clone().unwrap_or_default();
     if system_prompt.trim().is_empty() {
-        eprintln!(
-            "Error: The Modelfile has an empty SYSTEM prompt. Optimization requires a starting prompt to understand the task objective."
+        return Err(
+            "Error: The Modelfile has an empty SYSTEM prompt. Optimization requires a starting prompt to understand the task objective.".to_string()
         );
-        return;
     }
     println!("Current SYSTEM prompt: \"{}\"", system_prompt);
 
     // 2. Configure DSRs
-    let lm = match LM::builder().model(model).build().await {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!(
-                "Error configuring LM: {}. Make sure appropriate API keys are set.",
-                e
-            );
-            return;
-        }
-    };
+    let lm = LM::builder().model(model).build().await.map_err(|e| {
+        format!(
+            "Error configuring LM: {}. Make sure appropriate API keys are set.",
+            e
+        )
+    })?;
 
     configure(lm, ChatAdapter);
 
     // 3. Load or Generate Training Data
     let examples = if let Some(path) = data_path {
         println!("Loading training data from: {}", path);
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Error reading data file {}: {}", path, e);
-                return;
-            }
-        };
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("Error reading data file {}: {}", path, e))?;
 
-        let data: Vec<TrainingExample> = match serde_json::from_str(&content) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("Error parsing data file {}: {}", path, e);
-                return;
-            }
-        };
+        let data: Vec<TrainingExample> = serde_json::from_str(&content)
+            .map_err(|e| format!("Error parsing data file {}: {}", path, e))?;
 
         data.into_iter()
             .map(|e| {
@@ -184,18 +164,13 @@ pub async fn optimize(modelfile_path: String, data_path: Option<String>, model: 
             .collect()
     } else {
         println!("No training data provided. Generating synthetic examples...");
-        match generate_synthetic_examples(&system_prompt).await {
-            Ok(exs) => exs,
-            Err(e) => {
-                eprintln!("Failed to generate synthetic examples: {}", e);
-                return;
-            }
-        }
+        generate_synthetic_examples(&system_prompt)
+            .await
+            .map_err(|e| format!("Failed to generate synthetic examples: {}", e))?
     };
 
     if examples.is_empty() {
-        println!("No training examples available. Cannot optimize effectively.");
-        return;
+        return Err("No training examples available. Cannot optimize effectively.".to_string());
     }
 
     // 4. Run COPRO Optimizer
@@ -205,13 +180,12 @@ pub async fn optimize(modelfile_path: String, data_path: Option<String>, model: 
     );
 
     let mut sig = SystemPromptSignature::new();
-    if let Err(e) = sig.update_instruction(system_prompt.clone()) {
-        eprintln!(
+    sig.update_instruction(system_prompt.clone()).map_err(|e| {
+        format!(
             "Error setting initial system prompt: {}. Prompt: \"{}\"",
             e, system_prompt
-        );
-        return;
-    }
+        )
+    })?;
 
     let mut module = PromptOptimizerModule::builder()
         .predictor(Predict::new(sig))
@@ -219,13 +193,10 @@ pub async fn optimize(modelfile_path: String, data_path: Option<String>, model: 
 
     let optimizer = COPRO::builder().breadth(5).depth(2).build();
 
-    match optimizer.compile(&mut module, examples).await {
-        Ok(_) => println!("Optimization process completed successfully."),
-        Err(e) => {
-            eprintln!("Optimization failed: {}", e);
-            return;
-        }
-    };
+    optimizer
+        .compile(&mut module, examples)
+        .await
+        .map_err(|e| format!("Optimization failed: {}", e))?;
 
     let optimized_instructions = module.predictor.get_signature().instruction();
     println!("Optimization complete!");
@@ -234,10 +205,38 @@ pub async fn optimize(modelfile_path: String, data_path: Option<String>, model: 
     // 5. Update Modelfile
     let _ = modelfile.add_system(&optimized_instructions);
 
-    match fs::write(&modelfile_path, modelfile.to_string()) {
-        Ok(_) => println!("Successfully updated {}", modelfile_path),
-        Err(e) => eprintln!("Error writing Modelfile: {}", e),
-    }
+    Ok(modelfile)
+}
+
+async fn generate_synthetic_examples(system_prompt: &str) -> anyhow::Result<Vec<Example>> {
+    let predictor = Predict::new(SyntheticDataSignature::new());
+    let input = example! {
+        "system_prompt": "input" => system_prompt.to_string(),
+    };
+
+    let prediction = predictor.forward(input).await?;
+    let field = prediction.get("synthetic_data", None);
+    let synthetic_json = field.as_str().unwrap_or("");
+
+    // Clean up potential markdown formatting
+    let clean_json = synthetic_json
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    let data: Vec<TrainingExample> = serde_json::from_str(clean_json)?;
+
+    Ok(data
+        .into_iter()
+        .map(|e| {
+            example! {
+                "user_input": "input" => e.input,
+                "ai_response": "output" => e.output,
+            }
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -287,35 +286,85 @@ mod tests {
         let score = module.metric(&example, &prediction).await;
         assert!(score >= 0.3);
     }
-}
 
-async fn generate_synthetic_examples(system_prompt: &str) -> anyhow::Result<Vec<Example>> {
-    let predictor = Predict::new(SyntheticDataSignature::new());
-    let input = example! {
-        "system_prompt": "input" => system_prompt.to_string(),
-    };
+    #[tokio::test]
+    async fn test_metric_empty_response() {
+        let module = PromptOptimizerModule::builder().build();
+        let example = example! {
+            "ai_response" : "output" => "Hello world",
+        };
+        let mut data = HashMap::new();
+        data.insert("ai_response".to_string(), "".into());
+        let prediction = Prediction::new(data, LmUsage::default());
 
-    let prediction = predictor.forward(input).await?;
-    let field = prediction.get("synthetic_data", None);
-    let synthetic_json = field.as_str().unwrap_or("");
+        let score = module.metric(&example, &prediction).await;
+        assert!(score == 0.0);
+    }
 
-    // Clean up potential markdown formatting
-    let clean_json = synthetic_json
-        .trim()
-        .trim_start_matches("```json")
-        .trim_start_matches("```")
-        .trim_end_matches("```")
-        .trim();
+    #[tokio::test]
+    async fn test_metric_partial_match() {
+        let module = PromptOptimizerModule::builder().build();
+        let example = example! {
+            "ai_response" : "output" => "Hello world how are you",
+        };
+        let mut data = HashMap::new();
+        data.insert("ai_response".to_string(), "Hello world".into());
+        let prediction = Prediction::new(data, LmUsage::default());
 
-    let data: Vec<TrainingExample> = serde_json::from_str(clean_json)?;
+        let score = module.metric(&example, &prediction).await;
+        // Partial match should score between 0 and exact match
+        assert!(score > 0.0 && score < 0.6);
+    }
 
-    Ok(data
-        .into_iter()
-        .map(|e| {
-            example! {
-                "user_input": "input" => e.input,
-                "ai_response": "output" => e.output,
-            }
-        })
-        .collect())
+    #[tokio::test]
+    async fn test_metric_structure_bonus() {
+        let module = PromptOptimizerModule::builder().build();
+        let example = example! {
+            "ai_response" : "output" => "test",
+        };
+        let mut data = HashMap::new();
+        data.insert(
+            "ai_response".to_string(),
+            "Line 1\nLine 2\n- bullet point".into(),
+        );
+        let prediction = Prediction::new(data, LmUsage::default());
+
+        let score = module.metric(&example, &prediction).await;
+        // Should get structure bonus for newlines and bullet points
+        assert!(score >= 0.2);
+    }
+
+    #[tokio::test]
+    async fn test_optimize_missing_file() {
+        let result = optimize(
+            "nonexistent_file.modelfile".to_string(),
+            None,
+            "openai:gpt-4o-mini".to_string(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Error reading Modelfile"));
+    }
+
+    #[tokio::test]
+    async fn test_optimize_empty_system_prompt() {
+        // Create a temp file with no system prompt
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_empty_system.modelfile");
+        std::fs::write(&temp_file, "FROM llama3.2\n").unwrap();
+
+        let result = optimize(
+            temp_file.to_string_lossy().to_string(),
+            None,
+            "openai:gpt-4o-mini".to_string(),
+        )
+        .await;
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("empty SYSTEM prompt"));
+    }
 }

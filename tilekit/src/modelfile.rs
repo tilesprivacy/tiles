@@ -168,11 +168,7 @@ impl Modelfile {
 
     pub fn add_system(&mut self, value: &str) -> Result<(), String> {
         self.system = Some(value.to_owned());
-        let formatted = if value.contains('"') {
-            format!("SYSTEM \"\"\"{}\"\"\"", value)
-        } else {
-            format!("SYSTEM \"{}\"", value)
-        };
+        let formatted = format!("SYSTEM {}", value);
 
         // Find and replace or add to data
         let mut found = false;
