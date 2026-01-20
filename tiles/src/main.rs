@@ -116,13 +116,11 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             modelfile_path,
             data,
             model,
-        } => match commands::optimize(modelfile_path.clone(), data, model).await {
-            Ok(modelfile) => match std::fs::write(&modelfile_path, modelfile.to_string()) {
-                Ok(_) => println!("Successfully updated {}", modelfile_path),
-                Err(e) => eprintln!("Error writing Modelfile: {}", e),
-            },
-            Err(e) => eprintln!("{}", e),
-        },
+        } => {
+            let modelfile = commands::optimize(modelfile_path.clone(), data, model).await?;
+            std::fs::write(&modelfile_path, modelfile.to_string())?;
+            println!("Successfully updated {}", modelfile_path);
+        }
     }
     Ok(())
 }
