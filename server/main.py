@@ -15,9 +15,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("app")
 
-import sys
-print("\n".join(sys.path))
-
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     try:

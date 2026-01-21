@@ -6,7 +6,7 @@ This guide will help you set up a reproducible development environment for Tiles
 
 - [Rust & Cargo](https://www.rust-lang.org/tools/install)
 - [`just`](https://github.com/casey/just) (for task management)
-- [Python 3.8+](https://www.python.org/downloads/)
+- [Python 3.13](https://www.python.org/downloads/)
 - [`uv`](https://docs.astral.sh/uv/) (for fast Python dependency management)
 - [Git](https://git-scm.com/)
 
@@ -68,10 +68,29 @@ Open two terminal windows:
    From the root directory:
 
    ```sh
-   cargo run --manifest-path tiles/Cargo.toml
+   cargo run
+
    ```
 
 > **Tip:** Refer to the `justfile` for additional common commands and automation. For troubleshooting, see [CONTRIBUTING.md](CONTRIBUTING.md) and open an issue if you need help.
+
+### Building Tiles installer (Development)
+
+Install [venvstacks](https://github.com/lmstudio-ai/venvstacks?tab=readme-ov-file#installing) for portable py runtime
+
+From the project root do,
+
+```sh
+just bundle # Creates the compressed zip in dist/
+```
+
+Set the `ENV` in install.sh to `dev`
+
+```sh
+just install
+```
+
+Now `tiles` should be available in PATH
 
 ## Additional Resources
 
