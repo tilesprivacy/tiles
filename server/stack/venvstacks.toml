@@ -1,0 +1,38 @@
+[[runtimes]]
+name = "cpython3.13"
+python_implementation = "cpython@3.13.11"
+requirements = []
+platforms = [
+    "macosx_arm64",
+    "linux_x86_64",
+]
+
+
+[[frameworks]]
+name = "mlx"
+runtime = "cpython3.13"
+linux_target = "glibc@2.35"
+macosx_target = "14"
+requirements = [
+    "mlx==0.29.3"
+]
+
+[[applications]]
+name = "server"
+launch_module = "../main.py"
+frameworks = ["mlx"]
+requirements = [
+    "fastapi==0.119.0",
+    "uvicorn==0.38.0",
+    "mlx-lm==0.28.3",
+    "black==25.9.0",
+    "huggingface-hub==0.35.0",
+    
+]
+
+[tool.uv]
+# Only resolve for the relevant target platforms
+environments = [
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]

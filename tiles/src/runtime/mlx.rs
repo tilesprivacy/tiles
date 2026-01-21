@@ -82,7 +82,7 @@ impl MLXRuntime {
 
         let stdout_log = File::create(config_dir.join("server.out.log"))?;
         let stderr_log = File::create(config_dir.join("server.err.log"))?;
-        let server_path = server_dir.join(".venv/bin/python3");
+        let server_path = server_dir.join("stack_export_prod/app-server/bin/python");
         server_dir.pop();
         let child = Command::new(server_path)
             .args(["-m", "server.main"])

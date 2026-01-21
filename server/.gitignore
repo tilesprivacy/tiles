@@ -2,3 +2,6 @@ __pycache__/
 *.egg-info/
 .venv/
 backend/__pycache__
+stack/_build
+stack/stack_export
+stack_export_prod

@@ -57,7 +57,6 @@ async def create_chat_completion(request: ChatCompletionRequest):
     """Create a chat completion."""
     global _messages, _memory_path
     try:
-
         if request.stream:
             result = ({}, "")
             if request.python_code:

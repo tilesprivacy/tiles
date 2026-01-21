@@ -1,2 +1,4 @@
 /target
 .tiles_dev
+dist/
+stack_export_prod/
