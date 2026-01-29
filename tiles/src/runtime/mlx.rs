@@ -14,6 +14,7 @@ use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs;
 use std::fs::File;
@@ -23,6 +24,15 @@ use std::time::Duration;
 use std::{io, process::Command};
 use tilekit::modelfile::Modelfile;
 use tokio::time::sleep;
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct BenchmarkMetrics {
+    ttft_ms: f64,
+    total_tokens: i32,
+    tokens_per_second: f64,
+    total_latency_s: f64,
+}
+
 pub struct MLXRuntime {}
 
 impl MLXRuntime {}
@@ -30,6 +40,7 @@ pub struct ChatResponse {
     // think: String,
     reply: String,
     code: String,
+    metrics: Option<BenchmarkMetrics>,
 }
 
 impl Default for MLXRuntime {
@@ -413,6 +424,21 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
                         } else {
                             println!("\n");
                         }
+                        // Display benchmark metrics if available
+                        if let Some(metrics) = response.metrics {
+                            println!(
+                                "{}",
+                                format!(
+                                    "\n{} {:.1} tok/s | {} tokens | {:.0}ms TTFT",
+                                    "💡".yellow(),
+                                    metrics.tokens_per_second,
+                                    metrics.total_tokens,
+                                    metrics.ttft_ms
+                                )
+                                .dimmed()
+                            );
+                        }
+
                         break;
                     }
                 } else {
@@ -505,6 +531,7 @@ async fn chat(
     let mut stream = res.bytes_stream();
     let mut accumulated = String::new();
     println!();
+    let mut metrics: Option<BenchmarkMetrics> = None;
     let mut is_answer_start = false;
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.unwrap();
@@ -517,10 +544,19 @@ async fn chat(
             let data = line.trim_start_matches("data: ");
 
             if data == "[DONE]" {
-                return Ok(convert_to_chat_response(&accumulated, run_args.memory));
+                return Ok(convert_to_chat_response(
+                    &accumulated,
+                    run_args.memory,
+                    metrics,
+                ));
             }
+
             // Parse JSON
             let v: Value = serde_json::from_str(data).unwrap();
+            // Check for metrics in the response
+            if let Some(metrics_obj) = v.get("metrics") {
+                metrics = serde_json::from_value(metrics_obj.clone()).ok();
+            }
             if let Some(delta) = v["choices"][0]["delta"]["content"].as_str() {
                 accumulated.push_str(delta);
                 if !run_args.memory && delta.contains("**[Answer]**") {
@@ -539,10 +575,15 @@ async fn chat(
     Err(String::from("request failed"))
 }
 
-fn convert_to_chat_response(content: &str, memory_mode: bool) -> ChatResponse {
+fn convert_to_chat_response(
+    content: &str,
+    memory_mode: bool,
+    metrics: Option<BenchmarkMetrics>,
+) -> ChatResponse {
     ChatResponse {
         reply: extract_reply(content, memory_mode),
         code: extract_python(content),
+        metrics,
     }
 }
 
