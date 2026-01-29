@@ -33,6 +33,17 @@ pub struct BenchmarkMetrics {
     total_latency_s: f64,
 }
 
+impl BenchmarkMetrics {
+    fn update(&mut self, metrics: BenchmarkMetrics) -> &Self {
+        if self.ttft_ms == 0.0 {
+            self.ttft_ms += metrics.ttft_ms;
+        }
+        self.total_tokens += metrics.total_tokens;
+        self.tokens_per_second += metrics.tokens_per_second;
+        self.total_latency_s += metrics.total_latency_s;
+        self
+    }
+}
 pub struct MLXRuntime {}
 
 impl MLXRuntime {}
@@ -399,6 +410,12 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
         }
         let mut remaining_count = run_args.relay_count;
         let mut python_code: String = "".to_owned();
+        let mut bench_metrics: BenchmarkMetrics = BenchmarkMetrics {
+            ttft_ms: 0.0,
+            total_tokens: 0,
+            tokens_per_second: 0.0,
+            total_latency_s: 0.0,
+        };
         loop {
             if remaining_count > 0 {
                 let chat_start = remaining_count == run_args.relay_count;
@@ -416,6 +433,9 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
                         if !response.code.is_empty() {
                             python_code = response.code;
                         }
+                        if let Some(metrics) = response.metrics {
+                            bench_metrics.update(metrics);
+                        }
                         remaining_count -= 1;
                     } else {
                         g_reply = response.reply.clone();
@@ -426,14 +446,16 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
                         }
                         // Display benchmark metrics if available
                         if let Some(metrics) = response.metrics {
+                            bench_metrics.update(metrics);
                             println!(
                                 "{}",
                                 format!(
                                     "\n{} {:.1} tok/s | {} tokens | {:.0}ms TTFT",
                                     "💡".yellow(),
-                                    metrics.tokens_per_second,
-                                    metrics.total_tokens,
-                                    metrics.ttft_ms
+                                    bench_metrics.total_tokens
+                                        / bench_metrics.total_latency_s as i32,
+                                    bench_metrics.total_tokens,
+                                    bench_metrics.ttft_ms
                                 )
                                 .dimmed()
                             );
