@@ -170,7 +170,7 @@ async def generate_chat_stream(
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
 
-       # Include benchmarking metrics if available
+    # Include benchmarking metrics if available
     if metrics:
         final_response["metrics"] = {
             "ttft_ms": metrics.ttft_ms,
@@ -178,7 +178,6 @@ async def generate_chat_stream(
             "tokens_per_second": metrics.tokens_per_second,
             "total_latency_s": metrics.total_latency_s,
         }
-    print(f"data: {json.dumps(final_response)}")
     yield f"data: {json.dumps(final_response)}\n\n"
     yield "data: [DONE]\n\n"
 

@@ -452,8 +452,8 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
                                 format!(
                                     "\n{} {:.1} tok/s | {} tokens | {:.0}ms TTFT",
                                     "💡".yellow(),
-                                    bench_metrics.total_tokens
-                                        / bench_metrics.total_latency_s as i32,
+                                    bench_metrics.total_tokens as f64
+                                        / bench_metrics.total_latency_s,
                                     bench_metrics.total_tokens,
                                     bench_metrics.ttft_ms
                                 )
