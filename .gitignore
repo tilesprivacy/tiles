@@ -2,3 +2,6 @@
 .tiles_dev
 dist/
 stack_export_prod/
+*.profraw
+tilekit/target
+tiles/target
