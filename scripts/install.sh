@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ENV="dev" # prod is another env, try taking it from github env
-REPO="tilesprivacy/tiles" 
-# VERSION="${TILES_VERSION:-latest}"       
-VERSION="0.4.1"       
+ENV="prod" # prod is another env, try taking it from github env
+REPO="tilesprivacy/tiles"
+# VERSION="${TILES_VERSION:-latest}"
+VERSION="0.4.1"
 INSTALL_DIR="$HOME/.local/bin"           # CLI install location
 SERVER_DIR="$HOME/.local/lib/tiles/server"         # Python server folder
 MODELFILE_DIR="$HOME/.local/lib/tiles/modelfiles"  # Python server folder
@@ -15,6 +15,9 @@ ARCH=$(uname -m)
 
 log() { echo -e "\033[1;36m$*\033[0m"; }
 err() { echo -e "\033[1;31m$*\033[0m" >&2; exit 1; }
+warn() {
+  printf "\033[1;33m%s\033[0m\n" "$*"
+}
 
 log "⬇️  Downloading Tiles (${VERSION}) for ${ARCH}-${OS}..."
 
@@ -24,7 +27,7 @@ if [[ "$ENV" == "prod" ]]; then
   curl -fL -o "${TMPDIR}/tiles.tar.gz" "$TAR_URL"
 else
   # Installer suppose to ran from tiles root folder after running the bundler
-  mv "dist/tiles-v${VERSION}-${ARCH}-${OS}.tar.gz" "${TMPDIR}/tiles.tar.gz" 
+  mv "dist/tiles-v${VERSION}-${ARCH}-${OS}.tar.gz" "${TMPDIR}/tiles.tar.gz"
 fi
 
 echo "⬇️ Installing tiles..."
@@ -66,4 +69,19 @@ rm -rf "${TMPDIR}"
 
 log "✅ Tiles installed successfully!"
 log ""
-log "👉 Make sure ${INSTALL_DIR} is in your PATH."
+
+case ":$PATH:" in
+  *":$INSTALL_DIR:"*)
+    echo "🚀 Start Tiles by running \"tiles\""
+    ;;
+  *)
+    echo ""
+    warn "⚠️  $INSTALL_DIR is not in your PATH."
+    echo ""
+    echo "ℹ️  To use Tiles, add this line to your shell configuration(ex: ~/.bashrc, ~/.zsrhc)"
+    echo ""
+    echo "  export PATH=$INSTALL_DIR:\$PATH\""
+    echo ""
+    echo "🚀 Then restart your terminal..."
+    ;;
+esac
