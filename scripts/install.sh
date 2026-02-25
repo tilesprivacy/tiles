@@ -78,9 +78,9 @@ case ":$PATH:" in
     echo ""
     warn "⚠️  $INSTALL_DIR is not in your PATH."
     echo ""
-    echo "ℹ️  To use Tiles, add this line to your shell configuration(ex: ~/.bashrc, ~/.zsrhc)"
+    echo "ℹ️  To use Tiles, add this line to your shell configuration(ex: ~/.bashrc, ~/.zshrc)"
     echo ""
-    echo "  export PATH=$INSTALL_DIR:\$PATH\""
+    echo "  export PATH=$INSTALL_DIR:\$PATH"
     echo ""
     echo "🚀 Then restart your terminal..."
     ;;
