@@ -278,7 +278,7 @@ pub fn run_account_commands(account_args: AccountArgs) -> Result<()> {
             if root_user_details.id.is_empty() {
                 println!("{}", get_account_not_created_msg());
             } else {
-                match set_nickname(&config, nickname) {
+                match set_nickname(&config, &nickname) {
                     Ok(root_user_config) => {
                         let id = root_user_config.get("id").unwrap().as_str().unwrap();
                         let nickname = root_user_config.get("nickname").unwrap().as_str().unwrap();

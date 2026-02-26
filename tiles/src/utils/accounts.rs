@@ -7,6 +7,7 @@ use toml::Table;
 use crate::utils::config::save_config;
 const ROOT_USER_CONFIG_KEY: &str = "root-user";
 
+const ROOT_PARSE_ERROR: &str = "Failed to parse root user config";
 #[allow(dead_code)]
 pub struct RootUser {
     pub id: String,
@@ -56,7 +57,7 @@ impl RootUser {
 pub fn get_root_user_details(config: &Table) -> Result<RootUser> {
     let root_user = config
         .get(ROOT_USER_CONFIG_KEY)
-        .ok_or_else(|| anyhow!("root-user key not found"))?;
+        .ok_or_else(|| anyhow!(ROOT_PARSE_ERROR))?;
     let root_user_table = root_user
         .as_table()
         .ok_or_else(|| anyhow!("root user not a table"))?;
@@ -78,7 +79,7 @@ pub fn create_root_account(config: &Table, nickname: Option<String>) -> Result<T
         .ok_or_else(|| anyhow!("{} doesn't exist", ROOT_USER_CONFIG_KEY))?;
     let root_user_table = root_user
         .as_table()
-        .ok_or_else(|| anyhow!("Failed to parse root user info"))?;
+        .ok_or_else(|| anyhow!(ROOT_PARSE_ERROR))?;
     let root_user_data = RootUser::new(root_user_table)?;
     let did = root_user_data.id;
     if did.is_empty() {
@@ -110,15 +111,27 @@ pub fn save_root_account(mut config: Table, root_user_config: &Table) -> Result<
 /// - nickname: Nickname for the identity
 ///
 /// Returns the root_user_config as a `Table` type
-pub fn set_nickname(config: &Table, nickname: String) -> Result<Table> {
-    let root_user = config.get(ROOT_USER_CONFIG_KEY).unwrap();
-    let mut root_user_table = root_user.as_table().unwrap().clone();
-    let did = root_user_table.get("id").unwrap().as_str().unwrap();
+pub fn set_nickname(config: &Table, nickname: &str) -> Result<Table> {
+    let root_user = config
+        .get(ROOT_USER_CONFIG_KEY)
+        .ok_or_else(|| anyhow!("{} doesn't exist", ROOT_USER_CONFIG_KEY))?;
+
+    let mut root_user_table = root_user
+        .as_table()
+        .ok_or_else(|| anyhow!(ROOT_PARSE_ERROR))?
+        .clone();
+    let did = root_user_table
+        .get("id")
+        .and_then(|v| v.as_str())
+        .ok_or(anyhow!("Failed to get id from config"))?;
     if did.is_empty() {
         Err(anyhow::anyhow!("No Root user available"))
     } else {
         root_user_table.insert("id".to_owned(), toml::Value::String(did.to_owned()));
-        root_user_table.insert("nickname".to_owned(), toml::Value::String(nickname));
+        root_user_table.insert(
+            "nickname".to_owned(),
+            toml::Value::String(nickname.to_owned()),
+        );
         Ok(root_user_table)
     }
 }
@@ -143,7 +156,9 @@ mod tests {
     use keyring::{mock, set_default_credential_builder};
     use toml::Table;
 
-    use crate::utils::accounts::{create_root_account, get_root_user_details};
+    use crate::utils::accounts::{
+        RootUser, create_root_account, get_root_user_details, set_nickname,
+    };
 
     #[test]
     fn test_get_root_user_details_empty_id() -> Result<()> {
@@ -252,5 +267,65 @@ mod tests {
             root_user.get("nickname").unwrap().as_str().unwrap(),
             "madclaws"
         );
+    }
+
+    #[test]
+    fn test_get_root_user_details_missing_key() {
+        let config: Table = toml::from_str(
+            r#"
+                # no root-user table
+                [other]
+                foo = "bar"
+            "#,
+        )
+        .unwrap();
+
+        let res = get_root_user_details(&config);
+        assert!(res.is_err(), "Expected error when root-user key is missing");
+    }
+
+    #[test]
+    fn test_root_user_new_wrong_types() {
+        // id is integer, nickname is table
+        let config: Table = toml::from_str(
+            r#"
+                [root-user]
+                id = 123
+                nickname = { nested = "value" }
+            "#,
+        )
+        .unwrap();
+
+        let root_tbl = config.get("root-user").unwrap().as_table().unwrap().clone();
+        assert!(
+            RootUser::new(&root_tbl).is_err(),
+            "Expected error for wrong types"
+        );
+    }
+
+    #[test]
+    fn test_root_user_roundtrip_table() -> Result<()> {
+        let user = RootUser {
+            id: "did:key:abc".into(),
+            nickname: "nick".into(),
+        };
+        let tbl = user.to_table();
+        let parsed = RootUser::new(&tbl)?;
+        assert_eq!(parsed.id, user.id);
+        assert_eq!(parsed.nickname, user.nickname);
+        Ok(())
+    }
+
+    #[test]
+    fn test_set_nickname_but_invalid_config() {
+        let config: Table = toml::from_str(
+            r#"
+                [ruser]
+                id = ''
+            "#,
+        )
+        .unwrap();
+
+        assert!(set_nickname(&config, "madclaws").is_err())
     }
 }
