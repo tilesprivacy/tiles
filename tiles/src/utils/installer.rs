@@ -36,7 +36,11 @@ pub async fn try_update(update_info: Option<UpdateInfo>) -> Result<String> {
     };
 
     if !app_update_info.can_update {
-        Ok("Already latest version".to_owned())
+        let msg = format!(
+            "You are up to date, current version: {}",
+            app_update_info.current_version
+        );
+        Ok(msg)
     } else {
         let mut curl_process = Command::new("curl")
             .arg("-fsSL")

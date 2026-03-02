@@ -351,7 +351,7 @@ mod tests {
         assert_eq!(FTUE_DATA_DIR_CHANGE_HINT, "Change data path later:");
         assert_eq!(
             FTUE_CUSTOM_DATA_PROMPT,
-            "Use a custom data directory now? [Y/N]"
+            "Use a custom data directory now? [y/N]"
         );
     }
 

@@ -240,7 +240,7 @@ async fn run_model_with_server(
 }
 
 async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArgs) {
-    println!("Running in interactive mode");
+    println!("Running {} in interactive mode", modelname);
 
     let config = Config::builder().auto_add_history(true).build();
     let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config).unwrap();

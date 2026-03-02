@@ -170,7 +170,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             commands::run_account_commands(account_args)?;
         }
         Some(Commands::Update) => {
-            println!("trying to update tiles");
+            println!("Checking for updates...");
             let res = installer::try_update(None).await?;
             println!("{}", res);
         }
