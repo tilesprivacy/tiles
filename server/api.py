@@ -86,7 +86,7 @@ async def create_chat_completion(request: ChatCompletionRequest):
 @app.post("/v1/responses")
 async def create_chat_response(request: ResponsesRequest):
     """
-    Create a response with openResponse format
+    Create a response with openResponses format
     """
 
     if request.stream:

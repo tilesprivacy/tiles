@@ -438,10 +438,10 @@ async fn chat(
             "role": "developer",
             "content": ""
         }],
-        "reasoning": {"effort": "medium"},
+        "reasoning": {"effort": "low"},
         "chat_start": chat_start,
         "stream": true,
-        "previous_response_id": prev_response_id,
+        // "previous_response_id": prev_response_id,
         "python_code": python_code,
         "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
     });
@@ -466,7 +466,6 @@ async fn chat(
     let chat = save_chat(conn, user, input, None)?;
     let mut stream = res.bytes_stream();
     let mut accumulated = String::new();
-    println!();
     let mut metrics: Option<BenchmarkMetrics> = None;
     let mut is_answer_start = false;
     let mut prev_response_id: String = String::from("");
@@ -515,7 +514,6 @@ async fn chat(
 
             if let Some(delta) = model_text {
                 if !run_args.memory {
-                    // TODO: This doesn't support non-harmonic models, so need to handle it
                     if delta.contains("**[Answer]**") {
                         is_answer_start = true
                     }

@@ -32,7 +32,6 @@ pub fn save_chat(
     chat_resp: Option<&ChatResponse>,
 ) -> Result<Chats> {
     if let Some(chat_response) = chat_resp {
-        // Unwrapping here, cuz we are pretty sure this has Some
         let chat_resp_cloned = chat_response.clone();
         let chat = Chats {
             id: Uuid::now_v7(),

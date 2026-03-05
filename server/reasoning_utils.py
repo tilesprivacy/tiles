@@ -62,6 +62,8 @@ class ReasoningExtractor:
             return "gpt-oss"
         elif "deepseek" in model_lower and "r1" in model_lower:
             return "deepseek"
+        elif "qwen" in model_lower:
+            return "deepseek"
         elif "claude" in model_lower:
             return "claude"
         elif "qwq" in model_lower:
