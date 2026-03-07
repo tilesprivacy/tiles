@@ -11,6 +11,14 @@ use rusqlite::Connection;
 use tilekit::modelfile::Role;
 use uuid::Uuid;
 // model the chats table
+
+#[derive(serde::Serialize, Clone, Debug)]
+pub struct Message {
+    pub r#type: String,
+    pub role: Role,
+    pub content: String,
+}
+
 pub struct Chats {
     pub id: Uuid,
     content: String,

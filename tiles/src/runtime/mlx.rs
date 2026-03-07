@@ -1,5 +1,5 @@
 use crate::core::accounts::{User, get_current_user};
-use crate::core::chats::save_chat;
+use crate::core::chats::{Message, save_chat};
 use crate::core::storage::db::get_db_conn;
 use crate::runtime::RunArgs;
 use crate::utils::config::{ConfigProvider, DefaultProvider, get_memory_path};
@@ -23,6 +23,7 @@ use std::process::Command;
 use std::process::Stdio;
 use std::time::Duration;
 use tilekit::modelfile::Modelfile;
+use tilekit::modelfile::Role;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -239,15 +240,23 @@ async fn run_model_with_server(
     }
     // loading the model from mem-agent via daemon server
     let memory_path = get_memory_path().context("Setting/Retrieving memory_path failed")?;
-    let modelname = modelfile.from.as_ref().unwrap();
     match load_model(&modelfile, &default_modelfile, &memory_path).await {
-        Ok(_) => start_repl(mlx_runtime, modelname, run_args).await?,
+        Ok(_) => start_repl(mlx_runtime, &modelfile, run_args).await?,
         Err(err) => return Err(anyhow::anyhow!(err)),
     }
     Ok(())
 }
 
-async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArgs) -> Result<()> {
+async fn start_repl(
+    mlx_runtime: &MLXRuntime,
+    modelfile: &Modelfile,
+    run_args: &RunArgs,
+) -> Result<()> {
+    let modelname = modelfile
+        .from
+        .clone()
+        .ok_or_else(|| anyhow!("Error getting FROM from modelfile due to"))?;
+
     println!("Running {} in interactive mode", modelname);
     let common_db_conn = get_db_conn(crate::core::storage::db::DBTYPE::COMMON)?;
     let chat_db_conn = get_db_conn(crate::core::storage::db::DBTYPE::CHAT)?;
@@ -259,6 +268,7 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
     let mut g_reply: String = "".to_owned();
     let mut prev_response_id: String = String::from("");
 
+    let mut conversations: Vec<Message> = vec![];
     loop {
         let readline = editor.readline(">>> ");
         let input = match readline {
@@ -273,7 +283,7 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
             }
         };
 
-        match handle_slash_command(&input, modelname) {
+        match handle_slash_command(&input, modelname.as_str()) {
             SlashCommand::Continue => continue,
             SlashCommand::Exit => {
                 println!("Exiting interactive mode");
@@ -302,7 +312,7 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
 
                 match chat(
                     &input,
-                    modelname,
+                    modelfile,
                     chat_start,
                     &python_code,
                     &g_reply,
@@ -310,6 +320,7 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
                     &prev_response_id,
                     &chat_db_conn,
                     &current_user,
+                    &conversations,
                 )
                 .await
                 {
@@ -327,9 +338,21 @@ async fn start_repl(mlx_runtime: &MLXRuntime, modelname: &str, run_args: &RunArg
                             if run_args.memory {
                                 println!("\n{}", response.reply.trim());
                             } else {
-                                prev_response_id = response.prev_response_id;
+                                prev_response_id = response.prev_response_id.clone();
                                 println!("\n");
                             }
+                            conversations.push(Message {
+                                r#type: String::from("message"),
+                                role: Role::User,
+                                content: input,
+                            });
+                            conversations.push(Message {
+                                r#type: String::from("message"),
+                                role: Role::Assistant,
+                                content: g_reply.clone(),
+                            });
+
+                            save_chat(&chat_db_conn, &current_user, &g_reply, Some(&response))?;
                             // Display benchmark metrics if available
                             if let Some(metrics) = response.metrics {
                                 bench_metrics.update(metrics);
@@ -413,10 +436,11 @@ async fn load_model(
     }
 }
 
+//TODO: Have 2 separate chat functions for memory and non-memory
 #[allow(clippy::too_many_arguments)]
 async fn chat(
     input: &str,
-    model_name: &str,
+    modelfile: &Modelfile,
     chat_start: bool,
     python_code: &str,
     g_reply: &str,
@@ -424,30 +448,31 @@ async fn chat(
     prev_response_id: &str,
     conn: &Connection,
     user: &User,
+    conversations: &[Message],
 ) -> Result<ChatResponse> {
     let client = Client::new();
+    let modelname = modelfile
+        .from
+        .clone()
+        .ok_or_else(|| anyhow!("Failed to get model name"))?;
+    let prompt = modelfile
+        .system
+        .clone()
+        .ok_or_else(|| anyhow!("Failed to get system prompt"))?;
+    let convo_input = create_chat_input(input, prompt.as_str(), conversations);
     let body = json!({
-        "model": model_name,
-        "input": [{
-            "type": "message",
-            "role": "user",
-            "content": input
-        },
-        {
-            "type": "message",
-            "role": "developer",
-            "content": ""
-        }],
-        "reasoning": {"effort": "low"},
+        "model": modelname,
+        "input": convo_input,
+        "reasoning": {"effort": "medium"},
         "chat_start": chat_start,
         "stream": true,
-        // "previous_response_id": prev_response_id,
+        "previous_response_id": prev_response_id,
         "python_code": python_code,
         "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
     });
 
     let memory_body = json!({
-        "model": model_name,
+        "model": modelname,
         "input": input,
         "chat_start": chat_start,
         "stream": true,
@@ -488,7 +513,6 @@ async fn chat(
                     metrics,
                 );
                 chat_resp.parent_chat_id = Some(chat.id);
-                save_chat(conn, user, &accumulated, Some(&chat_resp))?;
                 return Ok(chat_resp);
             }
 
@@ -596,5 +620,35 @@ fn get_default_modelfile(memory_mode: bool) -> Result<PathBuf> {
     } else {
         let path = DefaultProvider.get_lib_dir()?.join("modelfiles/gpt-oss");
         Ok(path)
+    }
+}
+
+fn create_chat_input(input: &str, prompt: &str, conversations: &[Message]) -> Vec<Message> {
+    let dev_msg = Message {
+        r#type: "message".to_owned(),
+        role: Role::Developer,
+        content: String::from(prompt),
+    };
+
+    let input = Message {
+        r#type: "message".to_owned(),
+        role: Role::User,
+        content: String::from(input),
+    };
+
+    let last_n = if conversations.len() < 10 {
+        conversations
+    } else {
+        &conversations[conversations.len() - 10..]
+    };
+
+    if !conversations.is_empty() {
+        let mut convo: Vec<Message> = vec![];
+        convo.push(dev_msg);
+        convo.append(&mut last_n.to_vec());
+        convo.push(input);
+        convo
+    } else {
+        vec![dev_msg, input]
     }
 }

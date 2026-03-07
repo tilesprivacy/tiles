@@ -38,11 +38,13 @@ impl Display for ParamValue {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
     User,
     Assistant,
+    Developer,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +79,7 @@ impl From<Role> for String {
             Role::System => "system".to_owned(),
             Role::User => "user".to_owned(),
             Role::Assistant => "assistant".to_owned(),
+            Role::Developer => "developer".to_owned(),
         }
     }
 }

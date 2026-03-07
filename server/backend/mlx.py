@@ -13,7 +13,7 @@ from openai_harmony import (
     Role,
     SystemContent,
 )
-from openresponses_types import ReasoningEffortEnum
+from openresponses_types import AssistantMessageItemParam, ReasoningEffortEnum
 from openresponses_types.types import (
     DeveloperMessageItemParam,
     Error,
@@ -295,22 +295,15 @@ def count_tokens(text: str) -> int:
 
 
 def handle_response_input(request: ResponsesRequest):
-    dev_msg_item = None
     user_msg_item = None
     user_input_content = ""
+
     if isinstance(request.input, str):
         user_input_content = request.input
     else:
-        for item in request.input:
-            match item:
-                case UserMessageItemParam():
-                    user_msg_item = item
-                    user_input_content = item.content.root  # pyright: ignore
-                case DeveloperMessageItemParam():
-                    dev_msg_item = item
-                case _:
-                    raise TypeError("unknown type")
-    return [user_input_content, user_msg_item, dev_msg_item]
+        user_msg_item = request.input[-1]
+        user_input_content = user_msg_item.content.root
+    return user_input_content
 
 
 async def generate_response_chat_stream(
@@ -324,18 +317,13 @@ async def generate_response_chat_stream(
 
     user_input_content = ""
     convo: Conversation | None = None
-    dev_msg_item = None
-    user_msg_item = None
-    [user_input_content, user_msg_item, dev_msg_item] = handle_response_input(request)
-    user_input_content = _prepend_previous_response(
-        user_input_content, request.previous_response_id
-    )
+    user_input_content = handle_response_input(request)
     if is_harmony_family(model):
 
         reasoning_effort = get_reasoning_effort(request.reasoning.effort)
 
         convo = build_harmony_conversation(
-            reasoning_effort, dev_msg_item, user_input_content
+            reasoning_effort, request.input  # pyright: ignore
         )
 
     input_tokens = len(runner.tokenizer.encode(user_input_content))  # pyright: ignore
@@ -366,8 +354,9 @@ async def generate_response_chat_stream(
     error = None
     incomplete_details = None
     has_answer_started: bool = False
-    # TODO: we need to inject the context prepending, else model is losing it.
     try:
+
+        # TODO: Add the turn convo context for non-harmony models too
         iterator: Iterator | None = None
         if is_harmony_family(model):
             iterator = runner.generate_streaming_gpt(
@@ -506,33 +495,38 @@ async def generate_response_chat(request: ResponsesRequest):
 
     user_input_content = ""
 
-    dev_msg_item = None
-    user_msg_item = None
-    [user_input_content, user_msg_item, dev_msg_item] = handle_response_input(request)
-    user_input_content = _prepend_previous_response(
-        user_input_content, request.previous_response_id
-    )
+    user_input_content = handle_response_input(request)
 
     reasoning_effort = get_reasoning_effort(request.reasoning.effort)
-
-    convo = build_harmony_conversation(
-        reasoning_effort, dev_msg_item, user_input_content
-    )
+    convo: Conversation | None = None
+    if is_harmony_family(model):
+        convo = build_harmony_conversation(
+            reasoning_effort, request.input  # pyright: ignore
+        )
 
     metrics_obj = None
     error = None
     incomplete_details = None
 
     try:
+        generated_text = ""
         start_time = time.time()
-        generated_text = runner.generate_batch_gpt(
-            conversation=convo,
-            max_tokens=runner.get_effective_max_tokens(request.max_output_tokens),
-            temperature=request.temperature or 1,
-            top_p=request.top_p or 1,
-            use_chat_template=True,
-        )
-
+        if is_harmony_family(model):
+            runner.generate_batch_gpt(
+                conversation=convo,  # pyright: ignore
+                max_tokens=runner.get_effective_max_tokens(request.max_output_tokens),
+                temperature=request.temperature or 1,
+                top_p=request.top_p or 1,
+                use_chat_template=True,
+            )
+        else:
+            runner.generate_batch(
+                prompt=user_input_content,  # pyright: ignore
+                max_tokens=runner.get_effective_max_tokens(request.max_output_tokens),
+                temperature=request.temperature or 1,
+                top_p=request.top_p or 1,
+                use_chat_template=True,
+            )
         # Metrics for batch generation (approximate)
         generation_time = time.time() - start_time
 
@@ -610,23 +604,41 @@ def get_reasoning_effort(reasoning_effort_enum: ReasoningEffortEnum | None):
 
 def build_harmony_conversation(
     reasoning_effort: ReasoningEffort,
-    dev_msg_item: DeveloperMessageItemParam | None,
-    user_input: str,
+    convos: list,
 ):
-    system_message = SystemContent.new().with_reasoning_effort(reasoning_effort)
-    dev_message: DeveloperContent = DeveloperContent.new()
-    if isinstance(dev_msg_item, DeveloperMessageItemParam):
-        dev_message = DeveloperContent.new().with_instructions(
-            dev_msg_item.content.root
-        )  # pyright: ignore
 
-    convo = Conversation.from_messages(
-        [
-            Message.from_role_and_content(Role.SYSTEM, system_message),
-            Message.from_role_and_content(Role.DEVELOPER, dev_message),
-            Message.from_role_and_content(Role.USER, user_input),
-        ]
-    )
+    convo_list = [
+        Message.from_role_and_content(
+            Role.SYSTEM, SystemContent.new().with_reasoning_effort(reasoning_effort)
+        )
+    ]
+    for item in convos:
+        match item:
+            case UserMessageItemParam():
+                convo_list.append(
+                    Message.from_role_and_content(
+                        Role.USER, item.content.root
+                    )  # pyright: ignore
+                )
+            case DeveloperMessageItemParam():
+                convo_list.append(
+                    Message.from_role_and_content(
+                        Role.DEVELOPER,
+                        DeveloperContent.new().with_instructions(
+                            item.content.root
+                        ),  # pyright: ignore                    )
+                    )
+                )
+            case AssistantMessageItemParam():
+                convo_list.append(
+                    Message.from_role_and_content(
+                        Role.ASSISTANT, item.content.root
+                    )  # pyright: ignore
+                )
+            case _:
+                raise TypeError("unknown type")
+
+    convo = Conversation.from_messages(convo_list)
     return convo
 
 
