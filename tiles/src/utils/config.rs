@@ -9,7 +9,7 @@
 ///     - /logs
 ///     - /data (default, user can change this location tho)
 ///         - /memory (memory stored as PKM)
-/// - ~/.local/lib/tiles (lib dir) - Some internal App files, libraries etc go here..
+/// - /usr/local/share/tiles (lib dir) - Some internal App files, libraries etc go here..
 ///     - /modelfiles
 ///     - /server
 use anyhow::{Context, Result, anyhow};
@@ -117,8 +117,7 @@ impl ConfigProvider for DefaultProvider {
             let base_dir = env::current_dir().context("Failed to fetch CURRENT_DIR")?;
             Ok(base_dir)
         } else {
-            let home_dir = env::home_dir().context("Failed to fetch $HOME")?;
-            let data_dir = home_dir.join(".local/lib");
+            let data_dir = PathBuf::from_str("/usr/local/share")?;
             Ok(data_dir.join("tiles"))
         }
     }

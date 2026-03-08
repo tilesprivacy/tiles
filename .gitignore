@@ -6,3 +6,5 @@ stack_export_prod/
 tilekit/target
 tiles/target
 .DS_Store
+pkgroot/
+*.pkg

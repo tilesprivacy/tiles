@@ -455,10 +455,7 @@ async fn chat(
         .from
         .clone()
         .ok_or_else(|| anyhow!("Failed to get model name"))?;
-    let prompt = modelfile
-        .system
-        .clone()
-        .ok_or_else(|| anyhow!("Failed to get system prompt"))?;
+    let prompt = modelfile.system.clone().unwrap_or("".to_owned());
     let convo_input = create_chat_input(input, prompt.as_str(), conversations);
     let body = json!({
         "model": modelname,

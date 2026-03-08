@@ -1,0 +1,17 @@
+#!/bin/bash
+
+SERVER_DIR="/usr/local/share/tiles/server"
+
+echo "🔧 Setting up Python environment..."
+
+cd "${SERVER_DIR}/stack_export_prod" || exit 1
+
+for f in *.tar.xz; do
+  tar -xvf "$f"
+done
+
+rm -f *.tar.xz
+
+./cpython3.13/bin/python cpython3.13/postinstall.py
+./framework-mlx/bin/python framework-mlx/postinstall.py
+./app-server/bin/python app-server/postinstall.py

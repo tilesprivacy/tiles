@@ -20,3 +20,6 @@ bundle:
 
 install:
     ./scripts/install.sh
+
+bundle_pkg:
+    ./pkg/build.sh
