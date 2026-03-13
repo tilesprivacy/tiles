@@ -27,3 +27,4 @@ tempfile = "3"
 keyring = { version = "3", features = ["apple-native"] }
 wiremock = "0.6.5"
 async-std = { version = "1.12", features = ["attributes"] }
+serial_test = "3.4.0"

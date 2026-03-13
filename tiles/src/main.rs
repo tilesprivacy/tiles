@@ -2,7 +2,7 @@ use std::error::Error;
 
 use clap::{Args, Parser, Subcommand};
 use tiles::{
-    daemon::{start_cmd, stop_cmd},
+    daemon::{start_cmd, start_server, stop_cmd},
     runtime::{RunArgs, build_runtime},
     utils::installer,
 };
@@ -155,10 +155,11 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
             let _ = commands::try_app_update().await;
 
-            // trying to run the tiles daemon in background
-            //TODO: Run this as an async process tokio::spawn
+            // trying to run the tiles daemon in background concurrently
             if !cfg!(debug_assertions) {
-                let _ = start_cmd().await;
+                tokio::spawn(async move {
+                    let _ = start_cmd().await;
+                });
             }
 
             commands::run(&runtime, run_args)
@@ -216,7 +217,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("{:?}", e))
                 .inspect(|_| println!("Daemon stopped successfully"))?,
-            _ => start_cmd().await?,
+            _ => start_server().await?,
         },
     }
     Ok(())

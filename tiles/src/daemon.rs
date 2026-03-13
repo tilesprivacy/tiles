@@ -38,7 +38,6 @@ async fn root() -> &'static str {
 // running in background and have commands to stop if needed
 #[allow(clippy::zombie_processes)]
 async fn start_daemon() -> Result<()> {
-    tokio::time::sleep(Duration::from_secs(5)).await;
     if (ping().await).is_ok() {
         return Ok(());
     }
@@ -51,6 +50,7 @@ async fn start_daemon() -> Result<()> {
         .create(true)
         .append(true)
         .open(data_dir.join("logs/daemon.err.log"))?;
+    // let _process = Command::new("target/debug/tiles")
     let _process = Command::new("tiles")
         .arg("daemon")
         .stdin(Stdio::null())
@@ -129,8 +129,44 @@ async fn wait_until_server_is_up() -> Result<()> {
             Err(err) => {
                 retry_count -= 1;
                 error = err;
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use serial_test::serial;
+
+    use crate::daemon::{ping, start_server, stop_server, wait_until_server_is_up};
+
+    #[tokio::test]
+    #[serial]
+    async fn test_sever_process_started_not_server() -> Result<()> {
+        tokio::spawn(async move {
+            let _ = start_server().await;
+        });
+        assert!(ping().await.is_err());
+        stop_server().await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn test_sever_process_and_server_started() -> Result<()> {
+        tokio::spawn(async move {
+            let _ = start_server().await;
+        });
+        wait_until_server_is_up().await?;
+        assert!(ping().await.is_ok());
+
+        stop_server().await
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn stop_server_but_server_not_up() {
+        assert!(stop_server().await.is_err())
     }
 }
