@@ -2,9 +2,11 @@ use std::error::Error;
 
 use clap::{Args, Parser, Subcommand};
 use tiles::{
+    daemon::{start_cmd, stop_cmd},
     runtime::{RunArgs, build_runtime},
     utils::installer,
 };
+
 mod commands;
 #[derive(Debug, Parser)]
 #[command(name = "tiles")]
@@ -55,6 +57,9 @@ enum Commands {
 
     /// Update Tiles to latest version
     Update,
+
+    /// Daemon configurations
+    Daemon(DaemonArgs),
 }
 
 #[derive(Debug, Args)]
@@ -118,6 +123,22 @@ enum AccountCommands {
     SetNickname { nickname: String },
 }
 
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct DaemonArgs {
+    #[command(subcommand)]
+    command: Option<DaemonCommands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum DaemonCommands {
+    /// Start the daemon
+    Start,
+
+    /// Stops the daemon
+    Stop,
+}
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
@@ -133,6 +154,13 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             commands::run_setup_for_ftue(&run_args)
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
             let _ = commands::try_app_update().await;
+
+            // trying to run the tiles daemon in background
+            //TODO: Run this as an async process tokio::spawn
+            if !cfg!(debug_assertions) {
+                let _ = start_cmd().await;
+            }
+
             commands::run(&runtime, run_args)
                 .await
                 .inspect_err(|e| eprintln!("Tiles failed to run due to {:?}", e))?;
@@ -180,6 +208,16 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .inspect_err(|e| eprintln!("Failed in update process due to {:?}", e))?;
             println!("{}", res);
         }
+        Some(Commands::Daemon(daemon_args)) => match daemon_args.command {
+            Some(DaemonCommands::Start) => start_cmd()
+                .await
+                .inspect_err(|e| eprintln!("Daemon starting failed, reason: {:?}", e))?,
+            Some(DaemonCommands::Stop) => stop_cmd()
+                .await
+                .inspect_err(|e| eprintln!("{:?}", e))
+                .inspect(|_| println!("Daemon stopped successfully"))?,
+            _ => start_cmd().await?,
+        },
     }
     Ok(())
 }

@@ -8,3 +8,4 @@ tiles/target
 .DS_Store
 pkgroot/
 *.pkg
+pkgroot_models/

@@ -20,6 +20,7 @@ semver = "1.0"
 rusqlite = { version = "0.38.0", features = ["bundled"] }
 rusqlite_migration = "2.4.1"
 uuid = {version = "1.21.0", features = ["v7"]}
+axum = "0.8.8"
 
 [dev-dependencies]
 tempfile = "3"
