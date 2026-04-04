@@ -39,6 +39,9 @@ mkdir -p "${DIST_DIR}/tmp"
 
 cp "${CLI_BIN_PATH}"  "${DIST_DIR}/tmp/"
 
+# copying pi binary
+cp pi-darwin-arm64.tar.gz "${DIST_DIR}/tmp/"
+
 # flushing this folder, else the final zip will have previous app-server zips too (#84)
 rm -rf "${SERVER_DIR}/stack_export_prod"
 

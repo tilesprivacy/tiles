@@ -2,8 +2,9 @@ import logging
 import sys
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 
 from . import runtime
@@ -77,6 +78,14 @@ async def create_chat_completion(request: ChatCompletionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors()},
+    )
+
+
 @app.post("/v1/responses")
 async def create_chat_response(request: ResponsesRequest):
     """
@@ -87,7 +96,7 @@ async def create_chat_response(request: ResponsesRequest):
         return StreamingResponse(
             runtime.backend.generate_response_chat_stream(request),
             media_type="text/plain",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "no-cache", "Content-Type": "text/event-stream"},
         )
     else:
         return await runtime.backend.generate_response_chat(request)

@@ -9,6 +9,7 @@ pub struct RunArgs {
     pub modelfile_path: Option<String>,
     pub relay_count: u32,
     pub memory: bool, // Future flags go here
+    pub pi: bool,
 }
 
 pub enum Runtime {

@@ -32,4 +32,8 @@ bundle_pkg_full:
     ./pkg/build.sh
     ./pkg/build_full.sh
 
+build_w_pi:
+    ./scripts/build_with_pi_dev.sh
+
+    
 # runtiles: RUST_LOG=tiles=info,iroh=off cargo run

@@ -9,7 +9,7 @@ use tiles::{
         network::{link, sync},
     },
     daemon::{start_cmd, start_server, stop_cmd},
-    runtime::{RunArgs, build_runtime},
+    runtime::{RunArgs, build_runtime, mlx::start_pi_rpc},
     utils::installer,
 };
 
@@ -77,6 +77,7 @@ enum Commands {
         /// The DID of the peer you want to sync
         did: Option<String>,
     },
+    Pi,
 }
 
 #[derive(Debug, Args)]
@@ -95,6 +96,10 @@ struct RunFlags {
     // Don't go into the repl
     #[arg(short = 'x', long)]
     no_repl: bool,
+
+    // Use PI repl instead of Tiles
+    #[arg(short = 'p', long)]
+    pi: bool,
 }
 
 #[derive(Debug, Args)]
@@ -197,6 +202,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 modelfile_path: None,
                 relay_count: cli.flags.relay_count,
                 memory: cli.flags.memory,
+                pi: cli.flags.pi,
             };
 
             commands::run_setup_for_ftue(&run_args)
@@ -204,11 +210,12 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             let _ = commands::try_app_update().await;
 
             // trying to run the tiles daemon in background concurrently
-            if !cfg!(debug_assertions) {
-                tokio::spawn(async move {
-                    let _ = start_cmd(None).await;
-                });
-            }
+            // if !cfg!(debug_assertions) {
+            let t = tokio::spawn(async move {
+                let _ = start_cmd(None).await;
+            });
+            t.await?;
+            // }
             core::init_account(&db_conn)
                 .inspect_err(|e| eprintln!("Tiles core init failed due to {:?}", e))?;
             if !cli.flags.no_repl {
@@ -225,7 +232,15 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 modelfile_path,
                 relay_count: flags.relay_count,
                 memory: flags.memory,
+                pi: flags.pi,
             };
+            commands::run_setup_for_ftue(&run_args)
+                .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
+
+            let t = tokio::spawn(async move {
+                let _ = start_cmd(None).await;
+            });
+            t.await?;
             core::init_account(&db_conn)
                 .inspect_err(|e| eprintln!("Tiles core init failed due to {:?}", e))?;
             commands::run(&runtime, run_args, &db_conn)
@@ -280,6 +295,10 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         Some(Commands::Sync { did }) => sync(did).await?,
+        Some(Commands::Pi) => {
+            // blah
+            start_pi_rpc()?;
+        }
     }
     Ok(())
 }

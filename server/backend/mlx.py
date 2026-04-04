@@ -4,7 +4,7 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from fastapi import HTTPException
+from fastapi import HTTPException, requests
 from openai_harmony import (
     Conversation,
     DeveloperContent,
@@ -13,7 +13,11 @@ from openai_harmony import (
     Role,
     SystemContent,
 )
-from openresponses_types import AssistantMessageItemParam, ReasoningEffortEnum
+from openresponses_types import (
+    AssistantMessageItemParam,
+    ReasoningEffortEnum,
+    SystemMessageItemParam,
+)
 from openresponses_types.types import (
     DeveloperMessageItemParam,
     Error,
@@ -32,6 +36,10 @@ from ..schemas import (
     ResponsesResponse,
 )
 from .mlx_runner import MLXRunner
+
+import httpx
+
+client = httpx.AsyncClient()
 
 logger = logging.getLogger("app")
 
@@ -65,11 +73,6 @@ def get_or_load_model(
                 finally:
                     _model_cache.clear()
 
-            # Load new model
-            if verbose:
-                print(f"Loading model: {model_name}")
-
-            logger.info(f"Loading model: {model_name}")
             runner = MLXRunner(model_path_str, verbose=verbose)
             runner.load_model()
 
@@ -280,17 +283,31 @@ def handle_response_input(request: ResponsesRequest):
         user_input_content = request.input
     else:
         user_msg_item = request.input[-1]
-        user_input_content = user_msg_item.content.root
+        if isinstance(user_msg_item.content, list):
+            user_input_content = user_msg_item.content[0].text
+        else:
+            user_input_content = user_msg_item.content.root
     return user_input_content
 
 
+# TODO: Please refactor for Deus sake
 async def generate_response_chat_stream(
     request: ResponsesRequest,
 ) -> AsyncGenerator[str, None]:
     """Generate streaming chat responses for OpenResponses API."""
     model = request.model
     created = int(time.time())
-    runner = get_or_load_model(model, None)
+    response = await client.get(
+        f"http://127.0.0.1:1729/model-cache-path?model_name={model}"
+    )
+
+    model_cache_path = None
+    if response.status_code == 200:
+        model_cache_path = response.text
+    else:
+        raise HTTPException(status_code=500, detail="Model not found")
+
+    runner = get_or_load_model(model, model_cache_path)
     metrics = None
 
     user_input_content = ""
@@ -306,25 +323,65 @@ async def generate_response_chat_stream(
 
     input_tokens = len(runner.tokenizer.encode(user_input_content))  # pyright: ignore
 
-    # Initial chunk
+    response_id = f"resp_{uuid.uuid4()}"
+    message_id = f"msg_{uuid.uuid4()}"
+    sequence_number = 0
+
     initial_chunk = {
-        "id": f"resp_{uuid.uuid4()}",
-        "object": "response.chunk",
+        "id": response_id,
+        "object": "response",
         "created_at": created,
         "model": model,
         "status": "in_progress",
         "output": [
             {
                 "type": "message",
-                "id": f"msg_{uuid.uuid4()}",
+                "id": message_id,
                 "status": "in_progress",
                 "role": "assistant",
                 "content": [],
             }
         ],
-        "usage": {"input_tokens": input_tokens, "output_tokens": 0},
+        "incomplete_details": {"reason": ""},
+        "previous_response_id": request.previous_response_id,
+        "instructions": request.instructions,
+        "temperature": request.temperature,
+        "prompt_cache_key": request.prompt_cache,
+        "safety_identifier": request.safety_identifier,
+        "service_tier": request.service_tier,
+        "background": request.background,
+        "store": request.store,
+        "max_tool_calls": request.max_tool_calls,
+        "max_output_tokens": request.max_output_tokens,
+        # input and output token details are 0, since we dont do cache now or
+        # i dont know, how to do cache too
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": 0,
+            "total_tokens": input_tokens,
+            "input_tokens_details": 0,
+            "output_tokens_details": 0,
+        },
+        "reasoning": {"effort": "medium", "summary": "auto"},
+        "top_logprobs": request.top_logprobs,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+        "top_p": request.top_p,
+        "text": {"format": {"type": "text"}, "verbosity": "low"},
+        "paralell_tool_calls": 0,
+        "truncation": "disabled",
+        "tool_choice": "auto",
+        "tools": [{"name": "", "type": "function"}],
+        "error": {"code": "", "message": ""},
     }
-    yield f"data: {json.dumps(initial_chunk)}\n\n"
+    event = {
+        "type": "response.created",
+        "sequence_number": sequence_number,
+        "response": initial_chunk,
+    }
+    sequence_number += 1
+    yield "event: response.created\n"
+    yield f"data: {json.dumps(event)}\n\n"
 
     accumulated_text = ""
     answer_text = ""
@@ -332,6 +389,9 @@ async def generate_response_chat_stream(
     error = None
     incomplete_details = None
     has_answer_started: bool = False
+    output_index = 0
+    item_id = f"item_{uuid.uuid4()}"
+    content_index = 0
     try:
 
         # TODO: Add the turn convo context for non-harmony models too
@@ -365,38 +425,56 @@ async def generate_response_chat_stream(
             accumulated_text += token
             output_tokens += 1  # Each yield is one token
 
-            chunk = {
-                "id": f"resp_{uuid.uuid4()}",
-                "object": "response.chunk",
-                "created_at": created,
-                "model": model,
-                "status": "in_progress",
-                "output": [
-                    {
-                        "type": "message",
-                        "id": f"msg_{uuid.uuid4()}",
-                        "status": "in_progress",
-                        "role": "assistant",
-                        "content": [
-                            {
-                                "type": "output_text",
-                                "text": token,
-                                "annotations": [],
-                            }
-                        ],
-                    }
-                ],
-                "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+            event_name = ""
+            item_chunk = {}
+            if sequence_number == 1:
+                event_name = "response.output_item.added"
+                item_chunk = {
+                    "type": "message",
+                    "id": message_id,
+                    "status": "in_progress",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": token,
+                            "annotations": [],
+                        }
+                    ],
+                }
+                event = {
+                    "type": f"{event_name}",
+                    "sequence_number": sequence_number,
+                    "output_index": output_index,
+                    "item": item_chunk,
+                }
+                yield f"event: {event_name}\n"
+                yield f"data: {json.dumps(event)}\n\n"
+
+            event_name = "response.output_text.delta"
+            event = {
+                "type": f"{event_name}",
+                "sequence_number": sequence_number,
+                "output_index": output_index,
+                "item_id": message_id,
+                "delta": token,
+                "content_index": content_index,
             }
-            yield f"data: {json.dumps(chunk)}\n\n"
+
+            sequence_number += 1
+            content_index += 1
+            # print(event)
+            yield f"event: {event_name}\n"
+            yield f"data: {json.dumps(event)}\n\n"
 
     except Exception as e:
         error = {"message": str(e), "code": "500"}
         incomplete_details = {"reason": "internal server error"}
 
+        # TODO: fix error response acc to the standard
         error_chunk = {
-            "id": f"resp_{uuid.uuid4()}",
-            "object": "response.chunk",
+            "id": response_id,
+            "object": "response",
             "created_at": created,
             "model": model,
             "status": "failed",
@@ -405,7 +483,10 @@ async def generate_response_chat_stream(
             "output": [],
             "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
         }
-        yield f"data: {json.dumps(error_chunk)}\n\n"
+        event = {"type": "error", "sequence_number": sequence_number, "error": error}
+        sequence_number += 1
+        yield "event: error\n"
+        yield f"data: {json.dumps(event)}\n\n"
         return
 
     # Final chunk
@@ -413,8 +494,8 @@ async def generate_response_chat_stream(
     # Build final chunk with accumulated text and store response for follow-ups
 
     final_chunk = {
-        "id": f"resp_{uuid.uuid4()}",
-        "object": "response.chunk",
+        "id": response_id,
+        "object": "response",
         "created_at": created,
         "completed_at": completed_at,
         "model": model,
@@ -422,7 +503,7 @@ async def generate_response_chat_stream(
         "output": [
             {
                 "type": "message",
-                "id": f"msg_{uuid.uuid4()}",
+                "id": message_id,
                 "status": "completed",
                 "role": "assistant",
                 "content": [
@@ -434,7 +515,37 @@ async def generate_response_chat_stream(
                 ],
             }
         ],
-        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+        "incomplete_details": {"reason": ""},
+        "previous_response_id": request.previous_response_id,
+        "instructions": request.instructions,
+        "temperature": request.temperature,
+        "prompt_cache_key": request.prompt_cache,
+        "safety_identifier": request.safety_identifier,
+        "service_tier": request.service_tier,
+        "background": request.background,
+        "store": request.store,
+        "max_tool_calls": request.max_tool_calls,
+        "max_output_tokens": request.max_output_tokens,
+        # input and output token details are 0, since we dont do cache now or
+        # i dont know, how to do cache too
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+            "input_tokens_details": 0,
+            "output_tokens_details": 0,
+        },
+        "reasoning": {"effort": "medium", "summary": "auto"},
+        "top_logprobs": request.top_logprobs,
+        "frequency_penalty": 0,
+        "presence_penalty": 0,
+        "top_p": request.top_p,
+        "text": {"format": {"type": "text"}, "verbosity": "low"},
+        "paralell_tool_calls": 0,
+        "truncation": "disabled",
+        "tool_choice": "auto",
+        "tools": [{"name": "", "type": "function"}],
+        "error": {"code": "", "message": ""},
     }
 
     # Store and return a typed ResponsesResponse for follow-ups
@@ -458,7 +569,24 @@ async def generate_response_chat_stream(
         usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
         metrics=metrics_obj,
     )
-    yield f"data: {json.dumps(final_chunk)}\n\n"
+    output_done_event = {
+        "type": "response.output_text.done",
+        "sequence_number": sequence_number,
+        "item_id": message_id,
+        "output_index": output_index,
+        "content_index": content_index,
+        "text": answer_text,
+    }
+    yield "event: response.output_text.done\n"
+    yield f"data: {json.dumps(output_done_event)}\n\n"
+    event = {
+        "type": "response.completed",
+        "sequence_number": sequence_number,
+        "response": final_chunk,
+    }
+    sequence_number += 1
+    yield "event: response.completed\n"
+    yield f"data: {json.dumps(event)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -591,12 +719,16 @@ def build_harmony_conversation(
         )
     ]
     for item in convos:
+        print(f"ITEM {item}")
         match item:
             case UserMessageItemParam():
+                content = ""
+                if isinstance(item.content, list):
+                    content = item.content[0].text
+                else:
+                    content = item.content.root
                 convo_list.append(
-                    Message.from_role_and_content(
-                        Role.USER, item.content.root
-                    )  # pyright: ignore
+                    Message.from_role_and_content(Role.USER, content)  # pyright: ignore
                 )
             case DeveloperMessageItemParam():
                 convo_list.append(
@@ -612,6 +744,10 @@ def build_harmony_conversation(
                     Message.from_role_and_content(
                         Role.ASSISTANT, item.content.root
                     )  # pyright: ignore
+                )
+            case SystemMessageItemParam():
+                convo_list.append(
+                    Message.from_role_and_content(Role.SYSTEM, item.content.root)
                 )
             case _:
                 raise TypeError("unknown type")

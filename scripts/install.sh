@@ -11,6 +11,8 @@ INSTALL_DIR="/usr/local/bin"           # CLI install location
 SERVER_DIR="/usr/local/share/tiles/server"         # Python server folder
 MODELFILE_DIR="/usr/local/share/tiles/modelfiles"  # Modelfile server folder
 
+PI_DIR="/usr/local/share/tiles/pi"
+
 TMPDIR="$(mktemp -d)"
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
@@ -47,6 +49,19 @@ rm -rf "${MODELFILE_DIR}"
 mkdir -p "${MODELFILE_DIR}"
 
 cp -r "${TMPDIR}/modelfiles"/* "${MODELFILE_DIR}/"
+
+
+log "Installing PI artifacts ..."
+
+rm -rf "${PI_DIR}"
+
+mkdir -p "${PI_DIR}"
+
+cp -r "${TMPDIR}/pi-darwin-arm64.tar.gz" "${PI_DIR}/"
+
+tar -xvf "${PI_DIR}/pi-darwin-arm64.tar.gz"
+
+rm "${PI_DIR}/pi-darwin-arm64.tar.gz"
 
 log "📦 Installing Python server to ${SERVER_DIR}..."
 rm -rf "${SERVER_DIR}"

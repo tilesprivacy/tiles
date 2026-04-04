@@ -2,7 +2,9 @@ use crate::core::accounts::{User, get_current_user};
 use crate::core::chats::{Message, save_chat};
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
-use crate::utils::config::{ConfigProvider, DefaultProvider, get_memory_path, get_model_cache};
+use crate::utils::config::{
+    ConfigProvider, DefaultProvider, get_memory_path, get_model_cache, update_current_model,
+};
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
@@ -18,9 +20,10 @@ use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::OpenOptions;
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Child, Command};
+use std::process::{ChildStdin, Stdio};
 use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
@@ -51,7 +54,7 @@ pub struct MLXRuntime {}
 
 impl MLXRuntime {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatResponse {
     // think: String,
     pub reply: String,
@@ -61,6 +64,24 @@ pub struct ChatResponse {
     pub metrics: Option<BenchmarkMetrics>,
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+struct PiResponse {
+    r#type: String,
+    command: String,
+    success: bool,
+    data: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct GetStateData {
+    model: Value,
+    #[serde(rename = "thinkingLevel")]
+    thinking_level: String,
+    #[serde(rename = "isStreaming")]
+    is_streaming: bool,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
 impl Default for MLXRuntime {
     fn default() -> Self {
         Self::new()
@@ -183,6 +204,7 @@ impl Helper for TilesHinter {}
 enum SlashCommand {
     Continue,
     Exit,
+    State,
     NotACommand,
 }
 
@@ -193,6 +215,7 @@ fn handle_slash_command(input: &str, modelname: &str) -> SlashCommand {
                 show_help(modelname);
                 SlashCommand::Continue
             }
+            "state" => SlashCommand::State,
             "bye" => SlashCommand::Exit,
             "" => {
                 println!("Empty command. Type /help for available commands.");
@@ -215,6 +238,7 @@ fn show_help(model_name: &str) {
     let _ = model_name;
 
     println!("Available Commands:");
+    println!("  /state      Show the current session state");
     println!("  /help       Show this help message");
     println!("  /bye        Exit the REPL");
     println!();
@@ -268,6 +292,10 @@ async fn start_repl(
     let mut prev_response_id: String = String::from("");
 
     let mut conversations: Vec<Message> = vec![];
+
+    let mut pi_process = start_pi_rpc()?;
+
+    let pi_stdin = pi_process.stdin.as_mut().unwrap();
     loop {
         let readline = editor.readline(">>> ");
         let input = match readline {
@@ -291,6 +319,9 @@ async fn start_repl(
                 }
                 break;
             }
+            SlashCommand::State => {
+                send_pi_command(pi_stdin, "e")?;
+            }
             SlashCommand::NotACommand => {}
         }
 
@@ -305,85 +336,108 @@ async fn start_repl(
             tokens_per_second: 0.0,
             total_latency_s: 0.0,
         };
-        loop {
-            if remaining_count > 0 {
-                let chat_start = remaining_count == run_args.relay_count;
 
-                match chat(
-                    &input,
-                    modelfile,
-                    chat_start,
-                    &python_code,
-                    &g_reply,
-                    run_args,
-                    &prev_response_id,
-                    &db_conn.chat,
-                    &current_user,
-                    &conversations,
-                )
-                .await
-                {
-                    Ok(response) => {
-                        if response.reply.is_empty() {
-                            if !response.code.is_empty() {
-                                python_code = response.code;
-                            }
-                            if let Some(metrics) = response.metrics {
-                                bench_metrics.update(metrics);
-                            }
-                            remaining_count -= 1;
-                        } else {
-                            g_reply = response.reply.clone();
-                            if run_args.memory {
-                                println!("\n{}", response.reply.trim());
-                            } else {
-                                prev_response_id = response.prev_response_id.clone();
-                                println!("\n");
-                            }
-                            conversations.push(Message {
-                                r#type: String::from("message"),
-                                role: Role::User,
-                                content: input,
-                            });
-                            conversations.push(Message {
-                                r#type: String::from("message"),
-                                role: Role::Assistant,
-                                content: g_reply.clone(),
-                            });
-
-                            save_chat(&db_conn.chat, &current_user, &g_reply, Some(&response))?;
-                            // Display benchmark metrics if available
-                            if let Some(metrics) = response.metrics {
-                                bench_metrics.update(metrics);
-                                println!(
-                                    "{}",
-                                    format!(
-                                        "\n{} {:.1} tok/s | {} tokens | {:.0}s TTFT",
-                                        "💡".yellow(),
-                                        bench_metrics.total_tokens as f64
-                                            / bench_metrics.total_latency_s,
-                                        bench_metrics.total_tokens,
-                                        bench_metrics.ttft_ms / 1000.0
-                                    )
-                                    .dimmed()
-                                );
-                            }
-
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        // if out of relay count, then clear the global_reply and ready for next fresh prompt
-                        println!("{:?}", err);
-                        g_reply.clear();
-                        break;
-                    }
+        let stdout = pi_process.stdout.take().expect("stdout");
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            let line = line.unwrap();
+            if let Some(pi_response) = serde_json::from_str::<PiResponse>(&line)?.into() {
+                if pi_response.command == "get_state" && pi_response.success {
+                    let data: GetStateData = serde_json::from_value(pi_response.data.unwrap())?;
+                    let render = format!(
+                        "Model: {}\n,thinking: {}\n, session_id: {}",
+                        data.model.get("name").unwrap(),
+                        data.thinking_level,
+                        data.session_id
+                    );
+                    println!("{}", render);
+                } else {
+                    println!("got line {}", line);
                 }
+                break;
+            } else {
+                break;
             }
         }
-        if g_reply.is_empty() {
-            println!("\nNo reply, try another prompt");
-        }
+        // loop {
+        //     if remaining_count > 0 {
+        //         let chat_start = remaining_count == run_args.relay_count;
+
+        //         match chat(
+        //             &input,
+        //             modelfile,
+        //             chat_start,
+        //             &python_code,
+        //             &g_reply,
+        //             run_args,
+        //             &prev_response_id,
+        //             &db_conn.chat,
+        //             &current_user,
+        //             &conversations,
+        //         )
+        //         .await
+        //         {
+        //             Ok(response) => {
+        //                 if response.reply.is_empty() {
+        //                     if !response.code.is_empty() {
+        //                         python_code = response.code;
+        //                     }
+        //                     if let Some(metrics) = response.metrics {
+        //                         bench_metrics.update(metrics);
+        //                     }
+        //                     remaining_count -= 1;
+        //                 } else {
+        //                     g_reply = response.reply.clone();
+        //                     if run_args.memory {
+        //                         println!("\n{}", response.reply.trim());
+        //                     } else {
+        //                         prev_response_id = response.prev_response_id.clone();
+        //                         println!("\n");
+        //                     }
+        //                     conversations.push(Message {
+        //                         r#type: String::from("message"),
+        //                         role: Role::User,
+        //                         content: input,
+        //                     });
+        //                     conversations.push(Message {
+        //                         r#type: String::from("message"),
+        //                         role: Role::Assistant,
+        //                         content: g_reply.clone(),
+        //                     });
+
+        //                     save_chat(&db_conn.chat, &current_user, &g_reply, Some(&response))?;
+        //                     // Display benchmark metrics if available
+        //                     if let Some(metrics) = response.metrics {
+        //                         bench_metrics.update(metrics);
+        //                         println!(
+        //                             "{}",
+        //                             format!(
+        //                                 "\n{} {:.1} tok/s | {} tokens | {:.0}s TTFT",
+        //                                 "💡".yellow(),
+        //                                 bench_metrics.total_tokens as f64
+        //                                     / bench_metrics.total_latency_s,
+        //                                 bench_metrics.total_tokens,
+        //                                 bench_metrics.ttft_ms / 1000.0
+        //                             )
+        //                             .dimmed()
+        //                         );
+        //                     }
+
+        //                     break;
+        //                 }
+        //             }
+        //             Err(err) => {
+        //                 // if out of relay count, then clear the global_reply and ready for next fresh prompt
+        //                 println!("{:?}", err);
+        //                 g_reply.clear();
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // }
+        // if g_reply.is_empty() {
+        //     println!("\nNo reply, try another prompt");
+        // }
     }
     Ok(())
 }
@@ -698,4 +752,41 @@ async fn download_model(model_name: &str) -> Result<()> {
         }
         Err(err) => Err(anyhow::anyhow!(format!("Download failed due to {:?}", err))),
     }
+}
+
+pub fn start_pi_rpc() -> Result<Child> {
+    let mut pi_dir = DefaultProvider.get_lib_dir()?;
+    let user_data_dir = DefaultProvider.get_user_data_dir()?;
+    let pi_agent_dir = user_data_dir.join("pi/agent");
+    std::fs::create_dir_all(&pi_agent_dir).context("Failed to create pi_agent_dir")?;
+    pi_dir = pi_dir.join("pi");
+    let pi_exec_path = pi_dir.join("pi");
+    let pi_process = Command::new(pi_exec_path)
+        .arg("--mode")
+        .arg("rpc")
+        .arg("--no-session")
+        .env("PI_CODING_AGENT_DIR", pi_agent_dir)
+        .env("PI_OFFLINE", "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to PI");
+
+    Ok(pi_process)
+}
+
+fn read_events(process: Child) {
+    for line in process.stdout.iter() {}
+}
+
+fn send_pi_command(pi_child_stdin: &mut ChildStdin, command: &str) -> Result<()> {
+    let payload = json!({
+        "type": "get_state"
+    });
+
+    let payload_str = format!("{}\n", serde_json::to_string(&payload)?);
+
+    pi_child_stdin.write_all(payload_str.as_bytes()).unwrap();
+    pi_child_stdin.flush()?;
+    Ok(())
 }

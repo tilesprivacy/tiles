@@ -16,7 +16,6 @@ use tiles::utils::config::{
 use tiles::utils::installer::{UpdateInfo, get_update_info, try_update};
 use tiles::{core::health, runtime::RunArgs};
 
-use tilekit::modelfile::parse_from_file;
 pub use tilekit::optimize::optimize;
 use toml::Table;
 
@@ -42,6 +41,27 @@ const FTUE_ASCII_ART: &str = r#"
                 ▓▓    ▓▓▓▒
                  ▓▓▓▓▓▓▓▓
 "#;
+
+// const FTUE_ASCII_ART_NEW: &str = r#"
+//                       ▃▅▆▆▇▇▇▇▆▇▇▇▆▆▆▆
+//                ░▅▆▆▇▆▇▇▇▇▇▇▇▆▆▆▆▇▇▇▇▆
+//         _▃▅▇▆▇▇▆▆▆▇▇▆▆▆▆▆▇▇▆▇▇▇▇▇▆▇▅
+//     ▃▆▇▆▇▇▇▆▆▆▆▆▅▆▇▆▇▇▇▇▇▆▆▆▆▆▃
+//     ▆▆▇▆▆▆▆▆▇▆▆▇▆▇▇▇▆▇▆▆▆▇▅
+//  ▂▆▆▇▇▇▇▇▇▇▇▇▆▆▆▇▇▇▇▇▇▇▇▁
+//      ▅▆▆▆▇▆▇▆▆▆▆▇▆▆▇▇▆▅
+//              ▆▇▇▇▇▇▆▇▇▅
+//             ▅▇▇▇▆▇▇▇▆
+//            ▆▆▇▇▇▇▇▇▆
+//           ▆▇▇▇▇▆▇▇▇
+//          ▆▇▇▇▆▆▆▆▇
+//         ▆▇▇▇▆▇▇▇▆
+//         ▂▇▇▇▆▇▇▆
+//          ▆▆▆▇▆▅
+//          ▁▆▇▆▅
+//           ▓▆▄
+
+// "#;
 const FTUE_REASSURANCE_LOCAL: &str = "On-device by default.";
 // const FTUE_REASSURANCE_NO_CLOUD: &str = "Online models and identity optional.";
 const FTUE_NICKNAME_PROMPT: &str = "Choose a username:";
@@ -56,7 +76,7 @@ const FTUE_DATA_DIR_CHANGE_COMMAND: &str = "tiles data set-path <PATH>";
 const FTUE_CUSTOM_DATA_PROMPT: &str = "Use a custom data directory now? [y/N]";
 const FTUE_UPDATE_COMMAND: &str = "tiles update";
 
-pub fn run_setup_for_ftue(run_args: &RunArgs) -> Result<()> {
+pub fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
     // initializes config directory
     let config_provider = DefaultProvider;
     config_provider.get_or_create_config_dir()?;
@@ -77,18 +97,16 @@ pub fn run_setup_for_ftue(run_args: &RunArgs) -> Result<()> {
         setup_root_account(root_config.clone())?;
         setup_default_user_data_dir(&config_provider)?
     } else {
-        print_runtime_context(run_args, &config_provider, &root_user_details)?;
+        print_runtime_context(&config_provider, &root_user_details)?;
     }
 
     Ok(())
 }
 
 fn print_runtime_context<T: ConfigProvider>(
-    run_args: &RunArgs,
     config_provider: &T,
     root_user_details: &RootUser,
 ) -> Result<()> {
-    let model_name = get_configured_model_name(run_args.memory, config_provider)?;
     let directory = config_provider
         .get_user_data_dir()
         .map(|path| path.display().to_string())?;
@@ -101,32 +119,10 @@ fn print_runtime_context<T: ConfigProvider>(
 
     println!("Account:");
     println!("  {} (DID: {})", nickname, root_user_details.id);
-    println!("Model:");
-    println!("  {}", model_name);
     println!("Directory:");
     println!("  {}", directory);
     println!();
     Ok(())
-}
-
-fn get_configured_model_name<T: ConfigProvider>(
-    memory_mode: bool,
-    config_provider: &T,
-) -> Result<String> {
-    let modelfile_path = if memory_mode {
-        config_provider.get_lib_dir()?.join("modelfiles/mem-agent")
-    } else {
-        config_provider.get_lib_dir()?.join("modelfiles/gpt-oss")
-    };
-
-    let modelfile_path_str = modelfile_path
-        .to_str()
-        .ok_or_else(|| anyhow!("Failed to parse modelfile path"))?;
-    let modelfile = parse_from_file(modelfile_path_str)
-        .map_err(|err| anyhow!("Failed to parse modelfile: {}", err))?;
-    modelfile
-        .from
-        .ok_or_else(|| anyhow!("Missing FROM in modelfile {}", modelfile_path.display()))
 }
 
 fn setup_root_account(root_config: Table) -> Result<()> {

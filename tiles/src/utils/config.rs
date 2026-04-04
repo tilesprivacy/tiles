@@ -14,12 +14,36 @@
 ///     - /server
 ///     - /models - Where the pre-downloaded models.
 use anyhow::{Context, Result, anyhow};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::SystemTime;
 use std::{env, fs};
 use toml::Table;
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ModelConfig {
+    pub current: String,
+}
+#[derive(Serialize, Deserialize, Debug)]
+struct RootUserConfig {
+    id: String,
+    nickname: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DataConfig {
+    path: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct RootConfig {
+    #[serde(rename = "root-user")]
+    pub root_user: Option<RootUserConfig>,
+    pub data: Option<DataConfig>,
+    pub model: Option<ModelConfig>,
+}
 
 const MODEL_SUB_PATH: &str = "models/huggingface/hub";
 pub trait ConfigProvider {
@@ -199,6 +223,8 @@ fn set_user_data_path_with_provider<P: ConfigProvider>(
     ))
 }
 
+// TODO: This fn is very rigid and should be eventually replaced by
+// `get_or_create_root_config`
 pub fn get_or_create_config() -> Result<Table> {
     let tiles_config_dir = DefaultProvider.get_config_dir()?;
     let config_toml_path = tiles_config_dir.join("config.toml");
@@ -225,6 +251,31 @@ pub fn get_or_create_config() -> Result<Table> {
     }
 }
 
+fn get_or_create_root_config() -> Result<RootConfig> {
+    let tiles_config_dir = DefaultProvider.get_config_dir()?;
+    let config_toml_path = tiles_config_dir.join("config.toml");
+
+    if config_toml_path
+        .try_exists()
+        .context("config.toml path doesn't exist")?
+    {
+        let config_str = fs::read_to_string(config_toml_path)?;
+        Ok(toml::from_str(&config_str)?)
+    } else {
+        let init_table: RootConfig = toml::from_str(
+            r#"
+                [root-user]
+                id = ''
+                nickname = ''
+
+                [data]
+                path = ''
+            "#,
+        )?;
+        fs::write(config_toml_path, toml::to_string(&init_table)?)?;
+        Ok(init_table)
+    }
+}
 /// Saves the root config toml `Table` type
 pub fn save_config(config: &Table) -> Result<()> {
     let tiles_config_dir = DefaultProvider.get_config_dir()?;
@@ -236,6 +287,17 @@ pub fn save_config(config: &Table) -> Result<()> {
     Ok(())
 }
 
+/// Saves the root config toml `RootConfig` type
+// #[warn(private_interfaces)]
+fn save_root_config(config: &RootConfig) -> Result<()> {
+    let tiles_config_dir = DefaultProvider.get_config_dir()?;
+    let config_path = tiles_config_dir.join("config.toml");
+    let tmp_path = tiles_config_dir.join("config.tmp.toml");
+    fs::write(&tmp_path, toml::to_string(config)?)?;
+    fs::copy(&tmp_path, &config_path)?;
+    fs::remove_file(tmp_path)?;
+    Ok(())
+}
 /// Get the apt path where the model in the system
 pub fn get_model_cache(model_name: &str) -> Result<PathBuf> {
     let hf_model_dir = if model_name.starts_with("mlx-community/") {
@@ -309,15 +371,72 @@ pub fn get_app_name() -> String {
     }
 }
 
+pub fn update_current_model(model_name: &str) -> Result<()> {
+    let mut root_config = get_or_create_root_config()?;
+    // No toml file writes, if model is same
+    if let Some(model_config) = &root_config.model
+        && model_config.current == model_name
+    {
+        return Ok(());
+    }
+    do_update_current_model(&mut root_config, model_name)?;
+    save_root_config(&root_config)
+}
+
+fn do_update_current_model(config: &mut RootConfig, model_name: &str) -> Result<()> {
+    if let Some(_model_config) = &config.model {
+        let model_config_v2 = ModelConfig {
+            current: model_name.to_owned(),
+        };
+        config.model = Some(model_config_v2)
+    } else {
+        let model_config = ModelConfig {
+            current: model_name.to_owned(),
+        };
+
+        config.model = Some(model_config);
+    }
+    Ok(())
+}
+
 //TODO: Add more tests for config.toml
 #[cfg(test)]
 mod tests {
 
-    // use super::*;
+    use super::*;
 
-    // #[test]
-    // fn test_create_config_file() -> Result<()> {
-    //     let _config_table = get_or_create_config()?;
-    //     Ok(())
-    // }
+    #[test]
+    fn test_updating_current_model_first_time() {
+        let mut config: RootConfig = toml::from_str(
+            r#"
+                [root-user]
+                id = 'did:key:xyz'
+                nickname = ''
+            "#,
+        )
+        .unwrap();
+
+        do_update_current_model(&mut config, "model_name").unwrap();
+
+        assert_eq!("model_name", config.model.unwrap().current);
+    }
+
+    #[test]
+    fn test_updating_current_model_not_first_time() {
+        let mut config: RootConfig = toml::from_str(
+            r#"
+                [root-user]
+                id = 'did:key:xyz'
+                nickname = ''
+
+                [model]
+                current = 'mlx-wahtever'
+            "#,
+        )
+        .unwrap();
+
+        do_update_current_model(&mut config, "model_name").unwrap();
+
+        assert_eq!("model_name", config.model.unwrap().current);
+    }
 }
