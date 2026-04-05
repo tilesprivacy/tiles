@@ -31,9 +31,16 @@ BACKEND="${TILES_BACKEND:-http://127.0.0.1:6969}"
 WEBUI="$LLAMA_CPP/tools/server/webui"
 VITE_CFG="$WEBUI/vite.config.ts"
 
+echo "Using llama.cpp at: $LLAMA_CPP"
+
 if [ ! -d "$LLAMA_CPP" ]; then
-  echo "Cloning llama.cpp -> $LLAMA_CPP"
-  git clone --depth 1 https://github.com/ggml-org/llama.cpp "$LLAMA_CPP"
+	if [ "$LLAMA_CPP" = "$ROOT/third_party/llama.cpp" ]; then
+		echo "third_party/llama.cpp is missing. Initialize the submodule (do not clone on top of it):"
+		echo "  git submodule update --init --recursive"
+		exit 1
+	fi
+	echo "Cloning llama.cpp -> $LLAMA_CPP"
+	git clone --depth 1 https://github.com/ggml-org/llama.cpp "$LLAMA_CPP"
 fi
 
 if [ ! -f "$VITE_CFG" ]; then
@@ -42,9 +49,10 @@ if [ ! -f "$VITE_CFG" ]; then
 fi
 
 if ! grep -qF "$BACKEND" "$VITE_CFG" 2>/dev/null; then
-  echo "Patching $VITE_CFG to proxy API routes to $BACKEND"
-  cp "$VITE_CFG" "${VITE_CFG}.tiles.bak"
-  perl -pi -e "s|http://localhost:8080|${BACKEND}|g" "$VITE_CFG"
+	echo "Patching $VITE_CFG so all dev-server proxy routes point to $BACKEND"
+	cp "$VITE_CFG" "${VITE_CFG}.tiles.bak"
+	# Upstream defaults vary; replace every occurrence in the file (proxy table uses the same base URL per line).
+	perl -pi -e "s|http://localhost:8080|${BACKEND}|g; s|http://127\\.0\\.0\\.1:8080|${BACKEND}|g" "$VITE_CFG"
 fi
 
 echo "Backend proxy: $BACKEND (run Tiles with just serve). Load model via POST /start, session file, TILES_BOOTSTRAP_*, or TILES_MODEL_CACHE_PATH + UI load."
