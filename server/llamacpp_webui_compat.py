@@ -75,6 +75,8 @@ def _read_n_ctx(model_cache_path: str | None) -> int:
     try:
         with open(p, encoding="utf-8") as f:
             cfg = json.load(f)
+        if not isinstance(cfg, dict):
+            return 8192
         for key in (
             "max_position_embeddings",
             "n_positions",
@@ -84,7 +86,7 @@ def _read_n_ctx(model_cache_path: str | None) -> int:
             v = cfg.get(key)
             if isinstance(v, int) and v > 0:
                 return min(v, 262144)
-    except (OSError, json.JSONDecodeError, TypeError):
+    except (OSError, json.JSONDecodeError, TypeError, AttributeError):
         pass
     return 8192
 

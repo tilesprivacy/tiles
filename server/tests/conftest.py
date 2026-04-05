@@ -14,12 +14,16 @@ import server.runtime as runtime
 @pytest.fixture(autouse=True)
 def reset_api_state():
     """Isolate tests that mutate /start and chat session state."""
+    api._current_model_path = None
+    api._default_max_tokens = None
     api._loaded_model_id = None
     api._loaded_model_cache_path = None
     api._model_loaded_at = None
     api._messages = []
     api._memory_path = ""
     yield
+    api._current_model_path = None
+    api._default_max_tokens = None
     api._loaded_model_id = None
     api._loaded_model_cache_path = None
     api._model_loaded_at = None

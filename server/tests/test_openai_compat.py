@@ -141,6 +141,21 @@ def test_chat_completions_memory_path_uses_legacy_append(mock_backend):
     assert any("result" in m.content for m in messages_passed)
 
 
+def test_chat_completions_rejects_negative_max_tokens_other_than_minus_one(mock_backend):
+    client = TestClient(app)
+    r = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "demo-model",
+            "messages": [{"role": "user", "content": "x"}],
+            "stream": False,
+            "max_tokens": -2,
+        },
+    )
+    assert r.status_code == 422
+    assert "error" in r.json()
+
+
 def test_chat_completions_rejects_invalid_message_role():
     client = TestClient(app)
     r = client.post(

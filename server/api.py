@@ -45,6 +45,23 @@ SSE_HEADERS = {
 }
 
 
+def _cors_allow_origins() -> list[str]:
+    """Browser CORS is opt-in: TILES_CORS_ORIGINS (comma-separated) or TILES_CORS_ALLOW_ALL=1 (dev only)."""
+    if os.environ.get("TILES_CORS_ALLOW_ALL", "").strip() == "1":
+        return ["*"]
+    raw = os.environ.get("TILES_CORS_ORIGINS", "").strip()
+    if not raw:
+        return []
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def _persist_session_best_effort(data: session_persist.SessionData) -> None:
+    try:
+        session_persist.save(data)
+    except OSError as e:
+        logger.warning("Persisting session failed after model load: %s", e)
+
+
 def _apply_loaded_session(
     model: str,
     model_cache_path: str,
@@ -105,7 +122,7 @@ async def _restore_session_on_startup() -> None:
                 boot["system_prompt"],
             )
             logger.info("Bootstrap model from env TILES_BOOTSTRAP_*: model=%s", boot["model"])
-            session_persist.save(boot)
+            _persist_session_best_effort(boot)
         except Exception as e:
             logger.warning("Could not bootstrap model from TILES_BOOTSTRAP_*: %s", e)
 
@@ -159,13 +176,15 @@ async def openai_http_errors(request: Request, exc: HTTPException) -> JSONRespon
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+_cors_origins = _cors_allow_origins()
+if _cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_cors_origins,
+        allow_credentials=False,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 
 def _openai_compat_effective_messages(request: ChatCompletionRequest) -> list[ChatMessage]:
@@ -209,8 +228,8 @@ async def models_load(body: RouterModelsLoadBody):
         return {"success": False, "error": "Missing model id in JSON body."}
     sysp = os.environ.get("TILES_BOOTSTRAP_SYSTEM_PROMPT", "").strip() or "You are a helpful assistant."
     try:
-        _apply_loaded_session(mid, cache, MEMORY_PATH, sysp)
-        session_persist.save(
+        await asyncio.to_thread(_apply_loaded_session, mid, cache, MEMORY_PATH, sysp)
+        _persist_session_best_effort(
             {
                 "model": mid,
                 "model_cache_path": cache,
@@ -257,13 +276,14 @@ async def list_models():
 async def start_model(request: StartRequest):
     """Load the model and start the agent"""
     logger.info("%s", runtime.backend)
-    _apply_loaded_session(
+    await asyncio.to_thread(
+        _apply_loaded_session,
         request.model,
         request.model_cache_path,
         request.memory_path,
         request.system_prompt,
     )
-    session_persist.save(
+    _persist_session_best_effort(
         {
             "model": request.model,
             "model_cache_path": request.model_cache_path,

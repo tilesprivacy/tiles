@@ -1,16 +1,32 @@
 #!/usr/bin/env bash
 # Run ggml-org/llama.cpp SvelteKit web UI with the dev proxy pointed at the Tiles server.
 #
+# Workflow: use upstream llama.cpp only (https://github.com/ggml-org/llama.cpp). Pull or
+# bump a submodule when you want UI updates; do not commit Tiles-specific changes into
+# their tree. This script may patch vite.config.ts locally (see .tiles.bak); re-run after
+# upstream changes that alter the dev proxy block.
+#
 # Prerequisites: Node.js (npm), git. Start Tiles separately (e.g. just serve on :6969).
 #
 # Environment:
-#   LLAMA_CPP_ROOT   Clone path (default: sibling of this repo: ../llama.cpp)
+#   LLAMA_CPP_ROOT   Override tree path (otherwise see resolution below)
 #   TILES_BACKEND    Proxy target (default: http://127.0.0.1:6969)
+#
+# llama.cpp location (first match wins):
+#   1. LLAMA_CPP_ROOT if set
+#   2. third_party/llama.cpp under this repo (e.g. git submodule)
+#   3. ../llama.cpp next to this repo (sibling clone)
 
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LLAMA_CPP="${LLAMA_CPP_ROOT:-$ROOT/../llama.cpp}"
+if [ -n "${LLAMA_CPP_ROOT:-}" ]; then
+	LLAMA_CPP="$LLAMA_CPP_ROOT"
+elif [ -d "$ROOT/third_party/llama.cpp" ]; then
+	LLAMA_CPP="$ROOT/third_party/llama.cpp"
+else
+	LLAMA_CPP="$ROOT/../llama.cpp"
+fi
 BACKEND="${TILES_BACKEND:-http://127.0.0.1:6969}"
 WEBUI="$LLAMA_CPP/tools/server/webui"
 VITE_CFG="$WEBUI/vite.config.ts"

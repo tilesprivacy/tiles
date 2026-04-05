@@ -85,8 +85,21 @@ class ChatCompletionRequest(BaseModel):
     @classmethod
     def normalize_max_tokens(cls, v: Any) -> int | None:
         # llama.cpp Web UI sends -1 for "infinite"
-        if v == -1:
+        if v is None:
             return None
+        if isinstance(v, str):
+            try:
+                v = int(v.strip())
+            except ValueError:
+                return v
+        if isinstance(v, bool):
+            raise ValueError("max_tokens must be an integer, not bool")
+        if isinstance(v, int):
+            if v == -1:
+                return None
+            if v < 0:
+                raise ValueError("max_tokens must be >= 0 or -1")
+            return v
         return v
 
 

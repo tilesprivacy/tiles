@@ -74,6 +74,21 @@ Open two terminal windows:
 
 > **Tip:** Refer to the `justfile` for additional common commands and automation. For troubleshooting, see [CONTRIBUTING.md](CONTRIBUTING.md) and open an issue if you need help.
 
+### Llama.cpp Web UI (optional)
+
+To use the upstream [llama.cpp](https://github.com/ggml-org/llama.cpp) SvelteKit chat UI against the Tiles Python server:
+
+1. Keep **their** repository read-only from Tiles’ perspective: clone or add a **git submodule** (e.g. at `third_party/llama.cpp`), then `git pull` or bump the submodule revision when you want their updates. Do not push Tiles-only commits to `ggml-org/llama.cpp`.
+2. Start Tiles (`just serve`, default `http://127.0.0.1:6969`).
+3. From the Tiles repo root, run `scripts/phase2_llamacpp_webui.sh`. It resolves `llama.cpp` in this order: `LLAMA_CPP_ROOT`, then `third_party/llama.cpp`, then a sibling `../llama.cpp` clone. It patches `tools/server/webui/vite.config.ts` to proxy API routes to the Tiles backend when needed.
+
+   Optional submodule (pinned revision in your Tiles fork/branch):
+
+   ```sh
+   git submodule add https://github.com/ggml-org/llama.cpp third_party/llama.cpp
+   git submodule update --init --recursive
+   ```
+
 ### Building Tiles installer (Development)
 
 Install [venvstacks](https://github.com/lmstudio-ai/venvstacks?tab=readme-ov-file#installing) for portable py runtime
