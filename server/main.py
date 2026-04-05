@@ -17,18 +17,11 @@ logger = logging.getLogger("app")
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
-
+    # Do not read the request body here: it would consume the stream and can break
+    # POST handlers; omitting bodies also avoids logging prompts
+    client = request.client.host if request.client else None
     logger.info(
-        {
-            "method": request.method,
-            "url": str(request.url),
-            "client": request.client.host,
-            "body": body,
-        }
+        {"method": request.method, "path": request.url.path, "client": client}
     )
 
     response = await call_next(request)

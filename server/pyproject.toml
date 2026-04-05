@@ -20,4 +20,14 @@ build-backend = "setuptools.build_meta"
 exclude = ["backend", "backend.*"]
 
 [tool.uv]
-exclude-newer="10 days"
+# Exclude package releases newer than this UTC instant (reproducible resolves).
+exclude-newer = "2026-04-05T00:00:00Z"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
+[tool.pytest.ini_options]
+pythonpath = [".."]
+testpaths = ["tests"]

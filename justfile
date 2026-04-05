@@ -15,6 +15,14 @@ serve:
     server/.venv/bin/python3 -m server.main
     # uv run --project server python -m server.main
 
+# Python server (OpenAI compat API tests; requires uv sync in server/)
+test-server:
+    uv run --project server pytest server/tests/ -v
+
+# llama.cpp SvelteKit UI (clone under ../llama.cpp by default); proxies to Tiles :6969
+webui-llamacpp:
+    bash scripts/phase2_llamacpp_webui.sh
+
 bundle:
     ./scripts/bundler.sh
 

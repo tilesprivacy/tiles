@@ -19,7 +19,7 @@ from openresponses_types.types import (
     ToolChoiceParam,
     UserMessageItemParam,
 )
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class CompletionRequest(BaseModel):
@@ -34,21 +34,60 @@ class CompletionRequest(BaseModel):
 
 
 class ChatMessage(BaseModel):
+    """OpenAI chat message; content may be a string or multimodal parts (llama Web UI)."""
+
+    model_config = ConfigDict(extra="ignore")
+
     role: str = Field(..., pattern="^(system|user|assistant)$")
-    content: str
+    content: Union[str, List[Any]]
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def normalize_content(cls, v: Any) -> str:
+        if isinstance(v, str):
+            return v
+        if isinstance(v, list):
+            parts: list[str] = []
+            for item in v:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    t = item.get("text")
+                    if isinstance(t, str):
+                        parts.append(t)
+                    elif item.get("type") == "text" and isinstance(item.get("text"), str):
+                        parts.append(item["text"])
+            return "\n".join(parts) if parts else ""
+        return str(v)
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str
+    model_config = ConfigDict(extra="ignore")
+
+    # Optional when a model is already loaded via POST /start (llama Web UI single-model mode).
+    model: str | None = None
     messages: List[ChatMessage]
-    chat_start: bool
-    python_code: str
+    chat_start: bool = False
+    python_code: str = ""
+    # CLI memory mode sends this; OpenAI-compatible clients omit it (stateless chat).
+    input: str | None = Field(
+        default=None,
+        description="When set, use legacy memory-agent turn (same host as Tiles CLI memory mode).",
+    )
     max_tokens: int | None = None
     temperature: float | None = 0.7
     top_p: float | None = 0.9
     stream: bool | None = False
     stop: Union[str, List[str]] | None = None
     repetition_penalty: float | None = 1.1
+
+    @field_validator("max_tokens", mode="before")
+    @classmethod
+    def normalize_max_tokens(cls, v: Any) -> int | None:
+        # llama.cpp Web UI sends -1 for "infinite"
+        if v == -1:
+            return None
+        return v
 
 
 class CompletionResponse(BaseModel):
@@ -82,6 +121,13 @@ class StartRequest(BaseModel):
     memory_path: str
     system_prompt: str
     model_cache_path: str
+
+
+class RouterModelsLoadBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    model: str
+    extra_args: List[str] | None = None
 
 
 class downloadRequest(BaseModel):

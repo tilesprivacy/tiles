@@ -84,6 +84,25 @@ def get_or_load_model(
         return _model_cache[_current_model_path]  # pyright: ignore
 
 
+def _chat_completion_metrics_dict(m: GenerationMetrics) -> dict[str, float | int]:
+    """Tiles CLI reads `metrics` on the final SSE chunk (memory-mode /v1/chat/completions)."""
+    return {
+        "ttft_ms": m.ttft_ms,
+        "total_tokens": m.total_tokens,
+        "tokens_per_second": m.tokens_per_second,
+        "total_latency_s": m.total_latency_s,
+    }
+
+
+def _llama_webui_timings_from_metrics(m: GenerationMetrics) -> dict[str, float | int]:
+    """llama.cpp Web UI reads `timings` for tokens/s in the chat footer."""
+    pred_ms = max(1.0, m.total_latency_s * 1000.0)
+    return {
+        "predicted_n": m.total_tokens,
+        "predicted_ms": pred_ms,
+    }
+
+
 async def generate_chat_stream(
     messages: List[ChatMessage], request: ChatCompletionRequest
 ) -> AsyncGenerator[str, None]:
@@ -176,16 +195,69 @@ async def generate_chat_stream(
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
 
-    # Include benchmarking metrics if available
     if metrics:
-        final_response["metrics"] = {
-            "ttft_ms": metrics.ttft_ms,
-            "total_tokens": metrics.total_tokens,
-            "tokens_per_second": metrics.tokens_per_second,
-            "total_latency_s": metrics.total_latency_s,
-        }
+        final_response["metrics"] = _chat_completion_metrics_dict(metrics)
+        final_response["timings"] = _llama_webui_timings_from_metrics(metrics)
     yield f"data: {json.dumps(final_response)}\n\n"
     yield "data: [DONE]\n\n"
+
+
+def complete_openai_chat_completion(
+    messages: List[ChatMessage], request: ChatCompletionRequest
+) -> dict[str, Any]:
+    """Non-streaming OpenAI-shaped chat completion (collects streaming generation)."""
+    runner = get_or_load_model(request.model, None)
+    message_dicts = format_chat_messages_for_runner(messages)
+    prompt = runner._format_conversation(message_dicts, use_chat_template=True)
+    completion_id = f"chatcmpl-{uuid.uuid4()}"
+    created = int(time.time())
+    parts: list[str] = []
+    metrics: GenerationMetrics | None = None
+    try:
+        for token in runner.generate_streaming(
+            prompt=prompt,
+            max_tokens=runner.get_effective_max_tokens(
+                request.max_tokens or _default_max_tokens, interactive=False
+            ),
+            temperature=request.temperature,
+            top_p=request.top_p,
+            repetition_penalty=request.repetition_penalty,
+            use_chat_template=False,
+            use_chat_stop_tokens=False,
+        ):
+            if isinstance(token, GenerationMetrics):
+                metrics = token
+                continue
+            if not isinstance(token, str):
+                continue
+            parts.append(token)
+            if request.stop:
+                stop_sequences = (
+                    request.stop if isinstance(request.stop, list) else [request.stop]
+                )
+                if any(stop in token for stop in stop_sequences):
+                    break
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+
+    text = "".join(parts)
+    out: dict[str, Any] = {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": request.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+    if metrics:
+        out["metrics"] = _chat_completion_metrics_dict(metrics)
+        out["timings"] = _llama_webui_timings_from_metrics(metrics)
+    return out
 
 
 def format_chat_messages_for_runner(
