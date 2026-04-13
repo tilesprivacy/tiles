@@ -3,7 +3,7 @@
 annotated-doc==0.0.4
 annotated-types==0.7.0
 anyio==4.13.0
-black==25.9.0
+black==26.3.1
 certifi==2026.2.25
 click==8.3.2
 fastapi==0.119.0
