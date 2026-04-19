@@ -1,4 +1,4 @@
-use crate::core::accounts::{User, get_current_user};
+use crate::core::account::local::{User, get_current_user};
 use crate::core::chats::{Message, save_chat};
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;

@@ -1,4 +1,4 @@
-//! Accounts
+//! Local Account
 // Stuff related to account and identity system
 use anyhow::{Result, anyhow};
 use iroh::SecretKey;
@@ -427,7 +427,7 @@ pub fn create_dummy_user() -> User {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::accounts::{
+    use crate::core::account::local::{
         RootUser, create_root_account, get_current_user, get_root_user_details, set_nickname,
     };
     use anyhow::Result;

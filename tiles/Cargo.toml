@@ -31,6 +31,9 @@ sha2 = "0.10.9"
 iroh-blobs = "0.99.0"
 log = "0.4.29"
 env_logger = "0.11.10"
+atrium-oauth = "0.1.7"
+atrium-identity = "0.1.9"
+hickory-resolver = "0.26.0"
 
 [dev-dependencies]
 tempfile = "3"

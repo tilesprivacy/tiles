@@ -40,9 +40,12 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::core::{
-    accounts::{
-        self, create_dummy_user, get_app_secret_key, get_current_user, get_user_info,
-        save_peer_account_db,
+    account::{
+        self,
+        local::{
+            create_dummy_user, get_app_secret_key, get_current_user, get_user_info,
+            save_peer_account_db,
+        },
     },
     chats::{SyncOp, create_sync_channel},
     network::ticket::{EndpointUserData, LinkTicket},
@@ -66,7 +69,7 @@ struct NetworkMessage {
 }
 
 impl NetworkMessage {
-    fn new(user: &accounts::User, is_online: bool, body: MessageBody) -> Self {
+    fn new(user: &account::local::User, is_online: bool, body: MessageBody) -> Self {
         Self {
             from_did: user.user_id.clone(),
             from_nickname: user.username.clone(),
@@ -228,7 +231,7 @@ pub async fn link(ticket: Option<String>) -> Result<()> {
 async fn subsribe_loop(
     mut receiver: GossipReceiver,
     sender: GossipSender,
-    user: accounts::User,
+    user: account::local::User,
     db_conn: Connection,
     generated_ticket: Option<String>,
     link_main_sender: tokio::sync::mpsc::Sender<u8>,
@@ -343,7 +346,7 @@ async fn subsribe_loop(
 async fn sync_subscribe_loop(
     mut receiver: GossipReceiver,
     sender: GossipSender,
-    user: accounts::User,
+    user: account::local::User,
     store: MemStore,
     endpoint: Endpoint,
     sync_db_channel_sender: tokio::sync::mpsc::Sender<SyncOp>,
@@ -405,7 +408,7 @@ async fn sync_subscribe_loop(
     }
     Ok(())
 }
-async fn create_endpoint(user: &accounts::User) -> Result<Endpoint> {
+async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
     // In release mode, we will build the endpoint using
     // tiles keypair in keychain
     let usr_data = EndpointUserData::new(&user.user_id, &user.username);
@@ -697,7 +700,7 @@ async fn on_sync_start_event(
     store: &MemStore,
     msg: &NetworkMessage,
     delivered_from: PublicKey,
-    user: &accounts::User,
+    user: &account::local::User,
     sync_db_channel_sender: &tokio::sync::mpsc::Sender<SyncOp>,
 ) -> Result<()> {
     if let MessageBody::SyncStart {
@@ -736,7 +739,7 @@ async fn on_sync_send_delta_info(
     store: &MemStore,
     msg: &NetworkMessage,
     delivered_from: PublicKey,
-    user: &accounts::User,
+    user: &account::local::User,
     endpoint: &Endpoint,
     senders: (
         &tokio::sync::mpsc::Sender<SyncOp>,
@@ -815,7 +818,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use crate::core::{
-        accounts::create_dummy_user,
+        account::local::create_dummy_user,
         chats::SyncOp,
         network::{
             create_topic_id, fetch_last_row_counter, parse_link_ticket,

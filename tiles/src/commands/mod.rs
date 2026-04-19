@@ -4,7 +4,7 @@ use std::io;
 
 use anyhow::{Result, anyhow};
 use owo_colors::OwoColorize;
-use tiles::core::accounts::{
+use tiles::core::account::local::{
     RootUser, create_root_account, get_peer_list, get_root_user_details, save_root_account,
     set_nickname, unlink,
 };

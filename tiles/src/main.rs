@@ -6,6 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use tiles::{
     core::{
         self,
+        account::atproto::login,
         network::{link, sync},
     },
     daemon::{start_cmd, start_server, stop_cmd},
@@ -77,6 +78,9 @@ enum Commands {
         /// The DID of the peer you want to sync
         did: Option<String>,
     },
+
+    /// Atproto related commands
+    At(AtArgs),
 }
 
 #[derive(Debug, Args)]
@@ -183,6 +187,20 @@ enum LinkCommands {
     /// Start the daemon
     ListPeers,
 }
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct AtArgs {
+    #[command(subcommand)]
+    command: AtCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum AtCommands {
+    /// Produce link ticket and wait or send link request with ticket
+    Login { handle: String },
+}
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
@@ -280,6 +298,12 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         Some(Commands::Sync { did }) => sync(did).await?,
+        Some(Commands::At(at_args)) => match at_args.command {
+            AtCommands::Login { handle: _ } => {
+                login().await?;
+                // login with the handle
+            }
+        },
     }
     Ok(())
 }

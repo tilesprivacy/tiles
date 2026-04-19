@@ -7,13 +7,13 @@ use anyhow::{Context, Result};
 
 use crate::{
     core::{
-        accounts::save_root_account_db,
+        account::local::save_root_account_db,
         storage::db::{Dbconn, init_db},
     },
     utils::config::{ConfigProvider, DefaultProvider},
 };
 
-pub mod accounts;
+pub mod account;
 pub mod chats;
 pub mod health;
 pub mod network;
