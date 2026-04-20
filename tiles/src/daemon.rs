@@ -26,11 +26,11 @@ struct AppState {
 
 const DEFAULT_PORT: u32 = 1729;
 pub async fn start_cmd(port: Option<u32>) -> Result<()> {
-    if cfg!(debug_assertions) {
-        start_server(port).await
-    } else {
-        start_daemon(port).await
-    }
+    // if cfg!(debug_assertions) {
+    //     start_server(port).await
+    // } else {
+    start_daemon(port).await
+    // }
 }
 
 pub async fn stop_cmd() -> Result<()> {
@@ -56,8 +56,8 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
         .create(true)
         .append(true)
         .open(data_dir.join("logs/daemon.err.log"))?;
-    // let _process = Command::new("target/debug/tiles")
-    let _process = Command::new("tiles")
+    let _process = Command::new("target/debug/tiles")
+        // let _process = Command::new("tiles")
         .arg("daemon")
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_log))
@@ -79,6 +79,7 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
     let shared_state = Arc::new(state);
     let app = Router::new()
         .route("/", get(root))
+        .route("/callback", get(callback))
         .route("/shutdown", get(shutdown))
         .with_state(shared_state);
 
@@ -104,6 +105,9 @@ async fn shutdown(State(state): State<Arc<AppState>>) {
     let _ = sender_real.send(true);
 }
 
+async fn callback() -> &'static str {
+    "callback reached"
+}
 // #[debug_handler]
 // async fn send_ping(State(_state): State<Arc<AppState>>, Query(params): Query<SendParams>) {
 //     println!("Trying to send ping");

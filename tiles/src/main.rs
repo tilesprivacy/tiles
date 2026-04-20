@@ -222,11 +222,12 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             let _ = commands::try_app_update().await;
 
             // trying to run the tiles daemon in background concurrently
-            if !cfg!(debug_assertions) {
-                tokio::spawn(async move {
-                    let _ = start_cmd(None).await;
-                });
-            }
+            // if !cfg!(debug_assertions) {
+            let t = tokio::spawn(async move {
+                let _ = start_cmd(None).await;
+            });
+            t.await?;
+            // }
             core::init_account(&db_conn)
                 .inspect_err(|e| eprintln!("Tiles core init failed due to {:?}", e))?;
             if !cli.flags.no_repl {
@@ -299,9 +300,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Sync { did }) => sync(did).await?,
         Some(Commands::At(at_args)) => match at_args.command {
-            AtCommands::Login { handle: _ } => {
-                login().await?;
-                // login with the handle
+            AtCommands::Login { handle } => {
+                login(&handle).await?;
             }
         },
     }

@@ -1,8 +1,8 @@
 //! Handles atprotocol stuff
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use atrium_identity::{
     did::{CommonDidResolver, CommonDidResolverConfig, DEFAULT_PLC_DIRECTORY_URL},
     handle::{AtprotoHandleResolver, AtprotoHandleResolverConfig, DnsTxtResolver},
@@ -12,14 +12,17 @@ use atrium_oauth::{
     OAuthClientConfig, OAuthResolverConfig, Scope,
     store::{session::MemorySessionStore, state::MemoryStateStore},
 };
+use reqwest::Client;
+use serde::Deserialize;
 
-use hickory_resolver::TokioResolver;
 use std::error::Error;
 
-use hickory_resolver::Resolver;
-use hickory_resolver::config::*;
-use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use tokio::runtime::Runtime;
+use hickory_resolver::TokioResolver;
+
+#[derive(Deserialize)]
+struct HandleResolve {
+    did: String,
+}
 
 struct HickoryDnsTxtResolver {
     resolver: TokioResolver,
@@ -28,7 +31,10 @@ struct HickoryDnsTxtResolver {
 impl Default for HickoryDnsTxtResolver {
     fn default() -> Self {
         Self {
-            resolver: build_resolver(),
+            resolver: TokioResolver::builder_tokio()
+                .expect("Failed to create TokioResolver builder")
+                .build()
+                .expect("Failed to build tokio resolver"),
         }
     }
 }
@@ -49,21 +55,16 @@ impl DnsTxtResolver for HickoryDnsTxtResolver {
     }
 }
 
-fn build_resolver() -> Resolver<TokioRuntimeProvider> {
-    Resolver::builder_with_config(
-        ResolverConfig::udp_and_tcp(&GOOGLE),
-        TokioRuntimeProvider::default(),
-    )
-    .build()
-    .unwrap()
-}
-pub async fn login() -> Result<()> {
+pub async fn login(handle: &str) -> Result<()> {
     let http_client = Arc::new(DefaultHttpClient::default());
 
     let config = OAuthClientConfig {
         client_metadata: AtprotoLocalhostClientMetadata {
-            redirect_uris: Some(vec![String::from("http://127.0.0.1/callback")]),
-            scopes: Some(vec![Scope::Known(KnownScope::Atproto)]),
+            redirect_uris: Some(vec![String::from("http://127.0.0.1:1729/callback")]),
+            scopes: Some(vec![
+                Scope::Known(KnownScope::Atproto),
+                Scope::Known(KnownScope::TransitionGeneric),
+            ]),
         },
         keys: None,
         resolver: OAuthResolverConfig {
@@ -86,11 +87,20 @@ pub async fn login() -> Result<()> {
         panic!("client fuck up")
     };
 
+    //TODO: This resolve function is hack to convert handle to DID
+    // cuz for some reason the authorize fn not working for customd domains
+    // it does work for bluesky hosted handles and DIDs.
+    // Probably smthng to do w DNS resolver. Will dig more latta
+    let did = resolve_handle_to_did(handle).await?;
+
     let url = client
         .authorize(
-            "madcla.ws",
+            did,
             AuthorizeOptions {
-                scopes: vec![Scope::Known(KnownScope::Atproto)],
+                scopes: vec![
+                    Scope::Known(KnownScope::Atproto),
+                    Scope::Known(KnownScope::TransitionGeneric),
+                ],
                 ..Default::default()
             },
         )
@@ -98,4 +108,26 @@ pub async fn login() -> Result<()> {
 
     println!("url\n{}", url);
     Ok(())
+}
+
+async fn resolve_handle_to_did(handle: &str) -> Result<String> {
+    let client_builder = Client::builder().timeout(Duration::from_secs(5));
+    let client = client_builder.build()?;
+    let response = client
+        .get(format!(
+            "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle={}",
+            handle
+        ))
+        .send()
+        .await;
+
+    match response {
+        Err(err) if err.is_timeout() => Err(anyhow!("Request failed due to Api timedout")),
+        Err(err) => Err(anyhow!("Request failed due to {:?}", err)),
+        Ok(res) if res.status() == 200 => {
+            let resolve_data = res.json::<HandleResolve>().await?;
+            Ok(resolve_data.did)
+        }
+        Ok(res) => Err(anyhow!("Api failed with status {}", res.status())),
+    }
 }
