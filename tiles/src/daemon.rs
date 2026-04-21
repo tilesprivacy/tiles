@@ -58,9 +58,12 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
             app_vsn,
             daemon_current_vsn
         );
-        if app_vsn
-            .cmp_precedence(&Version::parse(&daemon_current_vsn)?)
-            .is_ne()
+        // TODO: "its me check is for older versions, where there's no concept of
+        // vsn in state, but better way is to change the api altogether"
+        if daemon_current_vsn.contains("Its me")
+            || app_vsn
+                .cmp_precedence(&Version::parse(&daemon_current_vsn)?)
+                .is_ne()
         {
             log::info!(
                 "New app version found {}, hot reload the daemon {}",

@@ -19,11 +19,14 @@ use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, ChildStdout, Command};
 use std::process::{ChildStdin, Stdio};
+use std::rc::Rc;
 use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
@@ -65,14 +68,21 @@ pub struct ChatResponse {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct PiResponse {
-    r#type: String,
-    command: String,
-    success: bool,
-    data: Option<Value>,
+#[serde(tag = "type")]
+enum PiResponse {
+    #[serde(rename = "response")]
+    Response(PiResponseMessage),
+    #[serde(rename = "agent_start")]
+    AgentStart,
+    #[serde(rename = "message_update")]
+    MessageUpdate(PiMessageUpdate),
+    #[serde(rename = "agent_end")]
+    AgentEnd,
+    #[serde[other]]
+    Unknown,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug)]
 struct GetStateData {
     model: Value,
     #[serde(rename = "thinkingLevel")]
@@ -82,6 +92,26 @@ struct GetStateData {
     #[serde(rename = "sessionId")]
     session_id: String,
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiMessageUpdate {
+    #[serde(rename = "assistantMessageEvent")]
+    assistant_message_event: PiAsstTextMsg,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiAsstTextMsg {
+    r#type: String,
+    delta: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiResponseMessage {
+    command: CommandType,
+    success: bool,
+    data: Option<Value>,
+}
+
 impl Default for MLXRuntime {
     fn default() -> Self {
         Self::new()
@@ -201,36 +231,36 @@ impl Validator for TilesHinter {}
 
 impl Helper for TilesHinter {}
 
-enum SlashCommand {
-    Continue,
+enum InputType {
+    Skip,
+    Command(String),
     Exit,
-    State,
-    NotACommand,
+    Prompt,
 }
 
-fn handle_slash_command(input: &str, modelname: &str) -> SlashCommand {
+#[derive(Deserialize, Serialize, Debug)]
+enum CommandType {
+    #[serde(rename = "get_state")]
+    State,
+    #[serde(other)]
+    Unknown,
+}
+fn handle_input(input: &str, modelname: &str) -> InputType {
     if let Some(cmd) = input.strip_prefix('/') {
         match cmd {
             "help" | "?" => {
                 show_help(modelname);
-                SlashCommand::Continue
+                InputType::Skip
             }
-            "state" => SlashCommand::State,
-            "bye" => SlashCommand::Exit,
+            "bye" => InputType::Exit,
             "" => {
                 println!("Empty command. Type /help for available commands.");
-                SlashCommand::Continue
+                InputType::Skip
             }
-            _ => {
-                println!(
-                    "Unknown command: /{}. Type /help for available commands.",
-                    cmd
-                );
-                SlashCommand::Continue
-            }
+            cmd => InputType::Command(cmd.to_owned()),
         }
     } else {
-        SlashCommand::NotACommand
+        InputType::Prompt
     }
 }
 
@@ -296,12 +326,20 @@ async fn start_repl(
     let mut pi_process = start_pi_rpc()?;
 
     let pi_stdin = pi_process.stdin.as_mut().unwrap();
+    let mut stdout = pi_process.stdout.take().expect("stdout");
+    // let mut stdout: Cell<ChildStdout> = Cell::new();
     loop {
         let readline = editor.readline(">>> ");
         let input = match readline {
             Ok(line) => line.trim().to_string(),
             Err(_) => {
                 // User pressed Ctrl+C or Ctrl+D
+                let end_payload = json!({
+                    "type": "abort",
+                });
+                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                pi_stdin.write_all(payload_str.as_bytes())?;
+                pi_stdin.flush()?;
                 println!("Exiting interactive mode");
                 if !cfg!(debug_assertions) {
                     let _res = mlx_runtime.stop_server_daemon().await;
@@ -310,24 +348,51 @@ async fn start_repl(
             }
         };
 
-        match handle_slash_command(&input, modelname.as_str()) {
-            SlashCommand::Continue => continue,
-            SlashCommand::Exit => {
+        if input.is_empty() {
+            continue;
+        }
+        match handle_input(&input, modelname.as_str()) {
+            InputType::Skip => continue,
+            InputType::Exit => {
+                let end_payload = json!({
+                    "type": "abort",
+                });
+                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                pi_stdin.write_all(payload_str.as_bytes())?;
+                pi_stdin.flush()?;
                 println!("Exiting interactive mode");
                 if !cfg!(debug_assertions) {
                     let _res = mlx_runtime.stop_server_daemon().await;
                 }
                 break;
             }
-            SlashCommand::State => {
-                send_pi_command(pi_stdin, "e")?;
+            InputType::Prompt => {
+                let payload = json!({
+                    "type": "prompt",
+                    "message": input
+                });
+                send_to_pi(pi_stdin, payload)?;
             }
-            SlashCommand::NotACommand => {}
+            InputType::Command(cmd) => {
+                let cmd_json = json!(cmd);
+                let command: CommandType = serde_json::from_value(cmd_json)?;
+                match command {
+                    CommandType::Unknown => {
+                        println!(
+                            "Unknown command: /{}. Type /help for available commands.",
+                            cmd
+                        );
+                        continue;
+                    }
+                    cmd_type => {
+                        let payload = get_command_payload(cmd_type);
+                        send_to_pi(pi_stdin, payload)
+                            .inspect_err(|_e| eprintln!("send pi failed"))?;
+                    }
+                }
+            }
         }
 
-        if input.is_empty() {
-            continue;
-        }
         let mut remaining_count = run_args.relay_count;
         let mut python_code: String = "".to_owned();
         let mut bench_metrics: BenchmarkMetrics = BenchmarkMetrics {
@@ -336,27 +401,50 @@ async fn start_repl(
             tokens_per_second: 0.0,
             total_latency_s: 0.0,
         };
+        let mut is_agent_streaming: bool = false;
+        let reader = BufReader::new(&mut stdout);
 
-        let stdout = pi_process.stdout.take().expect("stdout");
-        let reader = BufReader::new(stdout);
         for line in reader.lines() {
-            let line = line.unwrap();
-            if let Some(pi_response) = serde_json::from_str::<PiResponse>(&line)?.into() {
-                if pi_response.command == "get_state" && pi_response.success {
-                    let data: GetStateData = serde_json::from_value(pi_response.data.unwrap())?;
-                    let render = format!(
-                        "Model: {}\n,thinking: {}\n, session_id: {}",
-                        data.model.get("name").unwrap(),
-                        data.thinking_level,
-                        data.session_id
-                    );
-                    println!("{}", render);
-                } else {
-                    println!("got line {}", line);
+            //TODO: handle the unwrap
+            let line = line?;
+            let response: PiResponse = serde_json::from_str(&line)?;
+
+            match response {
+                PiResponse::AgentStart => {
+                    // agent streaming started
+                    is_agent_streaming = true
                 }
-                break;
-            } else {
-                break;
+                PiResponse::MessageUpdate(msg_update) => {
+                    if msg_update.assistant_message_event.r#type == "text_delta"
+                        && msg_update.assistant_message_event.delta.is_some()
+                    {
+                        print!("{}", msg_update.assistant_message_event.delta.unwrap());
+                        // TODO: maybe can optimize check print! doc
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+                }
+                PiResponse::AgentEnd => {
+                    // agent streaming stopeed
+                    is_agent_streaming = false;
+                    break;
+                }
+                PiResponse::Response(response_msg) => {
+                    if response_msg.success {
+                        match response_msg.command {
+                            CommandType::Unknown => {
+                                continue;
+                            }
+                            cmd => process_command(cmd, response_msg.data)?,
+                        }
+                    } else {
+                        println!("Command failed")
+                    }
+                    break;
+                }
+                PiResponse::Unknown => {
+                    // Not handling now
+                }
             }
         }
         // loop {
@@ -775,18 +863,38 @@ pub fn start_pi_rpc() -> Result<Child> {
     Ok(pi_process)
 }
 
-fn read_events(process: Child) {
-    for line in process.stdout.iter() {}
-}
-
-fn send_pi_command(pi_child_stdin: &mut ChildStdin, command: &str) -> Result<()> {
-    let payload = json!({
-        "type": "get_state"
-    });
-
-    let payload_str = format!("{}\n", serde_json::to_string(&payload)?);
+fn send_to_pi(pi_child_stdin: &mut ChildStdin, payload_json: Value) -> Result<()> {
+    let payload_str = format!("{}\n", serde_json::to_string(&payload_json)?);
 
     pi_child_stdin.write_all(payload_str.as_bytes()).unwrap();
     pi_child_stdin.flush()?;
+    Ok(())
+}
+
+fn get_command_payload(cmd: CommandType) -> Value {
+    match cmd {
+        CommandType::Unknown => {
+            json!({
+                "type": "none"
+            })
+        }
+        CommandType::State => {
+            json!({
+                "type": "get_state",
+            })
+        }
+    }
+}
+
+fn process_command(cmd: CommandType, data: Option<Value>) -> Result<()> {
+    match cmd {
+        CommandType::Unknown => (),
+        CommandType::State => {
+            let state: GetStateData = serde_json::from_value(data.unwrap())?;
+            println!("{:?}", state);
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+    }
     Ok(())
 }
