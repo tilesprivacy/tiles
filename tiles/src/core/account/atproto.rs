@@ -1,6 +1,6 @@
 //! Handles atprotocol stuff
 
-use std::{sync::Arc, time::Duration};
+use std::{process::Command, sync::Arc, time::Duration};
 
 use anyhow::{Result, anyhow};
 use atrium_identity::{
@@ -8,22 +8,34 @@ use atrium_identity::{
     handle::{AtprotoHandleResolver, AtprotoHandleResolverConfig, DnsTxtResolver},
 };
 use atrium_oauth::{
-    AtprotoLocalhostClientMetadata, AuthorizeOptions, DefaultHttpClient, KnownScope, OAuthClient,
-    OAuthClientConfig, OAuthResolverConfig, Scope,
+    AtprotoLocalhostClientMetadata, AuthorizeOptions, CallbackParams, DefaultHttpClient,
+    KnownScope, OAuthClient, OAuthClientConfig, OAuthResolverConfig, Scope,
     store::{session::MemorySessionStore, state::MemoryStateStore},
 };
+use log::info;
 use reqwest::Client;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 
 use std::error::Error;
 
 use hickory_resolver::TokioResolver;
+
+use crate::daemon::start_internal_server;
 
 #[derive(Deserialize)]
 struct HandleResolve {
     did: String,
 }
 
+#[derive(Deserialize, Debug, Serialize)]
+pub struct AtCallbackParams {
+    code: Option<String>,
+    iss: Option<String>,
+    state: Option<String>,
+    error: Option<String>,
+    error_description: Option<String>,
+}
 struct HickoryDnsTxtResolver {
     resolver: TokioResolver,
 }
@@ -57,10 +69,10 @@ impl DnsTxtResolver for HickoryDnsTxtResolver {
 
 pub async fn login(handle: &str) -> Result<()> {
     let http_client = Arc::new(DefaultHttpClient::default());
-
+    const LOGIN_PORT: u32 = 8988;
     let config = OAuthClientConfig {
         client_metadata: AtprotoLocalhostClientMetadata {
-            redirect_uris: Some(vec![String::from("http://127.0.0.1:1729/callback")]),
+            redirect_uris: Some(vec![String::from("http://127.0.0.1:8988/callback")]),
             scopes: Some(vec![
                 Scope::Known(KnownScope::Atproto),
                 Scope::Known(KnownScope::TransitionGeneric),
@@ -91,8 +103,11 @@ pub async fn login(handle: &str) -> Result<()> {
     // cuz for some reason the authorize fn not working for customd domains
     // it does work for bluesky hosted handles and DIDs.
     // Probably smthng to do w DNS resolver. Will dig more latta
-    let did = resolve_handle_to_did(handle).await?;
+    let did = resolve_handle_to_did(handle)
+        .await
+        .inspect_err(|_| eprintln!("Failed to resolve handle"))?;
 
+    info!("{}", did);
     let url = client
         .authorize(
             did,
@@ -104,9 +119,42 @@ pub async fn login(handle: &str) -> Result<()> {
                 ..Default::default()
             },
         )
-        .await?;
+        .await
+        .inspect_err(|_| eprintln!("Failed to authorize"))?;
 
     println!("url\n{}", url);
+    let mut child = Command::new("open").arg(url).spawn()?;
+    child.wait()?;
+    let (callback_tx, callback_rx) = oneshot::channel();
+
+    //TODO: can we randomze port
+    start_internal_server(Some(LOGIN_PORT), callback_tx).await?;
+    let params = callback_rx.await?;
+    info!("params recieved {:?}", params);
+
+    if let Some(code) = params.code {
+        let cb_params = CallbackParams {
+            code,
+            state: params.state,
+            iss: params.iss,
+        };
+        let auth_session = client.callback(cb_params).await?;
+        // This session will be stored in the Memstore
+        // SO before doing authorize, we try to restore a
+        // session by the DID
+        // Need to implement a SessionStore on sqlite table
+    } else {
+        eprintln!(
+            "Error authorizing due to {}",
+            params
+                .error_description
+                .unwrap_or("unknow reason".to_owned())
+        )
+    }
+    // wait for the server to send params
+    // once that's done we can create oauthsession
+    // shut the serve too once its done.
+    // add it to DB
     Ok(())
 }
 

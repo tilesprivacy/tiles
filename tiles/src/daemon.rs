@@ -1,24 +1,38 @@
 //! The Demon that runs the core with his spear
 
 use std::{
+    collections::HashMap,
     process::{Command, Stdio},
     sync::Arc,
     time::Duration,
 };
 
 use anyhow::{Result, anyhow};
-use axum::{Router, extract::State, routing::get};
+use axum::{
+    Router,
+    extract::{Query, State},
+    routing::get,
+};
+use axum_macros::debug_handler;
+use log::info;
 use reqwest::Client;
 use std::fs::OpenOptions;
 use std::sync::Mutex;
-use tokio::sync::oneshot::{self, Receiver};
+use tokio::sync::oneshot::{self, Receiver, Sender};
 
-use crate::utils::config::{ConfigProvider, DefaultProvider};
+use crate::{
+    core::account::atproto::AtCallbackParams,
+    utils::config::{ConfigProvider, DefaultProvider},
+};
 
 struct AppState {
     pub shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
 }
 
+struct InternalAppState {
+    pub callback_sender: Mutex<Option<oneshot::Sender<AtCallbackParams>>>,
+    pub shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
+}
 // #[derive(serde::Deserialize)]
 // pub struct SendParams {
 //     ticket: String,
@@ -79,7 +93,6 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
     let shared_state = Arc::new(state);
     let app = Router::new()
         .route("/", get(root))
-        .route("/callback", get(callback))
         .route("/shutdown", get(shutdown))
         .with_state(shared_state);
 
@@ -87,6 +100,34 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     println!("Daemon server started at {}", dyn_port);
+    let _ = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal(shutdown_rx))
+        .await;
+
+    Ok(())
+}
+
+pub async fn start_internal_server(
+    port: Option<u32>,
+    callback_tx: Sender<AtCallbackParams>,
+) -> Result<()> {
+    let dyn_port: u32 = get_port(port);
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<bool>();
+
+    let state = InternalAppState {
+        callback_sender: Mutex::new(Some(callback_tx)),
+        shutdown_sender: Mutex::new(Some(shutdown_tx)),
+    };
+    let shared_state = Arc::new(state);
+    let app = Router::new()
+        .route("/callback", get(callback))
+        .with_state(shared_state);
+
+    let addr = format!("127.0.0.1:{}", dyn_port);
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    info!("Internal server started at {}", dyn_port);
     let _ = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(shutdown_rx))
         .await;
@@ -105,8 +146,20 @@ async fn shutdown(State(state): State<Arc<AppState>>) {
     let _ = sender_real.send(true);
 }
 
-async fn callback() -> &'static str {
-    "callback reached"
+#[debug_handler]
+async fn callback(
+    State(state): State<Arc<InternalAppState>>,
+    Query(params): Query<AtCallbackParams>,
+) -> &'static str {
+    info!("callback reached {:?}", params);
+    //TODO: refactor this shit
+    let mut cal_sender = state.callback_sender.lock().unwrap();
+    let cal_sender = cal_sender.take().unwrap();
+    let _ = cal_sender.send(params);
+    let mut sender = state.shutdown_sender.lock().unwrap();
+    let sender_real = sender.take().unwrap();
+    let _ = sender_real.send(true);
+    "Processed your authorization input, You can close this page"
 }
 // #[debug_handler]
 // async fn send_ping(State(_state): State<Arc<AppState>>, Query(params): Query<SendParams>) {
