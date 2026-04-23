@@ -70,6 +70,14 @@ const CHATS_MIGRATION_ARRAY: &[M] = &[
         ALTER TABLE CHATS ADD COLUMN session_id TEXT;
         ",
     ),
+    M::up(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            creator_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        )",
+    ),
 ];
 
 const CHATS_MIGRATIONS: Migrations = Migrations::from_slice(CHATS_MIGRATION_ARRAY);

@@ -10,7 +10,7 @@ use crate::core::storage::db::get_db_conn;
 use crate::runtime::mlx::ChatResponse;
 use crate::utils::get_unix_time_now;
 use anyhow::{Result, anyhow};
-use log::info;
+use log::{info, warn};
 use rusqlite::types::FromSqlError;
 use rusqlite::{Connection, params};
 use tilekit::modelfile::Role;
@@ -51,6 +51,15 @@ pub struct Chats {
     created_at: u64,
     updated_at: u64,
     row_counter: i64,
+    session_id: String,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct Session {
+    pub id: String,
+    name: String,
+    created_at: u64,
+    creator_id: String,
 }
 
 type Responder<T> = oneshot::Sender<T>;
@@ -70,48 +79,24 @@ pub enum SyncOp {
     },
 }
 
-pub fn save_chat(
-    conn: &Connection,
-    user: &User,
-    input: &str,
-    chat_resp: Option<&ChatResponse>,
-) -> Result<Chats> {
+pub fn save_chat(conn: &Connection, user: &User, chat_resp: ChatResponse) -> Result<Chats> {
     let row_counter = get_last_row_counter(conn, &user.user_id)?;
-    if let Some(chat_response) = chat_resp {
-        let chat_resp_cloned = chat_response.clone();
+    let chat = Chats {
+        id: Uuid::now_v7().to_string(),
+        user_id: user.user_id.clone(),
+        content: chat_resp.input,
+        response_id: None,
+        role: chat_resp.role,
+        context_id: chat_resp.parent_chat_id,
+        created_at: get_unix_time_now(),
+        updated_at: get_unix_time_now(),
+        row_counter: row_counter + 1,
+        session_id: chat_resp.session_id,
+    };
 
-        let chat = Chats {
-            id: Uuid::now_v7().to_string(),
-            user_id: user.user_id.clone(),
-            content: input.to_owned(),
-            response_id: Some(chat_resp_cloned.prev_response_id),
-            role: Role::Assistant,
-            context_id: chat_resp_cloned.parent_chat_id,
-            created_at: get_unix_time_now(),
-            updated_at: get_unix_time_now(),
-            row_counter: row_counter + 1,
-        };
+    conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", (&chat.id.to_string(), &chat.user_id, &chat.content, &chat.response_id, Into::<String>::into(chat.role),  &chat.context_id, &chat.created_at.to_string(), &chat.updated_at.to_string(), &chat.row_counter, &chat.session_id))?;
 
-        conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", (&chat.id.to_string(), &chat.user_id, &chat.content, &chat.response_id, Into::<String>::into(chat.role),  &chat.context_id, &chat.created_at.to_string(), &chat.updated_at.to_string(), &chat.row_counter))?;
-
-        Ok(chat)
-    } else {
-        let chat = Chats {
-            id: Uuid::now_v7().to_string(),
-            user_id: user.user_id.clone(),
-            content: input.to_owned(),
-            response_id: None,
-            role: Role::User,
-            context_id: None,
-            created_at: get_unix_time_now(),
-            updated_at: get_unix_time_now(),
-            row_counter: row_counter + 1,
-        };
-
-        conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)", (&chat.id,  &chat.user_id, &chat.content, &chat.response_id, Into::<String>::into(chat.role), &chat.context_id, &chat.created_at.to_string(), &chat.updated_at.to_string(), &chat.row_counter))?;
-
-        Ok(chat)
-    }
+    Ok(chat)
 }
 
 /// Returns the `id` of the last entry of the given user_id
@@ -145,7 +130,7 @@ pub fn get_last_row_counter(conn: &Connection, user_id: &str) -> Result<i64> {
 }
 /// Return list of rows for the given `user_id` since `last_row_counter`
 pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Result<Vec<Chats>> {
-    let mut stmt = conn.prepare("select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter from chats where user_id = ?1 and row_counter > ?2 order by id")?;
+    let mut stmt = conn.prepare("select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where user_id = ?1 and row_counter > ?2 order by id")?;
 
     let chat_rows = stmt.query_map(params![user_id, last_row_couter], |row| {
         let id: String = row.get(0)?;
@@ -164,6 +149,7 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
             created_at: created_at as u64,
             updated_at: updated_at as u64,
             row_counter: row.get(8)?,
+            session_id: row.get(9)?,
         })
     })?;
 
@@ -184,7 +170,7 @@ pub fn apply_delta(chat_conn: &mut Connection, delta_chats: &Vec<Chats>) -> Resu
 
     let txn = chat_conn.transaction()?;
     {
-        let mut stmt = txn.prepare("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)")?;
+        let mut stmt = txn.prepare("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")?;
 
         for chat in delta_chats {
             match stmt.execute(params![
@@ -197,6 +183,7 @@ pub fn apply_delta(chat_conn: &mut Connection, delta_chats: &Vec<Chats>) -> Resu
                 &chat.created_at.to_string(),
                 &chat.updated_at.to_string(),
                 &chat.row_counter,
+                &chat.session_id
             ]) {
                 Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
                     if reason == "UNIQUE constraint failed: chats.id" =>
@@ -269,6 +256,49 @@ pub fn create_sync_channel() -> Sender<SyncOp> {
     tx
 }
 
+pub fn create_session(conn: &Connection, id: &str, name: &str, user_id: &str) -> Result<Session> {
+    // log a warning if session already exists, and skip the conflict
+
+    let mut stmt = conn.prepare(
+        "insert into sessions(id, name, creator_id, created_at) values (?1, ?2, ?3, ?4)",
+    )?;
+
+    match stmt.execute(params![
+        id.to_owned(),
+        name.to_owned(),
+        user_id.to_owned(),
+        get_unix_time_now() as f64
+    ]) {
+        Ok(_res) => {
+            let sesh = fetch_session(conn, id)?;
+            Ok(sesh)
+        }
+        Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
+            if reason == "UNIQUE constraint failed: sessions.id" =>
+        {
+            warn!("Session entry already exists, skipping");
+            let sesh = fetch_session(conn, id)?;
+            Ok(sesh)
+        }
+        Err(err) => Err(anyhow!("Err inserting due to {}", err)),
+    }
+}
+
+fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
+    let sesh = conn.query_row(
+        "SELECT id, name, creator_id, created_at FROM sessions WHERE id = ?1",
+        [session_id],
+        |row| {
+            Ok(Session {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                creator_id: row.get(2)?,
+                created_at: row.get::<usize, f64>(3)? as u64,
+            })
+        },
+    )?;
+    Ok(sesh)
+}
 fn encode_delta_to_bytes(delta_chats: &Vec<Chats>) -> Vec<u8> {
     postcard::to_stdvec(delta_chats).expect("Failed to convert to bytes with postcard")
 }
@@ -290,8 +320,8 @@ mod tests {
         core::{
             accounts::{ACCOUNT, User},
             chats::{
-                apply_delta, decode_delta_from_bytes, encode_delta_to_bytes, get_delta,
-                get_last_row_counter, save_chat,
+                apply_delta, create_session, decode_delta_from_bytes, encode_delta_to_bytes,
+                get_delta, get_last_row_counter, save_chat,
             },
         },
         runtime::mlx::ChatResponse,
@@ -303,7 +333,17 @@ mod tests {
         let conn = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let chat = save_chat(&conn, &user, input, None).expect("chat should be saved");
+
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let chat = save_chat(&conn, &user, chat_response).expect("chat should be saved");
 
         assert_eq!(chat.user_id, user.user_id);
         assert!(chat.response_id.is_none());
@@ -322,23 +362,23 @@ mod tests {
         let conn = setup_db_schema();
         let user = create_user();
         let parent_chat_id = Uuid::now_v7().to_string();
-        let chat_resp = ChatResponse {
-            reply: "reply".to_owned(),
-            code: "code".to_owned(),
-            prev_response_id: String::from("resp_prev"),
+        let input = "2+2";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::Assistant,
+            code: None,
+            prev_response_id: None,
             parent_chat_id: Some(parent_chat_id.clone()),
             metrics: None,
         };
-        let input = "2+2";
-        let chat = save_chat(&conn, &user, input, Some(&chat_resp)).expect("chat should be saved");
+        let chat = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         assert_eq!(chat.user_id, user.user_id);
-        assert_eq!(chat.response_id.as_deref(), Some("resp_prev"));
         assert_eq!(chat.context_id, Some(parent_chat_id.clone()));
 
         let saved = fetch_saved_chat_row(&conn, &chat.id);
         assert_eq!(saved.content, input);
-        assert_eq!(saved.resp_id, Some(String::from("resp_prev")));
         assert_eq!(saved.role, Into::<String>::into(Role::Assistant));
         assert_eq!(saved.user_id, user.user_id);
         assert_eq!(saved.context_id, Some(parent_chat_id.clone()));
@@ -348,16 +388,17 @@ mod tests {
     fn test_response_without_parent_chat_id_saves_nil_context() {
         let conn = setup_db_schema();
         let user = create_user();
-        let chat_resp = ChatResponse {
-            reply: "reply".to_owned(),
-            code: "code".to_owned(),
-            prev_response_id: String::from("resp_prev"),
+        let chat_response = ChatResponse {
+            input: "".to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::Assistant,
+            code: None,
+            prev_response_id: Some(Uuid::now_v7().to_string()),
             parent_chat_id: Some(Uuid::now_v7().to_string()),
             metrics: None,
         };
 
-        let chat =
-            save_chat(&conn, &user, "hello", Some(&chat_resp)).expect("chat should be saved");
+        let chat = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         assert!(chat.context_id.is_some());
         let saved = fetch_saved_chat_row(&conn, &chat.id);
@@ -369,8 +410,17 @@ mod tests {
     fn test_empty_input_is_saved() {
         let conn = setup_db_schema();
         let user = create_user();
-
-        let chat = save_chat(&conn, &user, "", None).expect("empty content should still be saved");
+        let chat_response = ChatResponse {
+            input: "".to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let chat =
+            save_chat(&conn, &user, chat_response).expect("empty content should still be saved");
 
         let saved = fetch_saved_chat_row(&conn, &chat.id);
         assert_eq!(saved.content, "");
@@ -381,8 +431,16 @@ mod tests {
     fn test_save_chat_errors_when_table_missing() {
         let conn = Connection::open_in_memory().expect("in-memory db should open");
         let user = create_user();
-
-        let result = save_chat(&conn, &user, "2+2", None);
+        let chat_response = ChatResponse {
+            input: "".to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let result = save_chat(&conn, &user, chat_response);
 
         assert!(result.is_err());
     }
@@ -391,8 +449,16 @@ mod tests {
     fn test_last_row_counter() {
         let conn = setup_db_schema();
         let user = create_user();
-        let input = "2+2";
-        let chat = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: "".to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let chat = save_chat(&conn, &user, chat_response).expect("chat should be saved");
 
         assert_eq!(chat.user_id, user.user_id);
         assert!(chat.response_id.is_none());
@@ -415,10 +481,19 @@ mod tests {
         let conn = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, chat_1.row_counter).unwrap();
         assert_eq!(rows.len(), 3);
@@ -429,10 +504,19 @@ mod tests {
         let conn = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let _chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
         assert_eq!(rows.len(), 4);
@@ -443,10 +527,19 @@ mod tests {
         let conn = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let _chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, "", 0).unwrap();
         assert_eq!(rows.len(), 0);
@@ -458,10 +551,19 @@ mod tests {
         let mut conn_2 = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let _chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
         assert_eq!(rows.len(), 4);
@@ -476,10 +578,19 @@ mod tests {
         let mut conn_2 = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let _chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
         assert_eq!(rows.len(), 4);
@@ -496,10 +607,19 @@ mod tests {
         let mut conn_2 = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let _chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 4).unwrap();
         assert_eq!(rows.len(), 0);
@@ -516,10 +636,19 @@ mod tests {
         let mut _conn_2 = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let rows = get_delta(&conn, &user.user_id, chat_1.row_counter).unwrap();
         assert_eq!(rows.len(), 3);
     }
@@ -531,10 +660,19 @@ mod tests {
         let mut conn_2 = setup_db_schema();
         let user = create_user();
         let input = "2+2";
-        let _chat_1 = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
         assert_eq!(rows.len(), 4);
@@ -558,17 +696,37 @@ mod tests {
 
         // Node user A adds stuff
         let input = "2+2";
-        let _chat_1 = save_chat(&conn, &user_a, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user_a, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user_a, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn, &user_a, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 =
+            save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
 
         // Node user B adds stuff
         let input = "4+4";
-        let _chat_1 = save_chat(&conn_2, &user_b, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn_2, &user_b, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn_2, &user_b, input, None).expect("chat should be saved");
-        let _ = save_chat(&conn_2, &user_b, input, None).expect("chat should be saved");
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 =
+            save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
 
         // Node A wants to sync with Node B
 
@@ -636,6 +794,27 @@ mod tests {
             .unwrap();
 
         assert_eq!(user_a_rows, user_b_rows);
+    }
+
+    #[test]
+    fn test_valid_input_create_session() {
+        let conn = setup_db_schema();
+        let user = create_user();
+
+        let session = create_session(&conn, "id-1", "sesh-1", &user.user_id).unwrap();
+        assert_eq!(user.user_id, session.creator_id);
+    }
+
+    #[test]
+    fn test_duplicate_id_create_session() {
+        let conn = setup_db_schema();
+        let user = create_user();
+
+        let session = create_session(&conn, "id-1", "sesh-1", &user.user_id).unwrap();
+        assert_eq!(user.user_id, session.creator_id);
+
+        let session_2 = create_session(&conn, "id-1", "sesh-1", &user.user_id).unwrap();
+        assert_eq!(user.user_id, session_2.creator_id);
     }
 
     struct SavedChatRow {
@@ -718,6 +897,16 @@ mod tests {
         )
         .unwrap();
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            creator_id TEXT NOT NULL,
+            created_at INTEGER NOT NULL            
+        )",
+            [],
+        )
+        .unwrap();
         conn
     }
 }
