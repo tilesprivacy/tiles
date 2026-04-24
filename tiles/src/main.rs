@@ -9,7 +9,7 @@ use tiles::{
         network::{link, sync},
     },
     daemon::{start_cmd, start_server, stop_cmd},
-    runtime::{RunArgs, build_runtime, mlx::start_pi_rpc},
+    runtime::{RunArgs, build_runtime},
     utils::installer,
 };
 
@@ -77,7 +77,6 @@ enum Commands {
         /// The DID of the peer you want to sync
         did: Option<String>,
     },
-    Pi,
 }
 
 #[derive(Debug, Args)]
@@ -295,10 +294,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         Some(Commands::Sync { did }) => sync(did).await?,
-        Some(Commands::Pi) => {
-            // blah
-            start_pi_rpc()?;
-        }
     }
     Ok(())
 }

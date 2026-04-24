@@ -2,7 +2,9 @@ use crate::core::accounts::{User, get_current_user};
 use crate::core::chats::{Message, create_session, save_chat};
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
-use crate::utils::config::{ConfigProvider, DefaultProvider, get_memory_path, get_model_cache};
+use crate::utils::config::{
+    ConfigProvider, DefaultProvider, create_pi_provider_config, get_memory_path, get_model_cache,
+};
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
 use log::info;
@@ -15,7 +17,7 @@ use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -132,6 +134,8 @@ impl Default for MLXRuntime {
         Self::new()
     }
 }
+
+const PY_PORT: u32 = 6969;
 
 impl MLXRuntime {
     pub fn new() -> Self {
@@ -338,7 +342,7 @@ async fn start_repl(
 
     let mut conversations: Vec<Message> = vec![];
 
-    let mut pi_process = start_pi_rpc()?;
+    let mut pi_process = start_pi_rpc(&modelname)?;
     let mut session_id = String::new();
     let pi_stdin = pi_process.stdin.as_mut().unwrap();
     let mut stdout = pi_process.stdout.take().expect("stdout");
@@ -613,7 +617,8 @@ async fn start_repl(
 
 pub async fn ping() -> Result<()> {
     let client = Client::new();
-    let res = client.get("http://127.0.0.1:6969/ping").send().await;
+    let url = format!("http://127.0.0.1:{}/ping", PY_PORT);
+    let res = client.get(url).send().await;
 
     match res {
         Err(err) => Err(anyhow!("Server down due to {:?}", err)),
@@ -923,23 +928,30 @@ async fn download_model(model_name: &str) -> Result<()> {
     }
 }
 
-pub fn start_pi_rpc() -> Result<Child> {
-    let mut pi_dir = DefaultProvider.get_lib_dir()?;
+// Need to create models.json for the provider
+fn start_pi_rpc(model_name: &str) -> Result<Child> {
+    let tiles_lib_dir = DefaultProvider.get_lib_dir()?;
     let user_data_dir = DefaultProvider.get_user_data_dir()?;
-    let pi_agent_dir = user_data_dir.join("pi/agent");
-    std::fs::create_dir_all(&pi_agent_dir).context("Failed to create pi_agent_dir")?;
-    pi_dir = pi_dir.join("pi");
-    let pi_exec_path = pi_dir.join("pi");
+    let pi_agent_dir = user_data_dir.join("pi/agent/");
+    std::fs::create_dir_all(&pi_agent_dir).context("Failed to create Pi agent directory")?;
+
+    let provider_config_file_path = pi_agent_dir.join("models.json");
+    let endpoint_url = format!("http://127.0.0.1:{}/v1", PY_PORT);
+    let model_config = create_pi_provider_config(model_name, &endpoint_url)?;
+
+    fs::write(provider_config_file_path, model_config)?;
+    let pi_exec_path = tiles_lib_dir.join("pi/pi");
+
     let pi_process = Command::new(pi_exec_path)
         .arg("--mode")
         .arg("rpc")
-        // .arg("--no-session")
+        .arg("--no-session")
         .env("PI_CODING_AGENT_DIR", pi_agent_dir)
         .env("PI_OFFLINE", "true")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
-        .expect("failed to PI");
+        .expect("failed to run Pi");
 
     Ok(pi_process)
 }

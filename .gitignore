@@ -10,3 +10,4 @@ pkgroot/
 *.pkg
 models/
 pkgroot_models/
+pi-darwin-arm64.tar.gz
