@@ -1,36 +1,39 @@
 #!/usr/bin/env bash
-
 set -euo pipefail
 
-VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
-
-TARGET="release"
+BINARY_NAME="tiles"
+DIST_DIR="dist"
 MODELFILE_DIR="modelfiles"
 SERVER_DIR="server"
-BINARY_NAME="tiles"
-MODELS_DIR="models"
+TARGET="release"
+
 VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
+
 OUT_NAME="${BINARY_NAME}-v${VERSION}-${ARCH}-${OS}"
 
 echo "🚀 Building ${BINARY_NAME} (${TARGET} mode)..."
 
 cargo build -p tiles --${TARGET}
 
-CLI_BIN_PATH="pkgroot/usr/local/bin"
-LIBS_PATH="pkgroot/usr/local/share/tiles"
+CLI_BIN_PATH="target/${TARGET}/${BINARY_NAME}"
 
-# CLI binary install path
+PKG_CLI_BIN_PATH="pkgroot/usr/local/bin"
 
+PKG_LIBS_PATH="pkgroot/usr/local/share/tiles"
+
+# CLI binary pkg install path
 mkdir -p "${CLI_BIN_PATH}"
 
-mkdir -p "${LIBS_PATH}"
+# Other libs pkg install path
+mkdir -p "${PKG_LIBS_PATH}"
 
 # move cli to bin path
 
-cp "target/${TARGET}/${BINARY_NAME}" "${CLI_BIN_PATH}"
-chmod +x "${CLI_BIN_PATH}/tiles"
+cp "${CLI_BIN_PATH}" "${PKG_CLI_BIN_PATH}"
+
+chmod +x "${PKG_CLI_BIN_PATH}/tiles"
 
 # Signing the tiles binary
 codesign --force \
@@ -38,7 +41,7 @@ codesign --force \
   --options runtime \
   --timestamp \
   --strict \
-  "${CLI_BIN_PATH}/tiles"
+  "${PKG_CLI_BIN_PATH}/tiles"
 
 # Build venvstack and move to /usr/local/share/tiles
 # 
@@ -58,15 +61,15 @@ echo "📦 Publishing the venvstack...."
 
 venvstacks publish --tag-outputs --output-dir ../stack_export_prod server/stack/venvstacks.toml
 
-cp -r "${SERVER_DIR}" "${LIBS_PATH}"
+cp -r "${SERVER_DIR}" "${PKG_LIBS_PATH}"
 
-rm -rf "${LIBS_PATH}/server/__pycache__"
-rm -rf "${LIBS_PATH}/server/mem_agent/__pycache__"
-rm -rf "${LIBS_PATH}/server/backend/__pycache__"
-rm -rf "${LIBS_PATH}/server/.venv"
-rm -rf "${LIBS_PATH}/server/stack"
+rm -rf "${PKG_LIBS_PATH}/server/__pycache__"
+rm -rf "${PKG_LIBS_PATH}/server/mem_agent/__pycache__"
+rm -rf "${PKG_LIBS_PATH}/server/backend/__pycache__"
+rm -rf "${PKG_LIBS_PATH}/server/.venv"
+rm -rf "${PKG_LIBS_PATH}/server/stack"
 
-cp -r "${MODELFILE_DIR}" "${LIBS_PATH}"
+cp -r "${MODELFILE_DIR}" "${PKG_LIBS_PATH}"
 
 
 # Creating .pkg

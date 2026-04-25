@@ -3,9 +3,9 @@ set -euo pipefail
 
 ENV="prod" # prod is another env, try taking it from github env
 REPO="tilesprivacy/tiles"
-# VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
 
-VERSION="0.4.7"
+VERSION="0.4.8"
+
 INSTALL_DIR="/usr/local/bin"           # CLI install location
 
 SERVER_DIR="/usr/local/share/tiles/server"         # Python server folder

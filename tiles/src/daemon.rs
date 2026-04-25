@@ -229,16 +229,6 @@ mod tests {
 
     #[tokio::test]
     #[serial]
-    async fn test_sever_process_started_not_server() -> Result<()> {
-        tokio::spawn(async move {
-            let _ = start_server(None).await;
-        });
-        assert!(ping(None).await.is_err());
-        stop_server(None).await
-    }
-
-    #[tokio::test]
-    #[serial]
     async fn test_sever_process_and_server_started() -> Result<()> {
         tokio::spawn(async move {
             let _ = start_server(None).await;

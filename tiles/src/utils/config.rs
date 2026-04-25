@@ -463,7 +463,6 @@ fn try_update_pi_provider_model(config: &str, model_name: &str) -> Result<String
     }
 }
 
-//TODO: Add more tests for config.toml
 #[cfg(test)]
 mod tests {
 

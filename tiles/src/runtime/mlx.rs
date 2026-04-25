@@ -450,9 +450,7 @@ async fn start_repl(
             let response: PiResponse = serde_json::from_str(&line)?;
 
             match response {
-                PiResponse::AgentStart => {
-                    info!("\nAgent start\n");
-                }
+                PiResponse::AgentStart => {}
                 PiResponse::MessageUpdate(msg_update) => {
                     if msg_update.assistant_message_event.r#type == "text_delta"
                         && msg_update.assistant_message_event.delta.is_some()
@@ -465,11 +463,9 @@ async fn start_repl(
                     }
                 }
                 PiResponse::AgentEnd => {
-                    info!("\nAgent End\n");
                     break;
                 }
                 PiResponse::TurnEnd(turn_event) => {
-                    info!("\nTurn end\n");
                     session_turn_count += 1;
 
                     // on agent end create a new session entry, only for the

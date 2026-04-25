@@ -3,6 +3,7 @@
 //! Stuff related to chats with the models
 //!
 
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::core::accounts::User;
@@ -37,7 +38,7 @@ pub struct Message {
     pub content: String,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Chats {
     pub id: String,
     content: String,
@@ -54,7 +55,7 @@ pub struct Chats {
     session_id: String,
 }
 
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Session {
     pub id: String,
     name: String,
@@ -77,6 +78,12 @@ pub enum SyncOp {
         delta: Vec<u8>,
         resp: Responder<Result<()>>,
     },
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct DeltaChat {
+    pub chats: Vec<Chats>,
+    pub sessions: Vec<Session>,
 }
 
 pub fn save_chat(conn: &Connection, user: &User, chat_resp: ChatResponse) -> Result<Chats> {
@@ -128,8 +135,10 @@ pub fn get_last_row_counter(conn: &Connection, user_id: &str) -> Result<i64> {
         Err(err) => Err(<rusqlite::Error as Into<anyhow::Error>>::into(err)),
     }
 }
-/// Return list of rows for the given `user_id` since `last_row_counter`
-pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Result<Vec<Chats>> {
+/// Return a Delta of chats and sessions for the given `user_id` since `last_row_counter`
+pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Result<DeltaChat> {
+    let mut session_map: HashMap<String, Session> = HashMap::new();
+
     let mut stmt = conn.prepare("select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where user_id = ?1 and row_counter > ?2 order by id")?;
 
     let chat_rows = stmt.query_map(params![user_id, last_row_couter], |row| {
@@ -139,6 +148,20 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
         let updated_at: f64 = row.get(7)?;
         let resp_id: Option<String> = row.get(3)?;
         let ctx_id = row.get(5)?;
+        let session_id: String = row.get(9)?;
+
+        if session_id.len() > 0 && !session_map.contains_key(&session_id) {
+            // lets fetch the session details
+            match fetch_session(conn, &session_id) {
+                Ok(session) => {
+                    // lets add to the map
+                    session_map.insert(session_id.clone(), session);
+                }
+                Err(err) => {
+                    warn!("Fetching session {} failed due to {:?}", &session_id, err);
+                }
+            }
+        }
         Ok(Chats {
             id,
             content: row.get(2)?,
@@ -149,7 +172,7 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
             created_at: created_at as u64,
             updated_at: updated_at as u64,
             row_counter: row.get(8)?,
-            session_id: row.get(9)?,
+            session_id,
         })
     })?;
 
@@ -159,20 +182,27 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
         chats.push(chat?);
     }
 
-    Ok(chats)
+    let sessions: Vec<Session> = session_map.into_values().collect();
+
+    Ok(DeltaChat {
+        chats: chats,
+        sessions: sessions,
+    })
 }
 
-pub fn apply_delta(chat_conn: &mut Connection, delta_chats: &Vec<Chats>) -> Result<()> {
+pub fn apply_delta(chat_conn: &mut Connection, delta_chats: DeltaChat) -> Result<()> {
     // TODO: Handle primary key conflict, for now reject it (in a way its impossible to have this scenario, and if its occuring then that means
     // some issue in syncing, so ignore it, by rejecting it), later
     // do LWW based on issuer of UCAN
     //
 
+    let chats = delta_chats.chats;
+    let sessions = delta_chats.sessions;
     let txn = chat_conn.transaction()?;
     {
         let mut stmt = txn.prepare("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")?;
 
-        for chat in delta_chats {
+        for chat in chats {
             match stmt.execute(params![
                 &chat.id.to_string(),
                 &chat.user_id,
@@ -198,6 +228,40 @@ pub fn apply_delta(chat_conn: &mut Connection, delta_chats: &Vec<Chats>) -> Resu
                 Err(err) => {
                     log::error!(
                         "err in writing row due to {:?}, Aborting the sync ....",
+                        err
+                    );
+                    break;
+                }
+
+                Ok(_) => (),
+            }
+        }
+
+        // session metadata sync
+        let mut session_stmt = txn.prepare(
+            "insert into sessions(id, name, created_at, creator_id)  values (?1, ?2, ?3, ?4)",
+        )?;
+
+        for session in sessions {
+            match session_stmt.execute(params![
+                &session.id.to_string(),
+                &session.name,
+                &session.created_at.to_string(),
+                &session.creator_id
+            ]) {
+                Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
+                    if reason == "UNIQUE constraint failed: sessions.id" =>
+                {
+                    log::error!(
+                        "err in writing row {:?}, already exists, skipping",
+                        &session.id
+                    );
+                }
+                // NOTE: If any other error occurs and write failed we abort the sync, so the the row_counter doesn't get skipped.
+                // use RUST_LOG=error tiles to debug the issue
+                Err(err) => {
+                    log::error!(
+                        "err in writing row due to {:?}, Aborting the sync during session sync....",
                         err
                     );
                     break;
@@ -245,7 +309,7 @@ pub fn create_sync_channel() -> Sender<SyncOp> {
                 }
                 SyncOp::ApplyDelta { delta, resp } => {
                     let chat_rows = decode_delta_from_bytes(&delta)?;
-                    let apply_res = apply_delta(&mut chat_db_conn, &chat_rows);
+                    let apply_res = apply_delta(&mut chat_db_conn, chat_rows);
                     resp.send(apply_res)
                         .map_err(|_| anyhow!("Error sending apply delta response"))?;
                 }
@@ -299,11 +363,11 @@ fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
     )?;
     Ok(sesh)
 }
-fn encode_delta_to_bytes(delta_chats: &Vec<Chats>) -> Vec<u8> {
+fn encode_delta_to_bytes(delta_chats: &DeltaChat) -> Vec<u8> {
     postcard::to_stdvec(delta_chats).expect("Failed to convert to bytes with postcard")
 }
 
-fn decode_delta_from_bytes(bytes: &[u8]) -> Result<Vec<Chats>> {
+fn decode_delta_from_bytes(bytes: &[u8]) -> Result<DeltaChat> {
     postcard::from_bytes(bytes).map_err(Into::into)
 }
 
@@ -495,8 +559,8 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
-        let rows = get_delta(&conn, &user.user_id, chat_1.row_counter).unwrap();
-        assert_eq!(rows.len(), 3);
+        let delta = get_delta(&conn, &user.user_id, chat_1.row_counter).unwrap();
+        assert_eq!(delta.chats.len(), 3);
     }
 
     #[test]
@@ -519,7 +583,7 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.chats.len(), 4);
     }
 
     #[test]
@@ -542,7 +606,7 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, "", 0).unwrap();
-        assert_eq!(rows.len(), 0);
+        assert_eq!(rows.chats.len(), 0);
     }
 
     #[test]
@@ -566,10 +630,10 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
-        assert!(apply_delta(&mut conn_2, &rows).is_ok());
+        assert_eq!(rows.chats.len(), 4);
+        assert!(apply_delta(&mut conn_2, rows).is_ok());
         let rows = get_delta(&conn_2, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.chats.len(), 4);
     }
 
     #[test]
@@ -593,12 +657,12 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.chats.len(), 4);
         let chat_bytes = encode_delta_to_bytes(&rows);
         let decoded_chat = decode_delta_from_bytes(&chat_bytes).unwrap();
-        assert!(apply_delta(&mut conn_2, &decoded_chat).is_ok());
+        assert!(apply_delta(&mut conn_2, decoded_chat).is_ok());
         let rows = get_delta(&conn_2, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.chats.len(), 4);
     }
 
     #[test]
@@ -622,12 +686,12 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 4).unwrap();
-        assert_eq!(rows.len(), 0);
+        assert_eq!(rows.chats.len(), 0);
         let chat_bytes = encode_delta_to_bytes(&rows);
         let decoded_chat = decode_delta_from_bytes(&chat_bytes).unwrap();
-        assert!(apply_delta(&mut conn_2, &decoded_chat).is_ok());
+        assert!(apply_delta(&mut conn_2, decoded_chat).is_ok());
         let rows = get_delta(&conn_2, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 0);
+        assert_eq!(rows.chats.len(), 0);
     }
 
     #[test]
@@ -650,7 +714,7 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let rows = get_delta(&conn, &user.user_id, chat_1.row_counter).unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.chats.len(), 3);
     }
 
     #[test]
@@ -675,15 +739,15 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let rows = get_delta(&conn, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.chats.len(), 4);
         let chat_bytes = encode_delta_to_bytes(&rows);
         let decoded_chat = decode_delta_from_bytes(&chat_bytes).unwrap();
-        assert!(apply_delta(&mut conn_2, &decoded_chat).is_ok());
+        assert!(apply_delta(&mut conn_2, decoded_chat.clone()).is_ok());
         let rows = get_delta(&conn_2, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
-        assert!(apply_delta(&mut conn_2, &decoded_chat).is_ok());
+        assert_eq!(rows.chats.len(), 4);
+        assert!(apply_delta(&mut conn_2, decoded_chat).is_ok());
         let rows = get_delta(&conn_2, &user.user_id, 0).unwrap();
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.chats.len(), 4);
     }
 
     #[test]
@@ -739,7 +803,7 @@ mod tests {
         let user_bs_diff_rows =
             get_delta(&conn_2, &user_b.user_id, user_b_last_entry_of_user_a).unwrap();
 
-        assert_eq!(user_bs_diff_rows.len(), 4);
+        assert_eq!(user_bs_diff_rows.chats.len(), 4);
 
         // user_bs diff is encoded
         let user_b_chat_bytes = encode_delta_to_bytes(&user_bs_diff_rows);
@@ -748,7 +812,7 @@ mod tests {
         let user_b_decoded_chat = decode_delta_from_bytes(&user_b_chat_bytes).unwrap();
 
         // Now user_a is gonna apply the user_b diff
-        assert!(apply_delta(&mut conn, &user_b_decoded_chat).is_ok());
+        assert!(apply_delta(&mut conn, user_b_decoded_chat).is_ok());
 
         // Just checking if we user_a has all 8 rows
 
@@ -768,7 +832,7 @@ mod tests {
         let user_as_diff_rows =
             get_delta(&conn, &user_a.user_id, user_a_last_entry_of_user_b).unwrap();
 
-        assert_eq!(user_as_diff_rows.len(), 4);
+        assert_eq!(user_as_diff_rows.chats.len(), 4);
 
         // user_as diff is encoded
         let user_a_chat_bytes = encode_delta_to_bytes(&user_as_diff_rows);
@@ -777,7 +841,7 @@ mod tests {
         let user_a_decoded_chat = decode_delta_from_bytes(&user_a_chat_bytes).unwrap();
 
         // Now user_b is gonna apply the user_b diff
-        assert!(apply_delta(&mut conn_2, &user_a_decoded_chat).is_ok());
+        assert!(apply_delta(&mut conn_2, user_a_decoded_chat).is_ok());
 
         // Just checking eventual consistency
 
