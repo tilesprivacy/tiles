@@ -80,7 +80,7 @@ pub enum SyncOp {
     },
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
 pub struct DeltaChat {
     pub chats: Vec<Chats>,
     pub sessions: Vec<Session>,
@@ -148,13 +148,16 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
         let updated_at: f64 = row.get(7)?;
         let resp_id: Option<String> = row.get(3)?;
         let ctx_id = row.get(5)?;
-        let session_id: String = row.get(9)?;
+
+        // This is to handle older versions which can have null session_id in DB
+        let session_id_db: Option<String> = row.get(9)?;
+
+        let session_id: String = session_id_db.unwrap_or("".to_owned());
 
         if session_id.len() > 0 && !session_map.contains_key(&session_id) {
             // lets fetch the session details
             match fetch_session(conn, &session_id) {
                 Ok(session) => {
-                    // lets add to the map
                     session_map.insert(session_id.clone(), session);
                 }
                 Err(err) => {
@@ -389,7 +392,7 @@ mod tests {
             },
         },
         runtime::mlx::ChatResponse,
-        utils::test_logger,
+        utils::{get_unix_time_now, test_logger},
     };
 
     #[test]
@@ -560,7 +563,30 @@ mod tests {
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
         let delta = get_delta(&conn, &user.user_id, chat_1.row_counter).unwrap();
+        assert_eq!(delta.sessions.len(), 0);
         assert_eq!(delta.chats.len(), 3);
+    }
+
+    #[test]
+    fn test_get_delta_diff_chat_without_sessions() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let input = "2+2";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+
+        conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", (Uuid::now_v7().to_string(), &user.user_id, &chat_response.input, None::<String>, Into::<String>::into(chat_response.role),  &chat_response.parent_chat_id, get_unix_time_now().to_string(), get_unix_time_now().to_string(), 1, None::<String>)).unwrap();
+
+        let delta = get_delta(&conn, &user.user_id, 0).unwrap();
+        assert_eq!(delta.sessions.len(), 0);
+        assert_eq!(delta.chats.len(), 1);
     }
 
     #[test]
@@ -586,6 +612,69 @@ mod tests {
         assert_eq!(rows.chats.len(), 4);
     }
 
+    #[test]
+    fn test_get_delta_diff_w_same_sessions() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let input = "2+2";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+
+        let rows = get_delta(&conn, &user.user_id, 0).unwrap();
+        assert_eq!(rows.sessions.len(), 1);
+        assert_eq!(rows.chats.len(), 4);
+    }
+
+    #[test]
+    fn test_get_delta_diff_w_diff_sessions() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let input = "2+2";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+
+        create_session(&conn, "session_def", "sesh-2", &user.user_id).unwrap();
+        let input = "4+4";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_def"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+
+        let rows = get_delta(&conn, &user.user_id, 0).unwrap();
+        assert_eq!(rows.sessions.len(), 2);
+        assert_eq!(rows.chats.len(), 6);
+    }
     #[test]
     fn test_get_delta_diff_empty_wrong_user_id() {
         let conn = setup_db_schema();
@@ -758,6 +847,7 @@ mod tests {
         let user_a = create_user_by_id("user_a");
         let user_b = create_user_by_id("user_b");
 
+        create_session(&conn, "session_abc", "sesh", &user_a.user_id).unwrap();
         // Node user A adds stuff
         let input = "2+2";
         let chat_response = ChatResponse {
@@ -858,6 +948,14 @@ mod tests {
             .unwrap();
 
         assert_eq!(user_a_rows, user_b_rows);
+
+        let user_b_sessions = conn_2
+            .query_row("select count(*) from sessions", [], |row| {
+                row.get::<usize, i64>(0)
+            })
+            .unwrap();
+
+        assert_eq!(user_b_sessions, 1);
     }
 
     #[test]
