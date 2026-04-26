@@ -33,7 +33,7 @@ There are two primary ways to work with Tiles, depending on whether you are an e
 
 ## Tiles CLI
 
-Tiles is the local-first private AI for everyday use.
+Tiles is a local-first private AI assistant for everyday use.
 
 Install the signed macOS package:
 
@@ -59,8 +59,6 @@ https://tiles.run/book
 Tiles is built by a small team working on private, local-first software, with a clear mission: to bring privacy technology to everyone. 
 
 This project is part of the [User & Agents](https://userandagents.com) network. The shared goal is to empower people by designing and building software that provides agency, control, and choice in our digital lives. We strive to deliver the best privacy-focused engineering while also offering unmatched convenience in our consumer products. We believe identity and memory belong together, and Tiles gives you a way to own both through your personal user agent.
-
-We are seeking design partners for TEE based cloud workloads that align with our goal of a verifiable privacy perimeter. Contact us at [mail@tiles.run](mailto:mail@tiles.run).
 
 ## Contributing
 
