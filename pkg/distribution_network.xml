@@ -3,10 +3,10 @@
 <title>Tiles Network</title>
 
 
-<!-- <background file="sidebar.png" mime-type="image/png" scaling="proportionally" alignment="left"/> -->
+<background file="tiles-logo-small-invert.png" mime-type="image/png" scaling="none" alignment="bottomleft"/>
 
 
-<!-- <background-darkAqua file="sidebar.png" mime-type="image/png" scaling="proportionally" alignment="left"/> -->
+<background-darkAqua file="tiles-logo-dark.png" mime-type="image/png" scaling="none" alignment="bottomleft"/>
 
 
 <options customize="never"/>
