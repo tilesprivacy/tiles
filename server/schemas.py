@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Dict, List, Union, override
+from typing import Any, Dict, List, Literal, Union, override
 
 from openresponses_types import ReasoningParam, TruncationEnum
 from openresponses_types.types import (
@@ -88,6 +88,30 @@ class downloadRequest(BaseModel):
     model: str
 
 
+class CUserMessageItemParam(UserMessageItemParam):
+    type: Literal["message"] = "message"
+
+
+class CSystemMessageItemParam(SystemMessageItemParam):
+    type: Literal["message"] = "message"
+
+
+class CDeveloperMessageItemParam(DeveloperMessageItemParam):
+    type: Literal["message"] = "message"
+
+
+class CAssistantMessageItemParam(AssistantMessageItemParam):
+    type: Literal["message"] = "message"
+
+
+class CFunctionCallItemParam(FunctionCallItemParam):
+    type: Literal["function_call"] = "function_call"
+
+
+class CFunctionCallOutputItemParam(FunctionCallOutputItemParam):
+    type: Literal["function_call_output"] = "function_call_output"
+
+
 class ResponsesRequest(BaseModel):
     model: str = "mlx-community/gpt-oss-20b-MXFP4-Q4"
     input: (
@@ -95,12 +119,12 @@ class ResponsesRequest(BaseModel):
         | list[
             ItemReferenceParam
             | ReasoningItemParam
-            | UserMessageItemParam
-            | SystemMessageItemParam
-            | DeveloperMessageItemParam
-            | AssistantMessageItemParam
-            | FunctionCallItemParam
-            | FunctionCallOutputItemParam
+            | CUserMessageItemParam
+            | CSystemMessageItemParam
+            | CDeveloperMessageItemParam
+            | CAssistantMessageItemParam
+            | CFunctionCallItemParam
+            | CFunctionCallOutputItemParam
         ]
     )
     reasoning: ReasoningParam = ReasoningParam(

@@ -443,7 +443,7 @@ pub fn create_pi_provider_config(model_name: &str, enpoint_base_url: &str) -> Re
 
 #[allow(dead_code)]
 fn try_update_pi_provider_model(config: &str, model_name: &str) -> Result<String> {
-    let mut pi_model_config: PiModelConfig = serde_json::from_str(&config)?;
+    let mut pi_model_config: PiModelConfig = serde_json::from_str(config)?;
     let mut tiles_provider_config: PiProviderConfig = pi_model_config
         .providers
         .get("tiles")

@@ -1,4 +1,4 @@
-use crate::core::accounts::{User, get_current_user};
+use crate::core::accounts::get_current_user;
 use crate::core::chats::{Message, create_session, save_chat};
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
@@ -37,6 +37,7 @@ pub struct BenchmarkMetrics {
     total_latency_s: f64,
 }
 
+#[allow(dead_code)]
 impl BenchmarkMetrics {
     fn update(&mut self, metrics: BenchmarkMetrics) -> &Self {
         if self.ttft_ms == 0.0 {
@@ -323,7 +324,7 @@ async fn run_model_with_server(
 async fn start_repl(
     mlx_runtime: &MLXRuntime,
     modelfile: &Modelfile,
-    run_args: &RunArgs,
+    _run_args: &RunArgs,
     db_conn: &Dbconn,
 ) -> Result<()> {
     let modelname = modelfile
@@ -337,10 +338,10 @@ async fn start_repl(
     let config = Config::builder().auto_add_history(true).build();
     let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config).unwrap();
     editor.set_helper(Some(TilesHinter));
-    let mut g_reply: String = "".to_owned();
-    let mut prev_response_id: String = String::from("");
+    // let mut g_reply: String = "".to_owned();
+    // let mut prev_response_id: String = String::from("");
 
-    let mut conversations: Vec<Message> = vec![];
+    // let mut conversations: Vec<Message> = vec![];
 
     let mut pi_process = start_pi_rpc(&modelname)?;
     let mut session_id = String::new();
@@ -361,7 +362,6 @@ async fn start_repl(
         let state: GetStateData =
             serde_json::from_value(msg.data.expect("get state parsing failed"))?;
         session_id = state.session_id;
-        info!("Current session: {}", session_id);
     }
 
     loop {
@@ -432,15 +432,12 @@ async fn start_repl(
             }
         }
 
-        let mut remaining_count = run_args.relay_count;
-        let mut python_code: String = "".to_owned();
-        let mut bench_metrics: BenchmarkMetrics = BenchmarkMetrics {
-            ttft_ms: 0.0,
-            total_tokens: 0,
-            tokens_per_second: 0.0,
-            total_latency_s: 0.0,
-        };
-        let mut is_agent_streaming: bool = false;
+        // let mut bench_metrics: BenchmarkMetrics = BenchmarkMetrics {
+        //     ttft_ms: 0.0,
+        //     total_tokens: 0,
+        //     tokens_per_second: 0.0,
+        //     total_latency_s: 0.0,
+        // };
         let reader = BufReader::new(&mut stdout);
         let mut session_turn_count = 0;
         let mut last_chat_id: String = "".to_owned();
@@ -472,7 +469,7 @@ async fn start_repl(
                     // first time
                     if session_turn_count == 1 {
                         info!("Created session {}", session_id);
-                        create_session(&db_conn.chat, &session_id, "dummy", &current_user.user_id)?;
+                        create_session(&db_conn.chat, &session_id, &input, &current_user.user_id)?;
                     }
                     let parent_chat_id = if session_turn_count == 1 {
                         None
@@ -513,7 +510,6 @@ async fn start_repl(
                     if response_msg.success {
                         match response_msg.command {
                             CommandType::Unknown => {
-                                println!("{}", line);
                                 continue;
                             }
                             cmd => process_command(cmd, response_msg.data)?,
@@ -819,6 +815,7 @@ async fn load_model(
 //     }
 // }
 
+#[allow(dead_code)]
 fn extract_python(content: &str) -> String {
     if content.contains("<python>") && content.contains("</python>") {
         let list_a = content.split("<python>").collect::<Vec<&str>>();
@@ -853,6 +850,8 @@ fn get_default_modelfile(memory_mode: bool) -> Result<PathBuf> {
     }
 }
 
+//TODO: Deprecated if not needed
+#[allow(dead_code)]
 fn create_chat_input(input: &str, prompt: &str, conversations: &[Message]) -> Vec<Message> {
     let dev_msg = Message {
         r#type: "message".to_owned(),

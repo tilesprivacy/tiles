@@ -16,7 +16,8 @@ VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
-# Final tar.gz name
+# Name for final tar.gz 
+
 OUT_NAME="${BINARY_NAME}-v${VERSION}-${ARCH}-${OS}"
 
 echo "🚀 Building ${BINARY_NAME} (${TARGET} mode)..."
@@ -24,27 +25,20 @@ echo "🚀 Building ${BINARY_NAME} (${TARGET} mode)..."
 cargo build -p tiles --${TARGET}
 
 
-# Destination where the release build is generated
+# Destination where the release binary is generated
 CLI_BIN_PATH="target/${TARGET}/${BINARY_NAME}"
   
 chmod +x "${CLI_BIN_PATH}"
 
-# echo "Signing the Tiles binary..."
+echo "Signing the Tiles binary..."
 
-# # Signing the tiles binary
-# codesign --force \
-#   --sign "$DEVELOPER_ID_APPLICATION"\
-#   --options runtime \
-#   --timestamp \
-#   --strict \
-#   "${CLI_BIN_PATH}"
-
-# # echo "Notarizing Tiles binary..."
-
-# # notarizing the tiles binary
-# xcrun notarytool submit --force "${CLI_BIN_PATH}" \
-#   --keychain-profile "tiles-notary-profile" \
-#   --wait
+# Signing the tiles binary
+codesign --force \
+  --sign "$DEVELOPER_ID_APPLICATION"\
+  --options runtime \
+  --timestamp \
+  --strict \
+  "${CLI_BIN_PATH}"
 
 
 mkdir -p "${DIST_DIR}/tmp"
@@ -60,43 +54,41 @@ tar -xvf "${DIST_DIR}/tmp/pi-darwin-arm64.tar.gz" -C "${DIST_DIR}/tmp"
 rm "${DIST_DIR}/tmp/pi-darwin-arm64.tar.gz"
 
 # removing unnecessary files
-rm -rf "${DIST_DIR}/tmp/pi/examples"
+# rm -rf "${DIST_DIR}/tmp/pi/examples"
 
 # Signing the pi binary
-# codesign --force \
-#   --sign "$DEVELOPER_ID_APPLICATION"\
-#   --options runtime \
-#   --timestamp \
-#   --strict \
-#   "${DIST_DIR}/tmp/pi/pi" 
 
-# echo "Notarizing Pibinary..."
+echo "Signing Pi binary..."
 
-# # notarizing the pi binary
-# xcrun notarytool submit --force "${DIST_DIR}/tmp/pi/pi" \
-#   --keychain-profile "tiles-notary-profile" \
-#   --wait
+codesign --force \
+  --sign "$DEVELOPER_ID_APPLICATION" \
+  --options runtime \
+  --timestamp \
+  --entitlements entitleme.plist \
+  --strict \
+  "${DIST_DIR}/tmp/pi/pi" 
+
 
 # flushing this folder, else the final zip will have previous app-server zips too (#84)
-# rm -rf "${SERVER_DIR}/stack_export_prod"
+rm -rf "${SERVER_DIR}/stack_export_prod"
 
-# echo "🔒 Locking the venvstack...."
+echo "🔒 Locking the venvstack...."
 
-# venvstacks lock server/stack/venvstacks.toml
+venvstacks lock server/stack/venvstacks.toml
 
-# echo "🛠️ Building the venvstack...."
+echo "🛠️ Building the venvstack...."
 
-# venvstacks build server/stack/venvstacks.toml
+venvstacks build server/stack/venvstacks.toml
 
-# echo "📦 Publishing the venvstack...."
+echo "📦 Publishing the venvstack...."
 
-# venvstacks publish --tag-outputs --output-dir ../stack_export_prod server/stack/venvstacks.toml
+venvstacks publish --tag-outputs --output-dir ../stack_export_prod server/stack/venvstacks.toml
 
 cp -r "${SERVER_DIR}" "${DIST_DIR}/tmp/"
 
 rm -rf "${DIST_DIR}/tmp/server/__pycache__"
-rm -rf "${DIST_DIR}/tmp/server/mem_agent/__pycache__"
-rm -rf "${DIST_DIR}/tmp/server/backend/__pycache__"
+# rm -rf "${DIST_DIR}/tmp/server/mem_agent/__pycache__"
+# rm -rf "${DIST_DIR}/tmp/server/backend/__pycache__"
 rm -rf "${DIST_DIR}/tmp/server/.venv"
 rm -rf "${DIST_DIR}/tmp/server/stack"
 

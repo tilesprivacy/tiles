@@ -43,6 +43,31 @@ codesign --force \
   --strict \
   "${PKG_CLI_BIN_PATH}/tiles"
 
+
+echo "Embedding Pi"
+# Copying pi artifacts into extracted pi folder
+cp pi-darwin-arm64.tar.gz "${PKG_LIBS_PATH}"
+
+tar -xvf "${PKG_LIBS_PATH}/pi-darwin-arm64.tar.gz" -C "${PKG_LIBS_PATH}"
+
+rm "${PKG_LIBS_PATH}/pi-darwin-arm64.tar.gz"
+
+# removing unnecessary files
+# rm -rf "${DIST_DIR}/tmp/pi/examples"
+
+# Signing the pi binary
+
+echo "Signing Pi binary..."
+
+codesign --force \
+  --sign "$DEVELOPER_ID_APPLICATION" \
+  --options runtime \
+  --timestamp \
+  --entitlements entitleme.plist \
+  --strict \
+  "${PKG_LIBS_PATH}/pi/pi"
+
+  
 # Build venvstack and move to /usr/local/share/tiles
 # 
 # flushing this folder, else the final zip will have previous app-server zips too (#84)

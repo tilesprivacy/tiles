@@ -6,3 +6,4 @@ mlx-lm==0.31.0
 black==25.9.0
 openai-harmony==0.0.8
 openresponses-types
+httpx==0.28.1

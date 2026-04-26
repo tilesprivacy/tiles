@@ -14,6 +14,7 @@ productbuild \
 # signing
 productsign \
   --sign "$DEVELOPER_ID_INSTALLER" \
+  --entitlements entitleme.plist \
   pkg/tiles-dist-unsigned.pkg \
   pkg/tiles.pkg
 

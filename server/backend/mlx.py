@@ -29,6 +29,10 @@ from ..reasoning_utils import ReasoningExtractor
 
 from ..cache_utils import get_model_path
 from ..schemas import (
+    CAssistantMessageItemParam,
+    CDeveloperMessageItemParam,
+    CSystemMessageItemParam,
+    CUserMessageItemParam,
     ChatCompletionRequest,
     ChatMessage,
     GenerationMetrics,
@@ -721,7 +725,7 @@ def build_harmony_conversation(
     for item in convos:
         print(f"ITEM {item}")
         match item:
-            case UserMessageItemParam():
+            case CUserMessageItemParam():
                 content = ""
                 if isinstance(item.content, list):
                     content = item.content[0].text
@@ -730,7 +734,7 @@ def build_harmony_conversation(
                 convo_list.append(
                     Message.from_role_and_content(Role.USER, content)  # pyright: ignore
                 )
-            case DeveloperMessageItemParam():
+            case CDeveloperMessageItemParam():
                 convo_list.append(
                     Message.from_role_and_content(
                         Role.DEVELOPER,
@@ -739,13 +743,13 @@ def build_harmony_conversation(
                         ),  # pyright: ignore                    )
                     )
                 )
-            case AssistantMessageItemParam():
+            case CAssistantMessageItemParam():
                 convo_list.append(
                     Message.from_role_and_content(
                         Role.ASSISTANT, item.content.root
                     )  # pyright: ignore
                 )
-            case SystemMessageItemParam():
+            case CSystemMessageItemParam():
                 convo_list.append(
                     Message.from_role_and_content(Role.SYSTEM, item.content.root)
                 )

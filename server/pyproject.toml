@@ -21,4 +21,4 @@ build-backend = "setuptools.build_meta"
 exclude = ["backend", "backend.*"]
 
 [tool.uv]
-exclude-newer="10 days"
+exclude-newer="2026-04-05T09:43:13.300458+00:00"

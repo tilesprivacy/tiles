@@ -154,7 +154,7 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
 
         let session_id: String = session_id_db.unwrap_or("".to_owned());
 
-        if session_id.len() > 0 && !session_map.contains_key(&session_id) {
+        if !session_id.is_empty() && !session_map.contains_key(&session_id) {
             // lets fetch the session details
             match fetch_session(conn, &session_id) {
                 Ok(session) => {
@@ -187,10 +187,7 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
 
     let sessions: Vec<Session> = session_map.into_values().collect();
 
-    Ok(DeltaChat {
-        chats: chats,
-        sessions: sessions,
-    })
+    Ok(DeltaChat { chats, sessions })
 }
 
 pub fn apply_delta(chat_conn: &mut Connection, delta_chats: DeltaChat) -> Result<()> {

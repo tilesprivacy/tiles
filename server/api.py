@@ -34,7 +34,7 @@ app = FastAPI()
 
 @app.get("/ping")
 async def ping():
-    return {"message": "Badda-Bing Badda-Bang"}
+    return {"message": "Welcome to the jungle"}
 
 
 @app.post("/start")
@@ -78,12 +78,21 @@ async def create_chat_completion(request: ChatCompletionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request: Request, exc: RequestValidationError):
+@app.exception_handler(HTTPException)
+async def validation_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
-        status_code=422,
-        content={"detail": exc.errors()},
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
     )
+
+
+@app.middleware("http")
+async def catch_all(request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        print("UNCAUGHT:", repr(e))
+        raise
 
 
 @app.post("/v1/responses")
@@ -91,6 +100,13 @@ async def create_chat_response(request: ResponsesRequest):
     """
     Create a response with openResponses format
     """
+
+    try:
+        ResponsesRequest.model_validate(request)
+    except Exception as e:
+        print(e)
+
+    print(f"REQUEST => {request}")
 
     if request.stream:
         return StreamingResponse(

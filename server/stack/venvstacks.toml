@@ -27,10 +27,13 @@ requirements = [
     "mlx-lm==0.31.0",
     "black==25.9.0",
     "openai-harmony==0.0.8",
-    "openresponses-types"
+    "openresponses-types",
+    "httpx==0.28.1"
 ]
 
 [tool.uv]
+exclude-newer="2026-04-05T09:43:13.300458+00:00"
+
 # Only resolve for the relevant target platforms
 environments = [
     "sys_platform == 'darwin' and platform_machine == 'arm64'",
