@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="1">
-<title>Tiles Network</title>
+<title>Install Tiles</title>
 
 
 <background file="tiles-logo-small-invert.png" mime-type="image/png" scaling="none" alignment="bottomleft"/>
