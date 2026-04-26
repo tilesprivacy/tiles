@@ -3,7 +3,7 @@ revision = 3
 requires-python = "==3.13.*"
 
 [options]
-exclude-newer = "2026-03-19T13:23:15.459975Z"
+exclude-newer = "2026-04-06T12:32:20.881602Z"
 exclude-newer-span = "P10D"
 
 [[package]]
@@ -615,6 +615,7 @@ source = { editable = "." }
 dependencies = [
     { name = "black" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "mlx-lm" },
     { name = "openai-harmony" },
     { name = "openresponses-types" },
@@ -625,6 +626,7 @@ dependencies = [
 requires-dist = [
     { name = "black", specifier = "==25.9.0" },
     { name = "fastapi", specifier = "==0.119.0" },
+    { name = "httpx", specifier = "==0.28.1" },
     { name = "mlx-lm", specifier = "==0.31.0" },
     { name = "openai-harmony", specifier = "==0.0.8" },
     { name = "openresponses-types" },

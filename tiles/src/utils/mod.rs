@@ -8,7 +8,7 @@ pub fn get_unix_time_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time went backwards")
-        .as_secs()
+        .as_millis() as u64
 }
 
 pub fn test_logger() {

@@ -1,14 +1,14 @@
-use crate::core::account::local::{User, get_current_user};
-use crate::core::chats::{Message, save_chat};
+use crate::core::account::local::get_current_user;
+use crate::core::chats::{Message, create_session, save_chat};
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
-use crate::utils::config::{ConfigProvider, DefaultProvider, get_memory_path, get_model_cache};
+use crate::utils::config::{
+    ConfigProvider, DefaultProvider, create_pi_provider_config, get_memory_path, get_model_cache,
+};
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
-use futures_util::StreamExt;
-use owo_colors::OwoColorize;
+use log::info;
 use reqwest::{Client, StatusCode};
-use rusqlite::Connection;
 use rustyline::completion::Completer;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -17,10 +17,11 @@ use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::Command;
-use std::process::Stdio;
+use std::process::{Child, Command};
+use std::process::{ChildStdin, Stdio};
 use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
@@ -36,6 +37,7 @@ pub struct BenchmarkMetrics {
     total_latency_s: f64,
 }
 
+#[allow(dead_code)]
 impl BenchmarkMetrics {
     fn update(&mut self, metrics: BenchmarkMetrics) -> &Self {
         if self.ttft_ms == 0.0 {
@@ -51,14 +53,81 @@ pub struct MLXRuntime {}
 
 impl MLXRuntime {}
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChatResponse {
-    // think: String,
-    pub reply: String,
-    pub code: String,
-    pub prev_response_id: String,
+    // text content
+    pub input: String,
+    pub session_id: String,
+    pub role: Role,
+    pub code: Option<String>,
+    // deprecated, will remove soon
+    pub prev_response_id: Option<String>,
     pub parent_chat_id: Option<String>,
     pub metrics: Option<BenchmarkMetrics>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+enum PiResponse {
+    #[serde(rename = "response")]
+    Response(PiResponseMessage),
+    #[serde(rename = "agent_start")]
+    AgentStart,
+    #[serde(rename = "message_update")]
+    MessageUpdate(PiMessageUpdate),
+    #[serde(rename = "agent_end")]
+    AgentEnd,
+    #[serde(rename = "turn_end")]
+    TurnEnd(PiTurnEndEvent),
+    #[serde[other]]
+    Unknown,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct GetStateData {
+    model: Value,
+    #[serde(rename = "thinkingLevel")]
+    thinking_level: String,
+    #[serde(rename = "isStreaming")]
+    is_streaming: bool,
+    #[serde(rename = "sessionId")]
+    session_id: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiMessageUpdate {
+    #[serde(rename = "assistantMessageEvent")]
+    assistant_message_event: PiAsstTextMsg,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiAsstTextMsg {
+    r#type: String,
+    delta: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiResponseMessage {
+    command: CommandType,
+    success: bool,
+    data: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiTurnEndEvent {
+    message: PiTurnEndEventMsg,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiTurnEndEventMsg {
+    role: String,
+    content: Vec<PiMsgContent>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiMsgContent {
+    r#type: String,
+    text: String,
 }
 
 impl Default for MLXRuntime {
@@ -66,6 +135,8 @@ impl Default for MLXRuntime {
         Self::new()
     }
 }
+
+const PY_PORT: u32 = 6969;
 
 impl MLXRuntime {
     pub fn new() -> Self {
@@ -180,34 +251,36 @@ impl Validator for TilesHinter {}
 
 impl Helper for TilesHinter {}
 
-enum SlashCommand {
-    Continue,
+enum InputType {
+    Skip,
+    Command(String),
     Exit,
-    NotACommand,
+    Prompt,
 }
 
-fn handle_slash_command(input: &str, modelname: &str) -> SlashCommand {
+#[derive(Deserialize, Serialize, Debug)]
+enum CommandType {
+    #[serde(rename = "get_state")]
+    State,
+    #[serde(other)]
+    Unknown,
+}
+fn handle_input(input: &str, modelname: &str) -> InputType {
     if let Some(cmd) = input.strip_prefix('/') {
         match cmd {
             "help" | "?" => {
                 show_help(modelname);
-                SlashCommand::Continue
+                InputType::Skip
             }
-            "bye" => SlashCommand::Exit,
+            "bye" => InputType::Exit,
             "" => {
                 println!("Empty command. Type /help for available commands.");
-                SlashCommand::Continue
+                InputType::Skip
             }
-            _ => {
-                println!(
-                    "Unknown command: /{}. Type /help for available commands.",
-                    cmd
-                );
-                SlashCommand::Continue
-            }
+            cmd => InputType::Command(cmd.to_owned()),
         }
     } else {
-        SlashCommand::NotACommand
+        InputType::Prompt
     }
 }
 
@@ -215,6 +288,7 @@ fn show_help(model_name: &str) {
     let _ = model_name;
 
     println!("Available Commands:");
+    println!("  /state      Show the current session state");
     println!("  /help       Show this help message");
     println!("  /bye        Exit the REPL");
     println!();
@@ -250,7 +324,7 @@ async fn run_model_with_server(
 async fn start_repl(
     mlx_runtime: &MLXRuntime,
     modelfile: &Modelfile,
-    run_args: &RunArgs,
+    _run_args: &RunArgs,
     db_conn: &Dbconn,
 ) -> Result<()> {
     let modelname = modelfile
@@ -264,16 +338,47 @@ async fn start_repl(
     let config = Config::builder().auto_add_history(true).build();
     let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config).unwrap();
     editor.set_helper(Some(TilesHinter));
-    let mut g_reply: String = "".to_owned();
-    let mut prev_response_id: String = String::from("");
+    // let mut g_reply: String = "".to_owned();
+    // let mut prev_response_id: String = String::from("");
 
-    let mut conversations: Vec<Message> = vec![];
+    // let mut conversations: Vec<Message> = vec![];
+
+    let mut pi_process = start_pi_rpc(&modelname)?;
+    let mut session_id = String::new();
+    let pi_stdin = pi_process.stdin.as_mut().unwrap();
+    let mut stdout = pi_process.stdout.take().expect("stdout");
+    let inti_cmd_payload = get_command_payload(CommandType::State);
+    send_to_pi(pi_stdin, inti_cmd_payload).inspect_err(|_e| eprintln!("send pi failed"))?;
+
+    //TODO: Refactor session_id fetching
+    let mut pi_session_state = String::new();
+    let mut reader = BufReader::new(&mut stdout);
+    let _ = reader
+        .read_line(&mut pi_session_state)
+        .context("Failed reading pi session state")?;
+    println!("{}", pi_session_state);
+    let response: PiResponse = serde_json::from_str(&pi_session_state)?;
+    if let PiResponse::Response(msg) = response {
+        let state: GetStateData =
+            serde_json::from_value(msg.data.expect("get state parsing failed"))?;
+        session_id = state.session_id;
+    }
+
     loop {
         let readline = editor.readline(">>> ");
         let input = match readline {
             Ok(line) => line.trim().to_string(),
             Err(_) => {
+                //TODO: Panic when entering another prompt after ctr-l C
+                // called `Result::unwrap()` on an `Err` value: Os { code: 32, kind: BrokenPipe, message: "Broken pipe" }
+                //
                 // User pressed Ctrl+C or Ctrl+D
+                let end_payload = json!({
+                    "type": "abort",
+                });
+                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                pi_stdin.write_all(payload_str.as_bytes())?;
+                pi_stdin.flush()?;
                 println!("Exiting interactive mode");
                 if !cfg!(debug_assertions) {
                     let _res = mlx_runtime.stop_server_daemon().await;
@@ -281,116 +386,231 @@ async fn start_repl(
                 break;
             }
         };
-
-        match handle_slash_command(&input, modelname.as_str()) {
-            SlashCommand::Continue => continue,
-            SlashCommand::Exit => {
-                println!("Exiting interactive mode");
-                if !cfg!(debug_assertions) {
-                    let _res = mlx_runtime.stop_server_daemon().await;
-                }
-                break;
-            }
-            SlashCommand::NotACommand => {}
-        }
 
         if input.is_empty() {
             continue;
         }
-        let mut remaining_count = run_args.relay_count;
-        let mut python_code: String = "".to_owned();
-        let mut bench_metrics: BenchmarkMetrics = BenchmarkMetrics {
-            ttft_ms: 0.0,
-            total_tokens: 0,
-            tokens_per_second: 0.0,
-            total_latency_s: 0.0,
-        };
-        loop {
-            if remaining_count > 0 {
-                let chat_start = remaining_count == run_args.relay_count;
-
-                match chat(
-                    &input,
-                    modelfile,
-                    chat_start,
-                    &python_code,
-                    &g_reply,
-                    run_args,
-                    &prev_response_id,
-                    &db_conn.chat,
-                    &current_user,
-                    &conversations,
-                )
-                .await
-                {
-                    Ok(response) => {
-                        if response.reply.is_empty() {
-                            if !response.code.is_empty() {
-                                python_code = response.code;
-                            }
-                            if let Some(metrics) = response.metrics {
-                                bench_metrics.update(metrics);
-                            }
-                            remaining_count -= 1;
-                        } else {
-                            g_reply = response.reply.clone();
-                            if run_args.memory {
-                                println!("\n{}", response.reply.trim());
-                            } else {
-                                prev_response_id = response.prev_response_id.clone();
-                                println!("\n");
-                            }
-                            conversations.push(Message {
-                                r#type: String::from("message"),
-                                role: Role::User,
-                                content: input,
-                            });
-                            conversations.push(Message {
-                                r#type: String::from("message"),
-                                role: Role::Assistant,
-                                content: g_reply.clone(),
-                            });
-
-                            save_chat(&db_conn.chat, &current_user, &g_reply, Some(&response))?;
-                            // Display benchmark metrics if available
-                            if let Some(metrics) = response.metrics {
-                                bench_metrics.update(metrics);
-                                println!(
-                                    "{}",
-                                    format!(
-                                        "\n{} {:.1} tok/s | {} tokens | {:.0}s TTFT",
-                                        "💡".yellow(),
-                                        bench_metrics.total_tokens as f64
-                                            / bench_metrics.total_latency_s,
-                                        bench_metrics.total_tokens,
-                                        bench_metrics.ttft_ms / 1000.0
-                                    )
-                                    .dimmed()
-                                );
-                            }
-
-                            break;
-                        }
+        match handle_input(&input, modelname.as_str()) {
+            InputType::Skip => continue,
+            InputType::Exit => {
+                let end_payload = json!({
+                    "type": "abort",
+                });
+                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                pi_stdin.write_all(payload_str.as_bytes())?;
+                pi_stdin.flush()?;
+                println!("Exiting interactive mode");
+                if !cfg!(debug_assertions) {
+                    let _res = mlx_runtime.stop_server_daemon().await;
+                }
+                break;
+            }
+            InputType::Prompt => {
+                let payload = json!({
+                    "type": "prompt",
+                    "message": input
+                });
+                send_to_pi(pi_stdin, payload)?;
+            }
+            InputType::Command(cmd) => {
+                let cmd_json = json!(cmd);
+                let command: CommandType = serde_json::from_value(cmd_json)?;
+                match command {
+                    CommandType::Unknown => {
+                        println!(
+                            "Unknown command: /{}. Type /help for available commands.",
+                            cmd
+                        );
+                        continue;
                     }
-                    Err(err) => {
-                        // if out of relay count, then clear the global_reply and ready for next fresh prompt
-                        println!("{:?}", err);
-                        g_reply.clear();
-                        break;
+                    cmd_type => {
+                        let payload = get_command_payload(cmd_type);
+                        send_to_pi(pi_stdin, payload)
+                            .inspect_err(|_e| eprintln!("send pi failed"))?;
                     }
                 }
             }
         }
-        if g_reply.is_empty() {
-            println!("\nNo reply, try another prompt");
+
+        // let mut bench_metrics: BenchmarkMetrics = BenchmarkMetrics {
+        //     ttft_ms: 0.0,
+        //     total_tokens: 0,
+        //     tokens_per_second: 0.0,
+        //     total_latency_s: 0.0,
+        // };
+        let reader = BufReader::new(&mut stdout);
+        let mut session_turn_count = 0;
+        let mut last_chat_id: String = "".to_owned();
+        for line in reader.lines() {
+            //TODO: handle the unwrap
+            let line = line?;
+            let response: PiResponse = serde_json::from_str(&line)?;
+
+            match response {
+                PiResponse::AgentStart => {}
+                PiResponse::MessageUpdate(msg_update) => {
+                    if msg_update.assistant_message_event.r#type == "text_delta"
+                        && msg_update.assistant_message_event.delta.is_some()
+                    {
+                        // TODO: Can we remove the unwrap
+                        print!("{}", msg_update.assistant_message_event.delta.unwrap());
+                        // TODO: maybe can optimize check print! doc
+                        use std::io::Write;
+                        std::io::stdout().flush().ok();
+                    }
+                }
+                PiResponse::AgentEnd => {
+                    break;
+                }
+                PiResponse::TurnEnd(turn_event) => {
+                    session_turn_count += 1;
+
+                    // on agent end create a new session entry, only for the
+                    // first time
+                    if session_turn_count == 1 {
+                        info!("Created session {}", session_id);
+                        create_session(&db_conn.chat, &session_id, &input, &current_user.user_id)?;
+                    }
+                    let parent_chat_id = if session_turn_count == 1 {
+                        None
+                    } else {
+                        Some(last_chat_id.clone())
+                    };
+                    let chat_response = ChatResponse {
+                        input: input.clone(),
+                        session_id: session_id.clone(),
+                        role: Role::User,
+                        code: None,
+                        prev_response_id: None,
+                        parent_chat_id,
+                        metrics: None,
+                    };
+                    let prompt_chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
+                    last_chat_id = prompt_chat.id;
+                    if turn_event.message.role == "assistant" {
+                        let mut content = turn_event.message.content;
+                        if let Some(msg) = content.pop() {
+                            let chat_response = ChatResponse {
+                                input: msg.text.clone(),
+                                session_id: session_id.clone(),
+                                role: Role::Assistant,
+                                code: None,
+                                prev_response_id: None,
+                                parent_chat_id: Some(last_chat_id.clone()),
+                                metrics: None,
+                            };
+                            let chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
+                            last_chat_id = chat.id;
+                        }
+                    } else {
+                        info!("Not handling {} role now", turn_event.message.role);
+                    }
+                }
+                PiResponse::Response(response_msg) => {
+                    if response_msg.success {
+                        match response_msg.command {
+                            CommandType::Unknown => {
+                                continue;
+                            }
+                            cmd => process_command(cmd, response_msg.data)?,
+                        }
+                    } else {
+                        println!("Command failed")
+                    }
+                    break;
+                }
+                PiResponse::Unknown => {
+                    // Not handling now
+                }
+            }
         }
+        // loop {
+        //     if remaining_count > 0 {
+        //         let chat_start = remaining_count == run_args.relay_count;
+
+        //         match chat(
+        //             &input,
+        //             modelfile,
+        //             chat_start,
+        //             &python_code,
+        //             &g_reply,
+        //             run_args,
+        //             &prev_response_id,
+        //             &db_conn.chat,
+        //             &current_user,
+        //             &conversations,
+        //         )
+        //         .await
+        //         {
+        //             Ok(response) => {
+        //                 if response.reply.is_empty() {
+        //                     if !response.code.is_empty() {
+        //                         python_code = response.code;
+        //                     }
+        //                     if let Some(metrics) = response.metrics {
+        //                         bench_metrics.update(metrics);
+        //                     }
+        //                     remaining_count -= 1;
+        //                 } else {
+        //                     g_reply = response.reply.clone();
+        //                     if run_args.memory {
+        //                         println!("\n{}", response.reply.trim());
+        //                     } else {
+        //                         prev_response_id = response.prev_response_id.clone();
+        //                         println!("\n");
+        //                     }
+        //                     conversations.push(Message {
+        //                         r#type: String::from("message"),
+        //                         role: Role::User,
+        //                         content: input,
+        //                     });
+        //                     conversations.push(Message {
+        //                         r#type: String::from("message"),
+        //                         role: Role::Assistant,
+        //                         content: g_reply.clone(),
+        //                     });
+
+        //                     save_chat(&db_conn.chat, &current_user, &g_reply, Some(&response))?;
+        //                     // Display benchmark metrics if available
+        //                     if let Some(metrics) = response.metrics {
+        //                         bench_metrics.update(metrics);
+        //                         println!(
+        //                             "{}",
+        //                             format!(
+        //                                 "\n{} {:.1} tok/s | {} tokens | {:.0}s TTFT",
+        //                                 "💡".yellow(),
+        //                                 bench_metrics.total_tokens as f64
+        //                                     / bench_metrics.total_latency_s,
+        //                                 bench_metrics.total_tokens,
+        //                                 bench_metrics.ttft_ms / 1000.0
+        //                             )
+        //                             .dimmed()
+        //                         );
+        //                     }
+
+        //                     break;
+        //                 }
+        //             }
+        //             Err(err) => {
+        //                 // if out of relay count, then clear the global_reply and ready for next fresh prompt
+        //                 println!("{:?}", err);
+        //                 g_reply.clear();
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // }
+        // if g_reply.is_empty() {
+        //     println!("\nNo reply, try another prompt");
+        // }
     }
     Ok(())
 }
 
 pub async fn ping() -> Result<()> {
     let client = Client::new();
-    let res = client.get("http://127.0.0.1:6969/ping").send().await;
+    let url = format!("http://127.0.0.1:{}/ping", PY_PORT);
+    let res = client.get(url).send().await;
 
     match res {
         Err(err) => Err(anyhow!("Server down due to {:?}", err)),
@@ -444,157 +664,158 @@ async fn load_model(
 }
 
 //TODO: Have 2 separate chat functions for memory and non-memory
-#[allow(clippy::too_many_arguments)]
-async fn chat(
-    input: &str,
-    modelfile: &Modelfile,
-    chat_start: bool,
-    python_code: &str,
-    g_reply: &str,
-    run_args: &RunArgs,
-    prev_response_id: &str,
-    conn: &Connection,
-    user: &User,
-    conversations: &[Message],
-) -> Result<ChatResponse> {
-    let client = Client::new();
-    let modelname = modelfile
-        .from
-        .clone()
-        .ok_or_else(|| anyhow!("Failed to get model name"))?;
-    let prompt = modelfile.system.clone().unwrap_or("".to_owned());
-    let convo_input = create_chat_input(input, prompt.as_str(), conversations);
-    let body = json!({
-        "model": modelname,
-        "input": convo_input,
-        "reasoning": {"effort": "medium"},
-        "chat_start": chat_start,
-        "stream": true,
-        "previous_response_id": prev_response_id,
-        "python_code": python_code,
-        "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
-    });
+// #[allow(clippy::too_many_arguments)]
+// async fn chat(
+//     input: &str,
+//     modelfile: &Modelfile,
+//     chat_start: bool,
+//     python_code: &str,
+//     g_reply: &str,
+//     run_args: &RunArgs,
+//     prev_response_id: &str,
+//     conn: &Connection,
+//     user: &User,
+//     conversations: &[Message],
+// ) -> Result<ChatResponse> {
+//     let client = Client::new();
+//     let modelname = modelfile
+//         .from
+//         .clone()
+//         .ok_or_else(|| anyhow!("Failed to get model name"))?;
+//     let prompt = modelfile.system.clone().unwrap_or("".to_owned());
+//     let convo_input = create_chat_input(input, prompt.as_str(), conversations);
+//     let body = json!({
+//         "model": modelname,
+//         "input": convo_input,
+//         "reasoning": {"effort": "medium"},
+//         "chat_start": chat_start,
+//         "stream": true,
+//         "previous_response_id": prev_response_id,
+//         "python_code": python_code,
+//         "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
+//     });
 
-    let memory_body = json!({
-        "model": modelname,
-        "input": input,
-        "chat_start": chat_start,
-        "stream": true,
-        "python_code": python_code,
-        "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
+//     let memory_body = json!({
+//         "model": modelname,
+//         "input": input,
+//         "chat_start": chat_start,
+//         "stream": true,
+//         "python_code": python_code,
+//         "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
 
-    });
-    let res = if run_args.memory {
-        let api_url = "http://127.0.0.1:6969/v1/chat/completions";
-        client.post(api_url).json(&memory_body).send().await?
-    } else {
-        let api_url = "http://127.0.0.1:6969/v1/responses";
-        client.post(api_url).json(&body).send().await?
-    };
+//     });
+//     let res = if run_args.memory {
+//         let api_url = "http://127.0.0.1:6969/v1/chat/completions";
+//         client.post(api_url).json(&memory_body).send().await?
+//     } else {
+//         let api_url = "http://127.0.0.1:6969/v1/responses";
+//         client.post(api_url).json(&body).send().await?
+//     };
 
-    let chat = save_chat(conn, user, input, None)?;
-    let mut stream = res.bytes_stream();
-    let mut accumulated = String::new();
-    let mut metrics: Option<BenchmarkMetrics> = None;
-    let mut is_answer_start = false;
-    let mut prev_response_id: String = String::from("");
-    let mut output_completed: bool = false;
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let s = String::from_utf8_lossy(&chunk);
-        for line in s.lines() {
-            if !line.starts_with("data: ") {
-                continue;
-            }
+//     let chat = save_chat(conn, user, input, None)?;
+//     let mut stream = res.bytes_stream();
+//     let mut accumulated = String::new();
+//     let mut metrics: Option<BenchmarkMetrics> = None;
+//     let mut is_answer_start = false;
+//     let mut prev_response_id: String = String::from("");
+//     let mut output_completed: bool = false;
+//     while let Some(chunk) = stream.next().await {
+//         let chunk = chunk?;
+//         let s = String::from_utf8_lossy(&chunk);
+//         for line in s.lines() {
+//             if !line.starts_with("data: ") {
+//                 continue;
+//             }
 
-            let data = line.trim_start_matches("data: ");
+//             let data = line.trim_start_matches("data: ");
 
-            if data == "[DONE]" {
-                let mut chat_resp = convert_to_chat_response(
-                    &accumulated,
-                    run_args.memory,
-                    prev_response_id,
-                    metrics,
-                );
-                chat_resp.parent_chat_id = Some(chat.id);
-                return Ok(chat_resp);
-            }
+//             if data == "[DONE]" {
+//                 let mut chat_resp = convert_to_chat_response(
+//                     &accumulated,
+//                     run_args.memory,
+//                     prev_response_id,
+//                     metrics,
+//                 );
+//                 chat_resp.parent_chat_id = Some(chat.id);
+//                 return Ok(chat_resp);
+//             }
 
-            //TODO: This will break if we ask the model to give an essay and all
-            let v: Value = serde_json::from_str(data).unwrap();
-            // Check for metrics in the response
-            if let Some(metrics_obj) = v.get("metrics") {
-                metrics = serde_json::from_value(metrics_obj.clone()).ok();
-            }
-            let model_text: Option<&str> = if run_args.memory {
-                v["choices"][0]["delta"]["content"].as_str()
-            } else {
-                prev_response_id = serde_json::to_string(&v["id"])?
-                    .trim_matches('\"')
-                    .to_owned();
+//             //TODO: This will break if we ask the model to give an essay and all
+//             let v: Value = serde_json::from_str(data).unwrap();
+//             // Check for metrics in the response
+//             if let Some(metrics_obj) = v.get("metrics") {
+//                 metrics = serde_json::from_value(metrics_obj.clone()).ok();
+//             }
+//             let model_text: Option<&str> = if run_args.memory {
+//                 v["choices"][0]["delta"]["content"].as_str()
+//             } else {
+//                 prev_response_id = serde_json::to_string(&v["id"])?
+//                     .trim_matches('\"')
+//                     .to_owned();
 
-                if serde_json::to_string(&v["status"])?.contains("completed") {
-                    output_completed = true;
-                }
+//                 if serde_json::to_string(&v["status"])?.contains("completed") {
+//                     output_completed = true;
+//                 }
 
-                v["output"][0]["content"][0]["text"].as_str()
-            };
+//                 v["output"][0]["content"][0]["text"].as_str()
+//             };
 
-            if let Some(delta) = model_text {
-                if !run_args.memory {
-                    if delta.contains("**[Answer]**") {
-                        is_answer_start = true
-                    }
-                    if !output_completed {
-                        accumulated.push_str(delta);
-                        if !is_answer_start {
-                            print!("{}", delta.dimmed());
-                        } else {
-                            print!("{}", delta);
-                        };
-                    }
-                } else {
-                    accumulated.push_str(delta);
-                }
-                use std::io::Write;
-                std::io::stdout().flush().ok();
-            }
-        }
-    }
+//             if let Some(delta) = model_text {
+//                 if !run_args.memory {
+//                     if delta.contains("**[Answer]**") {
+//                         is_answer_start = true
+//                     }
+//                     if !output_completed {
+//                         accumulated.push_str(delta);
+//                         if !is_answer_start {
+//                             print!("{}", delta.dimmed());
+//                         } else {
+//                             print!("{}", delta);
+//                         };
+//                     }
+//                 } else {
+//                     accumulated.push_str(delta);
+//                 }
+//                 use std::io::Write;
+//                 std::io::stdout().flush().ok();
+//             }
+//         }
+//     }
 
-    Err(anyhow!("Result failed"))
-}
+//     Err(anyhow!("Result failed"))
+// }
 
-fn convert_to_chat_response(
-    content: &str,
-    memory_mode: bool,
-    prev_response_id: String,
-    metrics: Option<BenchmarkMetrics>,
-) -> ChatResponse {
-    ChatResponse {
-        reply: extract_reply(content, memory_mode),
-        code: extract_python(content),
-        prev_response_id,
-        metrics,
-        parent_chat_id: None,
-    }
-}
+// fn convert_to_chat_response(
+//     content: &str,
+//     memory_mode: bool,
+//     prev_response_id: String,
+//     metrics: Option<BenchmarkMetrics>,
+// ) -> ChatResponse {
+//     ChatResponse {
+//         reply: extract_reply(content, memory_mode),
+//         code: None,
+//         prev_response_id,
+//         metrics,
+//         parent_chat_id: None,
+//     }
+// }
 
-fn extract_reply(content: &str, memory_mode: bool) -> String {
-    if !memory_mode && content.contains("**[Answer]**") {
-        let list_a = content.split("**[Answer]**").collect::<Vec<&str>>();
-        list_a[1].to_owned()
-    } else if !memory_mode {
-        content.to_owned()
-    } else if content.contains("<reply>") && content.contains("</reply>") {
-        let list_a = content.split("<reply>").collect::<Vec<&str>>();
-        let list_b = list_a[1].split("</reply>").collect::<Vec<&str>>();
-        list_b[0].to_owned()
-    } else {
-        "".to_owned()
-    }
-}
+// fn extract_reply(content: &str, memory_mode: bool) -> String {
+//     if !memory_mode && content.contains("**[Answer]**") {
+//         let list_a = content.split("**[Answer]**").collect::<Vec<&str>>();
+//         list_a[1].to_owned()
+//     } else if !memory_mode {
+//         content.to_owned()
+//     } else if content.contains("<reply>") && content.contains("</reply>") {
+//         let list_a = content.split("<reply>").collect::<Vec<&str>>();
+//         let list_b = list_a[1].split("</reply>").collect::<Vec<&str>>();
+//         list_b[0].to_owned()
+//     } else {
+//         "".to_owned()
+//     }
+// }
 
+#[allow(dead_code)]
 fn extract_python(content: &str) -> String {
     if content.contains("<python>") && content.contains("</python>") {
         let list_a = content.split("<python>").collect::<Vec<&str>>();
@@ -629,6 +850,8 @@ fn get_default_modelfile(memory_mode: bool) -> Result<PathBuf> {
     }
 }
 
+//TODO: Deprecated if not needed
+#[allow(dead_code)]
 fn create_chat_input(input: &str, prompt: &str, conversations: &[Message]) -> Vec<Message> {
     let dev_msg = Message {
         r#type: "message".to_owned(),
@@ -698,4 +921,68 @@ async fn download_model(model_name: &str) -> Result<()> {
         }
         Err(err) => Err(anyhow::anyhow!(format!("Download failed due to {:?}", err))),
     }
+}
+
+// Need to create models.json for the provider
+fn start_pi_rpc(model_name: &str) -> Result<Child> {
+    let tiles_lib_dir = DefaultProvider.get_lib_dir()?;
+    let user_data_dir = DefaultProvider.get_user_data_dir()?;
+    let pi_agent_dir = user_data_dir.join("pi/agent/");
+    std::fs::create_dir_all(&pi_agent_dir).context("Failed to create Pi agent directory")?;
+
+    let provider_config_file_path = pi_agent_dir.join("models.json");
+    let endpoint_url = format!("http://127.0.0.1:{}/v1", PY_PORT);
+    let model_config = create_pi_provider_config(model_name, &endpoint_url)?;
+
+    fs::write(provider_config_file_path, model_config)?;
+    let pi_exec_path = tiles_lib_dir.join("pi/pi");
+
+    let pi_process = Command::new(pi_exec_path)
+        .arg("--mode")
+        .arg("rpc")
+        .arg("--no-session")
+        .env("PI_CODING_AGENT_DIR", pi_agent_dir)
+        .env("PI_OFFLINE", "true")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("failed to run Pi");
+
+    Ok(pi_process)
+}
+
+fn send_to_pi(pi_child_stdin: &mut ChildStdin, payload_json: Value) -> Result<()> {
+    let payload_str = format!("{}\n", serde_json::to_string(&payload_json)?);
+
+    pi_child_stdin.write_all(payload_str.as_bytes()).unwrap();
+    pi_child_stdin.flush()?;
+    Ok(())
+}
+
+fn get_command_payload(cmd: CommandType) -> Value {
+    match cmd {
+        CommandType::Unknown => {
+            json!({
+                "type": "none"
+            })
+        }
+        CommandType::State => {
+            json!({
+                "type": "get_state",
+            })
+        }
+    }
+}
+
+fn process_command(cmd: CommandType, data: Option<Value>) -> Result<()> {
+    match cmd {
+        CommandType::Unknown => (),
+        CommandType::State => {
+            let state: GetStateData = serde_json::from_value(data.unwrap())?;
+            println!("{:?}", state);
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+    }
+    Ok(())
 }

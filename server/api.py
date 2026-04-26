@@ -2,8 +2,9 @@ import logging
 import sys
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, Field
 
 from . import runtime
@@ -33,7 +34,7 @@ app = FastAPI()
 
 @app.get("/ping")
 async def ping():
-    return {"message": "Badda-Bing Badda-Bang"}
+    return {"message": "Welcome to the jungle"}
 
 
 @app.post("/start")
@@ -77,17 +78,41 @@ async def create_chat_completion(request: ChatCompletionRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.exception_handler(HTTPException)
+async def validation_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+
+@app.middleware("http")
+async def catch_all(request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as e:
+        print("UNCAUGHT:", repr(e))
+        raise
+
+
 @app.post("/v1/responses")
 async def create_chat_response(request: ResponsesRequest):
     """
     Create a response with openResponses format
     """
 
+    try:
+        ResponsesRequest.model_validate(request)
+    except Exception as e:
+        print(e)
+
+    print(f"REQUEST => {request}")
+
     if request.stream:
         return StreamingResponse(
             runtime.backend.generate_response_chat_stream(request),
             media_type="text/plain",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "no-cache", "Content-Type": "text/event-stream"},
         )
     else:
         return await runtime.backend.generate_response_chat(request)

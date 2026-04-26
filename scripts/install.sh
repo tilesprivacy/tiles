@@ -3,15 +3,18 @@ set -euo pipefail
 
 ENV="prod" # prod is another env, try taking it from github env
 REPO="tilesprivacy/tiles"
-# VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
 
-VERSION="0.4.7"
+VERSION="0.4.8"
+
 INSTALL_DIR="/usr/local/bin"           # CLI install location
 
 SERVER_DIR="/usr/local/share/tiles/server"         # Python server folder
 MODELFILE_DIR="/usr/local/share/tiles/modelfiles"  # Modelfile server folder
 
+PI_DIR="/usr/local/share/tiles/pi"
+
 TMPDIR="$(mktemp -d)"
+
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 
@@ -47,6 +50,16 @@ rm -rf "${MODELFILE_DIR}"
 mkdir -p "${MODELFILE_DIR}"
 
 cp -r "${TMPDIR}/modelfiles"/* "${MODELFILE_DIR}/"
+
+
+log "Installing PI artifacts ..."
+
+rm -rf "${PI_DIR}"
+
+mkdir -p "${PI_DIR}"
+
+cp -r "${TMPDIR}/pi"/* "${PI_DIR}/"
+
 
 log "📦 Installing Python server to ${SERVER_DIR}..."
 rm -rf "${SERVER_DIR}"

@@ -9,6 +9,7 @@ dependencies = [
     "mlx-lm==0.31.0",
     "black==25.9.0",
     "openai-harmony==0.0.8",
+    "httpx==0.28.1",
     "openresponses-types"
 ]
 
@@ -20,4 +21,4 @@ build-backend = "setuptools.build_meta"
 exclude = ["backend", "backend.*"]
 
 [tool.uv]
-exclude-newer="10 days"
+exclude-newer="2026-04-05T09:43:13.300458+00:00"

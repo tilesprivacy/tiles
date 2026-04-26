@@ -50,6 +50,18 @@ This guide will help you set up a reproducible development environment for Tiles
      uv sync
      cd ..
      ```
+### Embedding Pi
+
+[Pi](https://github.com/badlogic/pi-mono) is a minimal coding agent for agentic harness. We embed Pi in Tiles so that it can sit in between the CLI and inference layer to provide more powerful features for the regular knowledge work, agent harness and whatever that comes in future is just an extension away thus making Tiles flexible and can ride the wave of standards.
+
+Current approach on how we integrate Pi is, we pack the pi bun binary with the tiles installer and use Pi in rpc mode from Tiles. So Pi interacts with the Tiles model inference and communicates with the Tiles Pi via stdin, stdout json.
+
+
+#### Setting up PI
+
+For development,  Tiles expect a `pi` folder under `.tiles_dev/tiles/` (This folder is created first time when we run tiles from the root directory with `cargo run`). We can run `just build_w_pi` which will handle downloading and extracting the relevant Pi binary.
+
+
 
 ## Running Tiles (Development)
 
@@ -74,7 +86,7 @@ Open two terminal windows:
 
 > **Tip:** Refer to the `justfile` for additional common commands and automation. For troubleshooting, see [CONTRIBUTING.md](CONTRIBUTING.md) and open an issue if you need help.
 
-### Building Tiles installer (Development)
+## Building Tiles installer (Development)
 
 Install [venvstacks](https://github.com/lmstudio-ai/venvstacks?tab=readme-ov-file#installing) for portable py runtime
 
@@ -91,6 +103,7 @@ just install
 ```
 
 Now `tiles` should be available in PATH
+
 
 ## Additional Resources
 

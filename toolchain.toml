@@ -1,0 +1,12 @@
+# Tiles toolchain 
+# Here we can find all the info related to libs,tools that either Tiles embed with it or Tiles rely on development. This is used for tracking the versions etc, which then can be used by other programs or scripts to derive values runtime.
+
+
+[embedded-tools]
+pi = "v0.67.68"
+sqlcipher = "4.10.0"
+
+[dev-tools]
+venvstacks = "0.8.0"
+
+# grep '^pi' toolchain.toml | head -1 | awk -F'"' '{print $2}'

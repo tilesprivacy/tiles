@@ -2,23 +2,35 @@
 set -euo pipefail
 
 BINARY_NAME="tiles"
+# Folder where final tar.gz will be created
 DIST_DIR="dist"
+# Folder where we store the modelfiles, which will be copied to installer
 MODELFILE_DIR="modelfiles"
+# Py server folder, which will be copied to installer
 SERVER_DIR="server"
+# cargo build mode for production
 TARGET="release"
 
+# Fetching the tiles binary version from its cargo.toml version 
 VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
+
+# Name for final tar.gz 
+
 OUT_NAME="${BINARY_NAME}-v${VERSION}-${ARCH}-${OS}"
 
 echo "🚀 Building ${BINARY_NAME} (${TARGET} mode)..."
 
 cargo build -p tiles --${TARGET}
 
+
+# Destination where the release binary is generated
 CLI_BIN_PATH="target/${TARGET}/${BINARY_NAME}"
   
 chmod +x "${CLI_BIN_PATH}"
+
+echo "Signing the Tiles binary..."
 
 # Signing the tiles binary
 codesign --force \
@@ -28,16 +40,34 @@ codesign --force \
   --strict \
   "${CLI_BIN_PATH}"
 
-# notarizing
-xcrun notarytool submit --force "${CLI_BIN_PATH}" \
-  --keychain-profile "tiles-notary-profile" \
-  --wait
-
-# rm -rf "${DIST_DIR}"
 
 mkdir -p "${DIST_DIR}/tmp"
 
 cp "${CLI_BIN_PATH}"  "${DIST_DIR}/tmp/"
+
+echo "Embedding Pi"
+# Copying pi artifacts into extracted pi folder
+cp pi-darwin-arm64.tar.gz "${DIST_DIR}/tmp/"
+
+tar -xvf "${DIST_DIR}/tmp/pi-darwin-arm64.tar.gz" -C "${DIST_DIR}/tmp"
+
+rm "${DIST_DIR}/tmp/pi-darwin-arm64.tar.gz"
+
+# removing unnecessary files
+# rm -rf "${DIST_DIR}/tmp/pi/examples"
+
+# Signing the pi binary
+
+echo "Signing Pi binary..."
+
+codesign --force \
+  --sign "$DEVELOPER_ID_APPLICATION" \
+  --options runtime \
+  --timestamp \
+  --entitlements entitleme.plist \
+  --strict \
+  "${DIST_DIR}/tmp/pi/pi" 
+
 
 # flushing this folder, else the final zip will have previous app-server zips too (#84)
 rm -rf "${SERVER_DIR}/stack_export_prod"
@@ -57,6 +87,8 @@ venvstacks publish --tag-outputs --output-dir ../stack_export_prod server/stack/
 cp -r "${SERVER_DIR}" "${DIST_DIR}/tmp/"
 
 rm -rf "${DIST_DIR}/tmp/server/__pycache__"
+# rm -rf "${DIST_DIR}/tmp/server/mem_agent/__pycache__"
+# rm -rf "${DIST_DIR}/tmp/server/backend/__pycache__"
 rm -rf "${DIST_DIR}/tmp/server/.venv"
 rm -rf "${DIST_DIR}/tmp/server/stack"
 

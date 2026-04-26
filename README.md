@@ -3,8 +3,8 @@
 <p align="center">
   <a href="https://github.com/tilesprivacy/">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="https://avatars.githubusercontent.com/u/210493283" />
-      <source media="(prefers-color-scheme: light)" srcset="https://github.com/user-attachments/assets/984f9fa7-d097-4d36-bd98-da1a71cf778d" />
+      <source media="(prefers-color-scheme: dark)" srcset="https://tiles.run/realdark.png" />
+      <source media="(prefers-color-scheme: light)" srcset="https://tiles.run/reallight.png" />
       <img src="https://github.com/user-attachments/assets/1c7848de-33af-47ed-9fb2-a361c096a44d" alt="Tiles Logo" width="128" />
     </picture>
   </a>
@@ -13,7 +13,7 @@
 <h1 align="center">Tiles</h1>
 
 <p align="center">
-  Your private and secure AI assistant for everyday use<br />
+  Local-first private AI for everyday use.<br />
   <a href="#getting-started">Getting Started</a> ·
   <a href="https://tiles.run/book">Documentation</a> ·
   <a href="#about">About</a> ·
@@ -23,13 +23,17 @@
 
 ---
 
+
+> **Status: Alpha**  
+> Tiles is currently alpha-quality software. It is usable for everyday tasks, though you may encounter bugs and performance issues. Tilekit, the developer SDK, is experimental, not a current priority, and intended for exploratory use, not production.
+
 ## Getting Started
 
 There are two primary ways to work with Tiles, depending on whether you are an end user or a developer.
 
 ## Tiles CLI
 
-Tiles is the private and secure AI assistant for everyday use. It will feel familiar if you have used tools like Ollama or LM Studio.
+Tiles is the local-first private AI for everyday use.
 
 Install the signed macOS package:
 
@@ -43,7 +47,7 @@ tiles
 
 ## Tilekit SDK
 
-Tilekit is a Rust-based SDK for customizing local models and agent experiences within Tiles.
+Tilekit is the SDK for developers to build on the infrastructure behind Tiles. It aims to be the app-server interface behind Tiles and future rich client experiences. Developers can embed it into their local clients by bundling or fetching a platform-specific App Server binary, running as a long-lived child process and communicating over bidirectional stdio JSON-RPC.
 
 ## Documentation
 
@@ -52,13 +56,9 @@ https://tiles.run/book
 
 ## About
 
-Our mission is to bring privacy technology to everyone.
+Tiles is built by a small team working on private, local-first software, with a clear mission: to bring privacy technology to everyone. 
 
-Tiles Privacy was born from the [User & Agents](https://userandagents.com) community  with a simple idea: software should understand you without taking anything from you.
-
-We strive to deliver the best privacy-focused engineering while also offering unmatched convenience in our consumer products. We believe identity and memory belong together, and Tiles gives you a way to own both through your personal user agent.
-
-Tiles is built for privacy conscious users who want intelligence without renting their memory to centralized providers. 
+This project is part of the [User & Agents](https://userandagents.com) network. The shared goal is to empower people by designing and building software that provides agency, control, and choice in our digital lives. We strive to deliver the best privacy-focused engineering while also offering unmatched convenience in our consumer products. We believe identity and memory belong together, and Tiles gives you a way to own both through your personal user agent.
 
 We are seeking design partners for TEE based cloud workloads that align with our goal of a verifiable privacy perimeter. Contact us at [mail@tiles.run](mailto:mail@tiles.run).
 
