@@ -36,7 +36,6 @@ struct StoredLicense {
     product_id: String,
     license_type: String,
     expires_at: Option<i64>,
-    activations_used: Option<i64>,
     activations_limit: Option<i64>,
     customer_portal_url: Option<String>,
     device_id: String,
@@ -130,7 +129,6 @@ pub async fn activate(conn: &Dbconn, license_key: &str) -> Result<()> {
     let activations_limit = validate_payload
         .limit_activations
         .or(activate_resp.license_key.limit_activations);
-    let activations_used: Option<i64> = None;
     let customer_portal_url: Option<String> = None;
 
     let now = unix_now_seconds();
@@ -140,7 +138,6 @@ pub async fn activate(conn: &Dbconn, license_key: &str) -> Result<()> {
         product_id: product_id.to_owned(),
         license_type: license_type.to_owned(),
         expires_at,
-        activations_used,
         activations_limit,
         customer_portal_url: customer_portal_url.clone(),
         device_id,
@@ -379,21 +376,20 @@ fn upsert_license(conn: &Connection, row: &StoredLicense) -> Result<()> {
     let mut stmt = conn.prepare(
         "INSERT INTO polar_license(
             id, license_key, activation_id, product_id, license_type,
-            expires_at, activations_used, activations_limit, customer_portal_url,
+            expires_at, activations_limit, customer_portal_url,
             device_id, activated_at, updated_at
-         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
          ON CONFLICT(id) DO UPDATE SET
             license_key = ?1,
             activation_id = ?2,
             product_id = ?3,
             license_type = ?4,
             expires_at = ?5,
-            activations_used = ?6,
-            activations_limit = ?7,
-            customer_portal_url = ?8,
-            device_id = ?9,
-            activated_at = ?10,
-            updated_at = ?11",
+            activations_limit = ?6,
+            customer_portal_url = ?7,
+            device_id = ?8,
+            activated_at = ?9,
+            updated_at = ?10",
     )?;
     stmt.execute(params![
         row.license_key,
@@ -401,7 +397,6 @@ fn upsert_license(conn: &Connection, row: &StoredLicense) -> Result<()> {
         row.product_id,
         row.license_type,
         row.expires_at,
-        row.activations_used,
         row.activations_limit,
         row.customer_portal_url,
         row.device_id,
@@ -415,7 +410,7 @@ fn upsert_license(conn: &Connection, row: &StoredLicense) -> Result<()> {
 fn fetch_license(conn: &Connection) -> Result<Option<StoredLicense>> {
     conn.query_row(
         "SELECT license_key, activation_id, product_id, license_type, expires_at,
-                activations_used, activations_limit, customer_portal_url, device_id,
+                activations_limit, customer_portal_url, device_id,
                 activated_at, updated_at
          FROM polar_license WHERE id = 1",
         [],
@@ -426,12 +421,11 @@ fn fetch_license(conn: &Connection) -> Result<Option<StoredLicense>> {
                 product_id: row.get(2)?,
                 license_type: row.get(3)?,
                 expires_at: row.get(4)?,
-                activations_used: row.get(5)?,
-                activations_limit: row.get(6)?,
-                customer_portal_url: row.get(7)?,
-                device_id: row.get(8)?,
-                activated_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                activations_limit: row.get(5)?,
+                customer_portal_url: row.get(6)?,
+                device_id: row.get(7)?,
+                activated_at: row.get(8)?,
+                updated_at: row.get(9)?,
             })
         },
     )
@@ -559,7 +553,6 @@ mod tests {
                 product_id TEXT NOT NULL,
                 license_type TEXT NOT NULL,
                 expires_at INTEGER,
-                activations_used INTEGER,
                 activations_limit INTEGER,
                 customer_portal_url TEXT,
                 device_id TEXT NOT NULL,
@@ -579,7 +572,6 @@ mod tests {
             product_id: PRODUCT_ID_BACKER.to_owned(),
             license_type: license_type.to_owned(),
             expires_at,
-            activations_used: Some(1),
             activations_limit: Some(5),
             customer_portal_url: Some("https://polar.sh/portal".to_owned()),
             device_id: "device-1".to_owned(),
