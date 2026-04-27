@@ -217,12 +217,23 @@ pub async fn status(conn: &Dbconn) -> Result<()> {
     match (row.license_type.as_str(), row.expires_at) {
         (LICENSE_TYPE_BACKER, _) | (_, None) => println!("Expires: Never"),
         (_, Some(exp)) => {
-            let now = unix_now_seconds();
-            let days = (exp - now) / 86_400;
-            let suffix = if exp <= now {
+            let rem = exp - unix_now_seconds();
+            let suffix = if rem <= 0 {
                 "EXPIRED".to_owned()
+            } else if rem < 86_400 {
+                let hours = (rem + 3_599) / 3_600;
+                if hours == 1 {
+                    "(1 hour remaining)".to_owned()
+                } else {
+                    format!("({} hours remaining)", hours)
+                }
             } else {
-                format!("({} days remaining)", days)
+                let days = (rem + 86_399) / 86_400;
+                if days == 1 {
+                    "(1 day remaining)".to_owned()
+                } else {
+                    format!("({} days remaining)", days)
+                }
             };
             println!("Expires: {} {}", format_unix_date(exp), suffix);
         }
