@@ -2,6 +2,9 @@
 //!
 //! Handles Polar.sh license key activation, validation, and deactivation
 
+use std::sync::OnceLock;
+use std::time::Duration;
+
 use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc};
 use keyring::Entry;
@@ -13,6 +16,28 @@ use crate::utils::config::get_app_name;
 
 const POLAR_BASE_URL: &str = "https://api.polar.sh/v1";
 const POLAR_ORG_ID: &str = "028ca25d-5316-46a1-8771-28c6403d8348";
+
+static POLAR_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+fn polar_client() -> &'static reqwest::Client {
+    POLAR_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(15))
+            .build()
+            .expect("failed to build HTTP client")
+    })
+}
+
+fn check_polar_response_status(status: reqwest::StatusCode, body: &str) -> Result<()> {
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(anyhow!("Polar rate limit reached (429) — please wait a moment and try again"));
+    }
+    if !status.is_success() {
+        return Err(anyhow!("Polar API error ({}): {}", status, body));
+    }
+    Ok(())
+}
 
 // Product IDs (kept for reference and future use)
 #[allow(dead_code)]
@@ -161,8 +186,7 @@ pub async fn activate_license(license_key: &str, conn: &Connection) -> Result<Li
     let device_id = get_device_id()?;
 
     // Call Polar API to activate
-    let client = reqwest::Client::new();
-    let response = client
+    let response = polar_client()
         .post(&format!("{}/customer-portal/license-keys/activate", POLAR_BASE_URL))
         .json(&serde_json::json!({
             "key": license_key,
@@ -172,13 +196,11 @@ pub async fn activate_license(license_key: &str, conn: &Connection) -> Result<Li
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_body = response.text().await?;
-        return Err(anyhow!("License activation failed ({}): {}", status, error_body));
-    }
+    let status = response.status();
+    let body = response.text().await?;
+    check_polar_response_status(status, &body).map_err(|e| anyhow!("License activation failed: {}", e))?;
 
-    let activation: ActivationResponse = response.json().await?;
+    let activation: ActivationResponse = serde_json::from_str(&body)?;
 
     // Determine product type from benefit_id or key prefix
     let product_type = if license_key.starts_with("BACKER-") {
@@ -252,8 +274,7 @@ pub async fn get_license_details(license_info: &LicenseInfo) -> Result<Validatio
     let license_key = entry.get_password()
         .map_err(|_| anyhow!("License key not found in keychain"))?;
 
-    let client = reqwest::Client::new();
-    let response = client
+    let response = polar_client()
         .post(&format!("{}/customer-portal/license-keys/validate", POLAR_BASE_URL))
         .json(&serde_json::json!({
             "key": license_key,
@@ -263,13 +284,11 @@ pub async fn get_license_details(license_info: &LicenseInfo) -> Result<Validatio
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_body = response.text().await?;
-        return Err(anyhow!("License validation failed ({}): {}", status, error_body));
-    }
+    let status = response.status();
+    let body = response.text().await?;
+    check_polar_response_status(status, &body).map_err(|e| anyhow!("License validation failed: {}", e))?;
 
-    let validation: ValidationResponse = response.json().await?;
+    let validation: ValidationResponse = serde_json::from_str(&body)?;
     Ok(validation)
 }
 
@@ -294,8 +313,7 @@ pub async fn deactivate_license(license_info: &LicenseInfo, conn: &Connection) -
     let license_key = entry.get_password()
         .map_err(|_| anyhow!("License key not found in keychain"))?;
 
-    let client = reqwest::Client::new();
-    let response = client
+    let response = polar_client()
         .post(&format!("{}/customer-portal/license-keys/deactivate", POLAR_BASE_URL))
         .json(&serde_json::json!({
             "key": license_key,
@@ -305,11 +323,9 @@ pub async fn deactivate_license(license_info: &LicenseInfo, conn: &Connection) -
         .send()
         .await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
-        let error_body = response.text().await?;
-        return Err(anyhow!("License deactivation failed ({}): {}", status, error_body));
-    }
+    let status = response.status();
+    let body = response.text().await?;
+    check_polar_response_status(status, &body).map_err(|e| anyhow!("License deactivation failed: {}", e))?;
 
     purge_local_license(conn, license_info)?;
 
