@@ -80,6 +80,7 @@ struct ActivationResponse {
 #[derive(Debug, Deserialize)]
 struct LicenseKeyDetails {
     id: String,
+    benefit_id: String,
     status: String,
     expires_at: Option<String>,
 }
@@ -202,14 +203,12 @@ pub async fn activate_license(license_key: &str, conn: &Connection) -> Result<Li
 
     let activation: ActivationResponse = serde_json::from_str(&body)?;
 
-    // Determine product type from benefit_id or key prefix
-    let product_type = if license_key.starts_with("BACKER-") {
-        ProductType::Backer
-    } else if license_key.starts_with("COMMERCIAL-") {
-        ProductType::Commercial
-    } else {
-        // Fallback: check benefit_id if available
-        ProductType::Commercial
+    let product_type = match activation.license_key.benefit_id.as_str() {
+        id if id == BACKER_PRODUCT_ID => ProductType::Backer,
+        id if id == COMMERCIAL_PRODUCT_ID => ProductType::Commercial,
+        _ if license_key.starts_with("BACKER-") => ProductType::Backer,
+        _ if license_key.starts_with("COMMERCIAL-") => ProductType::Commercial,
+        other => return Err(anyhow!("unrecognised benefit_id {:?} — cannot determine license type", other)),
     };
 
     let expires_at = activation.license_key.expires_at
@@ -221,7 +220,7 @@ pub async fn activate_license(license_key: &str, conn: &Connection) -> Result<Li
     let license_info = LicenseInfo {
         id: activation.license_key.id.clone(),
         activation_id: activation_id.clone(),
-        benefit_id: activation.license_key.id.clone(),
+        benefit_id: activation.license_key.benefit_id.clone(),
         product_type: product_type.clone(),
         status: match activation.license_key.status.as_str() {
             "granted" => LicenseStatus::Active,
