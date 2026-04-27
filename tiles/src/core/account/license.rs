@@ -146,7 +146,13 @@ pub async fn activate(conn: &Dbconn, license_key: &str) -> Result<()> {
         activated_at: now,
         updated_at: now,
     };
-    upsert_license(&conn.common, &row)?;
+    if let Err(upsert_err) = upsert_license(&conn.common, &row) {
+        let _ = polar_deactivate(&client, key, &row.activation_id).await;
+        return Err(anyhow!(
+            "License activated but persistence failed; activation has been released. Reason: {}",
+            upsert_err
+        ));
+    }
 
     let label = label_for_type(license_type, expires_at);
     println!(
