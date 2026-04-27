@@ -85,41 +85,59 @@ pub fn get_active_license(conn: &Connection) -> Result<Option<LicenseInfo>> {
          LIMIT 1"
     )?;
 
-    let license = stmt.query_row([], |row| {
-        let product_type_str: String = row.get(3)?;
-        let status_str: String = row.get(4)?;
-        let expires_str: Option<String> = row.get(5)?;
-        let activated_str: String = row.get(6)?;
+    type RawRow = (String, String, String, String, String, Option<String>, String);
+    let raw: RawRow = match stmt.query_row([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+            row.get(6)?,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
 
-        Ok(LicenseInfo {
-            id: row.get(0)?,
-            activation_id: row.get(1)?,
-            benefit_id: row.get(2)?,
-            product_type: match product_type_str.as_str() {
-                "Backer" => ProductType::Backer,
-                "Commercial" => ProductType::Commercial,
-                _ => ProductType::Backer,
-            },
-            status: match status_str.as_str() {
-                "Active" => LicenseStatus::Active,
-                "Expired" => LicenseStatus::Expired,
-                "Revoked" => LicenseStatus::Revoked,
-                _ => LicenseStatus::Active,
-            },
-            expires_at: expires_str.and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-                .map(|dt| dt.with_timezone(&Utc)),
-            activated_at: DateTime::parse_from_rfc3339(&activated_str)
-                .ok()
+    let (id, activation_id, benefit_id, product_type_str, status_str, expires_str, activated_str) = raw;
+
+    let product_type = match product_type_str.as_str() {
+        "Backer" => ProductType::Backer,
+        "Commercial" => ProductType::Commercial,
+        other => return Err(anyhow!("corrupt license row: unknown product_type {:?}", other)),
+    };
+
+    let status = match status_str.as_str() {
+        "Active" => LicenseStatus::Active,
+        "Expired" => LicenseStatus::Expired,
+        "Revoked" => LicenseStatus::Revoked,
+        other => return Err(anyhow!("corrupt license row: unknown status {:?}", other)),
+    };
+
+    let expires_at = expires_str
+        .map(|s| {
+            DateTime::parse_from_rfc3339(&s)
                 .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(Utc::now),
+                .map_err(|e| anyhow!("corrupt license row: invalid expires_at {:?}: {}", s, e))
         })
-    });
+        .transpose()?;
 
-    match license {
-        Ok(lic) => Ok(Some(lic)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.into()),
-    }
+    let activated_at = DateTime::parse_from_rfc3339(&activated_str)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| anyhow!("corrupt license row: invalid activated_at {:?}: {}", activated_str, e))?;
+
+    Ok(Some(LicenseInfo {
+        id,
+        activation_id,
+        benefit_id,
+        product_type,
+        status,
+        expires_at,
+        activated_at,
+    }))
 }
 
 /// Generates a unique device identifier
