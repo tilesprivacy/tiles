@@ -26,21 +26,33 @@ pub struct Dbconn {
 
 // DEFINE MIGRATIONS
 
-const COMMON_MIGRATION_ARRAY: &[M] = &[M::up(
-    "
-    CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        user_id TEXT NOT NULL,
-        username TEXT NOT NULL,
-        active_profile INTEGER NOT NULL DEFAULT 0 CHECK (active_profile IN (0,1)),
-        account_type TEXT NOT NULL,
-        root INTEGER NOT NULL DEFAULT 0 CHECK (root IN (0,1)),
-        created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-        updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
-        UNIQUE(account_type, user_id)
-    );
-    ",
-)];
+const COMMON_MIGRATION_ARRAY: &[M] = &[
+    M::up(
+        "CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            username TEXT NOT NULL,
+            active_profile INTEGER NOT NULL DEFAULT 0 CHECK (active_profile IN (0,1)),
+            account_type TEXT NOT NULL,
+            root INTEGER NOT NULL DEFAULT 0 CHECK (root IN (0,1)),
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            UNIQUE(account_type, user_id)
+        );
+        ",
+    ),
+    M::up(
+        "CREATE TABLE IF NOT EXISTS atproto_auth_data(
+            key TEXT PRIMARY KEY,
+            session TEXT ,
+            state TEXT,
+            is_logged_in INTEGER NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            handle TEXT NOT NULL
+        )",
+    ),
+];
 
 const COMMON_MIGRATIONS: Migrations = Migrations::from_slice(COMMON_MIGRATION_ARRAY);
 

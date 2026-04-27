@@ -6908,6 +6908,8 @@ version = "0.4.8"
 dependencies = [
  "anyhow",
  "async-std",
+ "atrium-api",
+ "atrium-common",
  "atrium-identity",
  "atrium-oauth",
  "axum",

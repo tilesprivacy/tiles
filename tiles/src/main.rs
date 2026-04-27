@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand};
 use tiles::{
     core::{
         self,
-        account::atproto::login,
+        account::atproto::{login, logout},
         network::{link, sync},
     },
     daemon::{start_cmd, start_server, stop_cmd},
@@ -203,7 +203,10 @@ struct AtArgs {
 #[derive(Debug, Subcommand)]
 enum AtCommands {
     /// Produce link ticket and wait or send link request with ticket
-    Login { handle: String },
+    Login {
+        handle: String,
+    },
+    Logout,
 }
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
@@ -314,8 +317,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::Sync { did }) => sync(did).await?,
         Some(Commands::At(at_args)) => match at_args.command {
             AtCommands::Login { handle } => {
-                login(&handle).await?;
+                login(&db_conn, &handle).await?;
             }
+            AtCommands::Logout => logout(&db_conn)?,
         },
     }
     Ok(())

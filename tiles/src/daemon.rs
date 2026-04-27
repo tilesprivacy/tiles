@@ -190,7 +190,7 @@ async fn callback(
     let mut sender = state.shutdown_sender.lock().unwrap();
     let sender_real = sender.take().unwrap();
     let _ = sender_real.send(true);
-    "Processed your authorization input, You can close this page"
+    "Processed your authorization request, You can close this page"
 }
 
 async fn get_model_cache_path(
