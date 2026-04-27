@@ -225,7 +225,10 @@ pub async fn activate_license(license_key: &str, conn: &Connection) -> Result<Li
         status: match activation.license_key.status.as_str() {
             "granted" => LicenseStatus::Active,
             "revoked" => LicenseStatus::Revoked,
-            _ => LicenseStatus::Active,
+            other => return Err(anyhow!(
+                "License activation rejected: Polar returned unrecognised status {:?}",
+                other
+            )),
         },
         expires_at,
         activated_at: Utc::now(),
