@@ -231,13 +231,29 @@ pub async fn activate_license(license_key: &str, conn: &Connection) -> Result<Li
         activated_at: Utc::now(),
     };
 
-    // Store license key in keychain
+    // Save to DB first — cheaper to roll back locally than to reclaim a Polar slot.
+    save_license(conn, &license_info)?;
+
+    // Write the license key to the keychain. On failure, roll back the DB row
+    // and free the Polar activation slot so the user doesn't lose one of their 5.
     let app_name = get_app_name();
     let entry = Entry::new(&app_name, &format!("license_key_{}", activation_id))?;
-    entry.set_password(license_key)?;
-
-    // Save to database
-    save_license(conn, &license_info)?;
+    if let Err(keychain_err) = entry.set_password(license_key) {
+        let _ = conn.execute(
+            "DELETE FROM licenses WHERE activation_id = ?1",
+            [&activation_id],
+        );
+        let _ = polar_client()
+            .post(&format!("{}/customer-portal/license-keys/deactivate", POLAR_BASE_URL))
+            .json(&serde_json::json!({
+                "key": license_key,
+                "organization_id": POLAR_ORG_ID,
+                "activation_id": activation_id,
+            }))
+            .send()
+            .await;
+        return Err(anyhow!("Failed to store license key in keychain: {}", keychain_err));
+    }
 
     Ok(license_info)
 }
