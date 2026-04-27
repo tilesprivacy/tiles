@@ -408,7 +408,7 @@ pub async fn deactivate_license_cmd(db_conn: &Dbconn) -> Result<()> {
                             println!();
                             println!("This device is no longer using a license activation.");
                             println!("You can activate it again on this or another device using:");
-                            println!("  {}", "tiles activate <license-key>".bright_blue().bold());
+                            println!("  {}", "tiles license activate <license-key>".bright_blue().bold());
                         }
                         Err(e) => {
                             println!("{}", format!("✗ License deactivation failed: {}", e).red());
@@ -458,7 +458,7 @@ pub async fn deactivate_license_cmd(db_conn: &Dbconn) -> Result<()> {
             println!("{}", "No active license found on this device.".yellow());
             println!();
             println!("To activate a license, use:");
-            println!("  {}", "tiles activate <license-key>".bright_blue().bold());
+            println!("  {}", "tiles license activate <license-key>".bright_blue().bold());
         }
     }
 
