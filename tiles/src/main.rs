@@ -77,6 +77,9 @@ enum Commands {
         /// The DID of the peer you want to sync
         did: Option<String>,
     },
+
+    /// Manage license
+    License(LicenseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -187,6 +190,29 @@ enum LinkCommands {
     /// Start the daemon
     ListPeers,
 }
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct LicenseArgs {
+    #[command(subcommand)]
+    command: LicenseCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum LicenseCommands {
+    /// Activate a license key
+    Activate {
+        /// License key to activate
+        license_key: String,
+    },
+
+    /// Deactivate the current license
+    Deactivate,
+
+    /// Show current license status
+    Status,
+}
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
@@ -204,7 +230,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 pi: cli.flags.pi,
             };
 
-            commands::run_setup_for_ftue(&run_args)
+            commands::run_setup_for_ftue(&run_args, &db_conn)
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
             let _ = commands::try_app_update().await;
 
@@ -233,7 +259,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 memory: flags.memory,
                 pi: flags.pi,
             };
-            commands::run_setup_for_ftue(&run_args)
+            commands::run_setup_for_ftue(&run_args, &db_conn)
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
 
             let t = tokio::spawn(async move {
@@ -294,6 +320,17 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         Some(Commands::Sync { did }) => sync(did).await?,
+        Some(Commands::License(license_args)) => match license_args.command {
+            LicenseCommands::Activate { license_key } => {
+                commands::activate_license_cmd(&license_key, &db_conn).await?;
+            }
+            LicenseCommands::Deactivate => {
+                commands::deactivate_license_cmd(&db_conn).await?;
+            }
+            LicenseCommands::Status => {
+                commands::show_license_status(&db_conn).await?;
+            }
+        },
     }
     Ok(())
 }

@@ -8,6 +8,10 @@ use tiles::core::accounts::{
     RootUser, create_root_account, get_peer_list, get_root_user_details, save_root_account,
     set_nickname, unlink,
 };
+use tiles::core::license::{
+    activate_license, deactivate_license, get_active_license, get_license_details,
+    get_license_status_string, validate_license, ProductType,
+};
 use tiles::core::storage::db::Dbconn;
 use tiles::runtime::Runtime;
 use tiles::utils::config::{
@@ -76,7 +80,7 @@ const FTUE_DATA_DIR_CHANGE_COMMAND: &str = "tiles data set-path <PATH>";
 const FTUE_CUSTOM_DATA_PROMPT: &str = "Use a custom data directory now? [y/N]";
 const FTUE_UPDATE_COMMAND: &str = "tiles update";
 
-pub fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
+pub fn run_setup_for_ftue(_run_args: &RunArgs, db_conn: &Dbconn) -> Result<()> {
     // initializes config directory
     let config_provider = DefaultProvider;
     config_provider.get_or_create_config_dir()?;
@@ -84,8 +88,12 @@ pub fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
 
     let root_config = get_or_create_config()?;
     let root_user_details = get_root_user_details(&root_config)?;
+
+    // Get license status
+    let license_status = get_license_status_string(&db_conn.common);
+
     println!("{}", FTUE_ASCII_ART.blue());
-    println!("{} {}", FTUE_VERSION_TITLE, env!("CARGO_PKG_VERSION"));
+    println!("{} {} {}", FTUE_VERSION_TITLE, env!("CARGO_PKG_VERSION"), license_status);
     println!();
 
     if root_user_details.id.is_empty() {
@@ -349,6 +357,243 @@ pub fn unlink_peer(db_conn: &Dbconn, user_id: &str) -> Result<()> {
     } else {
         println!("Succesfully disabled the peer")
     }
+    Ok(())
+}
+
+/// Activates a license key
+pub async fn activate_license_cmd(license_key: &str, db_conn: &Dbconn) -> Result<()> {
+    println!("Activating license...");
+
+    match activate_license(license_key, &db_conn.common).await {
+        Ok(license_info) => {
+            println!("{}", "✓ License activated successfully!".green());
+            println!();
+            println!("License Details:");
+            println!("  Type: {:?}", license_info.product_type);
+            println!("  Status: {:?}", license_info.status);
+            if let Some(expires_at) = license_info.expires_at {
+                println!("  Expires: {}", expires_at.format("%Y-%m-%d %H:%M:%S UTC"));
+            } else {
+                println!("  Expires: Never (Lifetime)");
+            }
+            println!();
+            println!("Your license is now active. Restart Tiles to see the updated status.");
+        }
+        Err(e) => {
+            println!("{}", format!("✗ License activation failed: {}", e).red());
+            println!();
+            println!("Common issues:");
+            println!("  - Invalid license key format");
+            println!("  - License already activated on 5 devices (deactivate one first)");
+            println!("  - License has been revoked");
+            println!("  - Network connectivity issues");
+        }
+    }
+
+    Ok(())
+}
+
+/// Deactivates the current license
+pub async fn deactivate_license_cmd(db_conn: &Dbconn) -> Result<()> {
+    let license = get_active_license(&db_conn.common)?;
+
+    match license {
+        Some(license_info) => {
+            println!("Deactivating license...");
+
+            // Validate before deactivating
+            match validate_license(&license_info).await {
+                Ok(true) => {
+                    match deactivate_license(&license_info, &db_conn.common).await {
+                        Ok(_) => {
+                            println!("{}", "✓ License deactivated successfully!".green());
+                            println!();
+                            println!("This device is no longer using a license activation.");
+                            println!("You can activate it again on this or another device using:");
+                            println!("  {}", "tiles activate <license-key>".bright_blue().bold());
+                        }
+                        Err(e) => {
+                            println!("{}", format!("✗ License deactivation failed: {}", e).red());
+                        }
+                    }
+                }
+                Ok(false) => {
+                    println!("{}", "✗ License is no longer valid or has been revoked".red());
+                    println!();
+                    println!("Removing local license data...");
+                    // Remove from database
+                    db_conn.common.execute(
+                        "DELETE FROM licenses WHERE activation_id = ?1",
+                        [&license_info.activation_id],
+                    )?;
+                    // Remove from keychain
+                    let app_name = tiles::utils::config::get_app_name();
+                    if let Ok(entry) = keyring::Entry::new(&app_name, &format!("license_key_{}", license_info.activation_id)) {
+                        let _ = entry.delete_credential();
+                    }
+                    println!("{}", "✓ Local license data removed".green());
+                }
+                Err(e) => {
+                    println!("{}", format!("✗ Error validating license: {}", e).red());
+                    println!();
+                    println!("Do you want to force remove the local license? (y/N)");
+                    let stdin = io::stdin();
+                    let mut input = String::new();
+                    stdin.read_line(&mut input)?;
+                    if input.trim().to_lowercase() == "y" {
+                        // Remove from database
+                        db_conn.common.execute(
+                            "DELETE FROM licenses WHERE activation_id = ?1",
+                            [&license_info.activation_id],
+                        )?;
+                        // Remove from keychain
+                        let app_name = tiles::utils::config::get_app_name();
+                        if let Ok(entry) = keyring::Entry::new(&app_name, &format!("license_key_{}", license_info.activation_id)) {
+                            let _ = entry.delete_credential();
+                        }
+                        println!("{}", "✓ Local license data removed".green());
+                    }
+                }
+            }
+        }
+        None => {
+            println!("{}", "No active license found on this device.".yellow());
+            println!();
+            println!("To activate a license, use:");
+            println!("  {}", "tiles activate <license-key>".bright_blue().bold());
+        }
+    }
+
+    Ok(())
+}
+
+/// Shows detailed license status
+pub async fn show_license_status(db_conn: &Dbconn) -> Result<()> {
+    let license = get_active_license(&db_conn.common)?;
+
+    match license {
+        Some(license_info) => {
+            println!("License Status");
+            println!("═══════════════════════════════════════════════");
+            println!();
+
+            // Get detailed info from Polar API
+            match get_license_details(&license_info).await {
+                Ok(details) => {
+                    // License Type
+                    let license_type = match license_info.product_type {
+                        ProductType::Backer => "Backer License (Lifetime)",
+                        ProductType::Commercial => "Commercial License (Annual Subscription)",
+                    };
+                    println!("License Type:      {}", license_type.green());
+
+                    // Status
+                    let status_display = match details.status.as_str() {
+                        "granted" => "Active".green().to_string(),
+                        "revoked" => "Revoked".red().to_string(),
+                        "disabled" => "Disabled".red().to_string(),
+                        _ => details.status.yellow().to_string(),
+                    };
+                    println!("Status:            {}", status_display);
+                    println!();
+
+                    // Expiration / Days Remaining
+                    if let Some(expires_at_str) = &details.expires_at {
+                        if let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at_str) {
+                            let expires_at_utc = expires_at.with_timezone(&chrono::Utc);
+                            let now = chrono::Utc::now();
+
+                            if expires_at_utc > now {
+                                let duration = expires_at_utc.signed_duration_since(now);
+                                let days_remaining = duration.num_days();
+
+                                println!("Expires:           {}", expires_at_utc.format("%Y-%m-%d %H:%M:%S UTC"));
+
+                                let days_display = if days_remaining > 30 {
+                                    format!("{} days", days_remaining).green().to_string()
+                                } else if days_remaining > 7 {
+                                    format!("{} days", days_remaining).yellow().to_string()
+                                } else {
+                                    format!("{} days", days_remaining).red().to_string()
+                                };
+                                println!("Days Remaining:    {}", days_display);
+                            } else {
+                                println!("Expires:           {} {}", expires_at_utc.format("%Y-%m-%d %H:%M:%S UTC"), "(EXPIRED)".red());
+                                println!("Days Remaining:    {}", "0 days".red());
+                            }
+                        }
+                    } else {
+                        println!("Expires:           {}", "Never (Lifetime)".green());
+                    }
+                    println!();
+
+                    // Activations
+                    if let Some(limit) = details.limit_activations {
+                        let usage = details.usage.unwrap_or(0);
+                        let remaining = limit - usage;
+
+                        println!("Activations Used:  {} / {}", usage, limit);
+
+                        let remaining_display = if remaining > 2 {
+                            format!("{} remaining", remaining).green().to_string()
+                        } else if remaining > 0 {
+                            format!("{} remaining", remaining).yellow().to_string()
+                        } else {
+                            format!("{} remaining", remaining).red().to_string()
+                        };
+                        println!("Activations Left:  {}", remaining_display);
+                    } else {
+                        println!("Activations:       {}", "Unlimited".green());
+                    }
+                    println!();
+                    println!("Activated On:      {}", license_info.activated_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                }
+                Err(e) => {
+                    println!("{}", "Unable to fetch current license details from Polar".red());
+                    println!("{}", format!("Error: {}", e).red());
+                    println!();
+                    println!("Local License Information:");
+                    println!("─────────────────────────────────────────────");
+
+                    let license_type = match license_info.product_type {
+                        ProductType::Backer => "Backer License (Lifetime)",
+                        ProductType::Commercial => "Commercial License (Annual Subscription)",
+                    };
+                    println!("License Type:      {}", license_type);
+                    println!("Activated On:      {}", license_info.activated_at.format("%Y-%m-%d %H:%M:%S UTC"));
+
+                    if let Some(expires_at) = license_info.expires_at {
+                        println!("Expected Expiry:   {}", expires_at.format("%Y-%m-%d %H:%M:%S UTC"));
+                    }
+                }
+            }
+
+            println!();
+            println!("Manage License");
+            println!("─────────────────────────────────────────────");
+            println!("You can manage your license, view all activations, and");
+            println!("deactivate devices through the Polar customer portal:");
+            println!();
+            println!("  {}", "https://polar.sh/tilesprivacy/portal/".bright_blue().underline());
+            println!();
+            println!("Log in with the email address used to purchase your license.");
+        }
+        None => {
+            println!("{}", "No Active License".yellow());
+            println!("═══════════════════════════════════════════════");
+            println!();
+            println!("This device does not have an active license.");
+            println!();
+            println!("To activate a license, use:");
+            println!("  {}", "tiles license activate <license-key>".bright_blue().bold());
+            println!();
+            println!("Manage License");
+            println!("─────────────────────────────────────────────");
+            println!("View your licenses and manage activations at:");
+            println!("  {}", "https://polar.sh/tilesprivacy/portal/".bright_blue().underline());
+        }
+    }
+
     Ok(())
 }
 
