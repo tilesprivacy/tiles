@@ -4,6 +4,7 @@
 //! Rate limit is 3 req/s; CLI invocations are single-shot, so no client-side throttling.
 
 use anyhow::{Result, anyhow};
+use log::warn;
 use owo_colors::OwoColorize;
 use reqwest::Client;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -197,7 +198,14 @@ pub async fn status(conn: &Dbconn) -> Result<()> {
                 .or(row.expires_at);
             row.activations_limit = payload.limit_activations.or(row.activations_limit);
             row.updated_at = unix_now_seconds();
-            let _ = upsert_license(&conn.common, &row);
+            if let Err(e) = upsert_license(&conn.common, &row) {
+                warn!(
+                    "failed to refresh license cache (key {}, activation {}): {}",
+                    mask_key(&row.license_key),
+                    row.activation_id,
+                    e
+                );
+            }
         }
         Err(_) => offline = true,
     }
