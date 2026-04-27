@@ -430,8 +430,34 @@ pub async fn deactivate_license_cmd(db_conn: &Dbconn) -> Result<()> {
                     let mut input = String::new();
                     stdin.read_line(&mut input)?;
                     if input.trim().to_lowercase() == "y" {
-                        purge_local_license(&db_conn.common, &license_info)?;
-                        println!("{}", "✓ Local license data removed".green());
+                        // Try a clean deactivation first so the Polar slot is freed.
+                        match deactivate_license(&license_info, &db_conn.common).await {
+                            Ok(_) => {
+                                println!("{}", "✓ License deactivated and local data removed".green());
+                            }
+                            Err(deactivate_err) => {
+                                // Still offline / Polar unreachable — warn before purging locally.
+                                println!();
+                                println!("{}", "⚠ Could not reach Polar to free the activation slot:".yellow());
+                                println!("  {}", deactivate_err.to_string().yellow());
+                                println!();
+                                println!("Your license has a limited number of activations. If you");
+                                println!("remove local data now without deactivating, this device will");
+                                println!("still count against that limit.");
+                                println!();
+                                println!("Free the slot manually at:");
+                                println!("  {}", "https://polar.sh/tilesprivacy/portal/".bright_blue().underline());
+                                println!();
+                                println!("Remove local data anyway? (y/N)");
+                                let mut confirm = String::new();
+                                io::stdin().read_line(&mut confirm)?;
+                                if confirm.trim().to_lowercase() == "y" {
+                                    purge_local_license(&db_conn.common, &license_info)?;
+                                    println!("{}", "✓ Local license data removed".green());
+                                    println!("{}", "  Remember to free the activation slot via the portal.".yellow());
+                                }
+                            }
+                        }
                     }
                 }
             }
