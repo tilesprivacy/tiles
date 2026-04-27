@@ -155,12 +155,7 @@ pub async fn activate(conn: &Dbconn, license_key: &str) -> Result<()> {
     }
 
     let label = label_for_type(license_type, expires_at);
-    println!(
-        "{} {} (key {}).",
-        "Activated".green(),
-        label,
-        mask_key(key)
-    );
+    println!("{} {} (key {}).", "Activated".green(), label, mask_key(key));
     if let Some(url) = customer_portal_url {
         println!("Manage at {}", url);
     }
@@ -284,11 +279,7 @@ fn build_http_client() -> Result<Client> {
         .map_err(|e| anyhow!("Failed to build HTTP client: {}", e))
 }
 
-async fn polar_activate(
-    client: &Client,
-    key: &str,
-    device_id: &str,
-) -> Result<ActivateResponse> {
+async fn polar_activate(client: &Client, key: &str, device_id: &str) -> Result<ActivateResponse> {
     let url = format!("{}/customer-portal/license-keys/activate", POLAR_API_BASE);
     let body = ActivateRequest {
         key,
@@ -450,7 +441,12 @@ fn parse_rfc3339_to_unix_seconds(s: &str) -> Option<i64> {
         return None;
     }
     let bytes = s.as_bytes();
-    if bytes[4] != b'-' || bytes[7] != b'-' || bytes[10] != b'T' || bytes[13] != b':' || bytes[16] != b':' {
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+    {
         return None;
     }
     let year: i64 = s.get(0..4)?.parse().ok()?;
@@ -477,7 +473,8 @@ fn parse_rfc3339_to_unix_seconds(s: &str) -> Option<i64> {
             b'+' | b'-' => {
                 let sign: i64 = if bytes[idx] == b'-' { -1 } else { 1 };
                 let off = s.get(idx + 1..)?;
-                let (oh, om): (i64, i64) = if off.len() >= 5 && off.as_bytes().get(2) == Some(&b':') {
+                let (oh, om): (i64, i64) = if off.len() >= 5 && off.as_bytes().get(2) == Some(&b':')
+                {
                     (off.get(0..2)?.parse().ok()?, off.get(3..5)?.parse().ok()?)
                 } else if off.len() >= 4 {
                     (off.get(0..2)?.parse().ok()?, off.get(2..4)?.parse().ok()?)
