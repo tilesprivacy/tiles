@@ -4,6 +4,7 @@ use std::io;
 
 use anyhow::{Result, anyhow};
 use owo_colors::OwoColorize;
+use tiles::core::account::license::current_license_label;
 use tiles::core::account::local::{
     RootUser, create_root_account, get_peer_list, get_root_user_details, save_root_account,
     set_nickname, unlink,
@@ -76,7 +77,7 @@ const FTUE_DATA_DIR_CHANGE_COMMAND: &str = "tiles data set-path <PATH>";
 const FTUE_CUSTOM_DATA_PROMPT: &str = "Use a custom data directory now? [y/N]";
 const FTUE_UPDATE_COMMAND: &str = "tiles update";
 
-pub fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
+pub fn run_setup_for_ftue(_run_args: &RunArgs, db_conn: &Dbconn) -> Result<()> {
     // initializes config directory
     let config_provider = DefaultProvider;
     config_provider.get_or_create_config_dir()?;
@@ -84,8 +85,14 @@ pub fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
 
     let root_config = get_or_create_config()?;
     let root_user_details = get_root_user_details(&root_config)?;
+    let license_label = current_license_label(db_conn);
     println!("{}", FTUE_ASCII_ART.blue());
-    println!("{} {}", FTUE_VERSION_TITLE, env!("CARGO_PKG_VERSION"));
+    println!(
+        "{} {} {}",
+        FTUE_VERSION_TITLE,
+        env!("CARGO_PKG_VERSION"),
+        license_label
+    );
     println!();
 
     if root_user_details.id.is_empty() {

@@ -52,6 +52,22 @@ const COMMON_MIGRATION_ARRAY: &[M] = &[
             handle TEXT NOT NULL
         )",
     ),
+    M::up(
+        "CREATE TABLE IF NOT EXISTS polar_license (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            license_key TEXT NOT NULL,
+            activation_id TEXT NOT NULL,
+            product_id TEXT NOT NULL,
+            license_type TEXT NOT NULL,
+            expires_at INTEGER,
+            activations_used INTEGER,
+            activations_limit INTEGER,
+            customer_portal_url TEXT,
+            device_id TEXT NOT NULL,
+            activated_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )",
+    ),
 ];
 
 const COMMON_MIGRATIONS: Migrations = Migrations::from_slice(COMMON_MIGRATION_ARRAY);

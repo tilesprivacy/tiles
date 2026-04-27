@@ -6,7 +6,13 @@ use clap::{Args, Parser, Subcommand};
 use tiles::{
     core::{
         self,
-        account::atproto::{login, logout},
+        account::{
+            atproto::{login, logout},
+            license::{
+                activate as license_activate, deactivate as license_deactivate,
+                status as license_status,
+            },
+        },
         network::{link, sync},
     },
     daemon::{start_cmd, start_server, stop_cmd},
@@ -81,6 +87,9 @@ enum Commands {
 
     /// Atproto related commands
     At(AtArgs),
+
+    /// Manage Polar.sh license (activate / deactivate / status)
+    License(LicenseArgs),
 }
 
 #[derive(Debug, Args)]
@@ -208,6 +217,24 @@ enum AtCommands {
     },
     Logout,
 }
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct LicenseArgs {
+    #[command(subcommand)]
+    command: LicenseCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum LicenseCommands {
+    /// Activate a Polar license key on this device
+    Activate { key: String },
+    /// Deactivate the license on this device
+    Deactivate,
+    /// Show current license status
+    Status,
+}
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
@@ -225,7 +252,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 pi: cli.flags.pi,
             };
 
-            commands::run_setup_for_ftue(&run_args)
+            commands::run_setup_for_ftue(&run_args, &db_conn)
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
             let _ = commands::try_app_update().await;
 
@@ -254,7 +281,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 memory: flags.memory,
                 pi: flags.pi,
             };
-            commands::run_setup_for_ftue(&run_args)
+            commands::run_setup_for_ftue(&run_args, &db_conn)
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
 
             let t = tokio::spawn(async move {
@@ -320,6 +347,11 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 login(&db_conn, &handle).await?;
             }
             AtCommands::Logout => logout(&db_conn)?,
+        },
+        Some(Commands::License(license_args)) => match license_args.command {
+            LicenseCommands::Activate { key } => license_activate(&db_conn, &key).await?,
+            LicenseCommands::Deactivate => license_deactivate(&db_conn).await?,
+            LicenseCommands::Status => license_status(&db_conn).await?,
         },
     }
     Ok(())
