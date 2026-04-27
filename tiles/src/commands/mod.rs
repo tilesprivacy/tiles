@@ -376,8 +376,6 @@ pub async fn activate_license_cmd(license_key: &str, db_conn: &Dbconn) -> Result
             } else {
                 println!("  Expires: Never (Lifetime)");
             }
-            println!();
-            println!("Your license is now active. Restart Tiles to see the updated status.");
         }
         Err(e) => {
             println!("{}", format!("✗ License activation failed: {}", e).red());
