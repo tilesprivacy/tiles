@@ -528,22 +528,15 @@ pub async fn show_license_status(db_conn: &Dbconn) -> Result<()> {
                     println!();
 
                     // Activations
+                    println!("This Device:       {}", "Activated".green());
                     if let Some(limit) = details.limit_activations {
-                        let usage = details.usage.unwrap_or(0);
-                        let remaining = limit - usage;
-
-                        println!("Activations Used:  {} / {}", usage, limit);
-
-                        let remaining_display = if remaining > 2 {
-                            format!("{} remaining", remaining).green().to_string()
-                        } else if remaining > 0 {
-                            format!("{} remaining", remaining).yellow().to_string()
-                        } else {
-                            format!("{} remaining", remaining).red().to_string()
-                        };
-                        println!("Activations Left:  {}", remaining_display);
+                        println!("Device Limit:      {} devices maximum", limit);
+                        println!();
+                        println!("{}", "Note:".yellow().bold());
+                        println!("To view all active devices and manage activations,");
+                        println!("visit the Polar customer portal (link below).");
                     } else {
-                        println!("Activations:       {}", "Unlimited".green());
+                        println!("Device Limit:      {}", "Unlimited".green());
                     }
                     println!();
                     println!("Activated On:      {}", license_info.activated_at.format("%Y-%m-%d %H:%M:%S UTC"));
