@@ -10,7 +10,7 @@ use tiles::core::accounts::{
 };
 use tiles::core::license::{
     activate_license, deactivate_license, get_active_license, get_license_details,
-    get_license_status_string, validate_license, ProductType,
+    get_license_status_string, purge_local_license, validate_license, ProductType,
 };
 use tiles::core::storage::db::Dbconn;
 use tiles::runtime::Runtime;
@@ -419,16 +419,7 @@ pub async fn deactivate_license_cmd(db_conn: &Dbconn) -> Result<()> {
                     println!("{}", "✗ License is no longer valid or has been revoked".red());
                     println!();
                     println!("Removing local license data...");
-                    // Remove from database
-                    db_conn.common.execute(
-                        "DELETE FROM licenses WHERE activation_id = ?1",
-                        [&license_info.activation_id],
-                    )?;
-                    // Remove from keychain
-                    let app_name = tiles::utils::config::get_app_name();
-                    if let Ok(entry) = keyring::Entry::new(&app_name, &format!("license_key_{}", license_info.activation_id)) {
-                        let _ = entry.delete_credential();
-                    }
+                    purge_local_license(&db_conn.common, &license_info)?;
                     println!("{}", "✓ Local license data removed".green());
                 }
                 Err(e) => {
@@ -439,16 +430,7 @@ pub async fn deactivate_license_cmd(db_conn: &Dbconn) -> Result<()> {
                     let mut input = String::new();
                     stdin.read_line(&mut input)?;
                     if input.trim().to_lowercase() == "y" {
-                        // Remove from database
-                        db_conn.common.execute(
-                            "DELETE FROM licenses WHERE activation_id = ?1",
-                            [&license_info.activation_id],
-                        )?;
-                        // Remove from keychain
-                        let app_name = tiles::utils::config::get_app_name();
-                        if let Ok(entry) = keyring::Entry::new(&app_name, &format!("license_key_{}", license_info.activation_id)) {
-                            let _ = entry.delete_credential();
-                        }
+                        purge_local_license(&db_conn.common, &license_info)?;
                         println!("{}", "✓ Local license data removed".green());
                     }
                 }

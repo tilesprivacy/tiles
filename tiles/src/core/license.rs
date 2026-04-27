@@ -255,6 +255,19 @@ pub async fn get_license_details(license_info: &LicenseInfo) -> Result<Validatio
     Ok(validation)
 }
 
+/// Removes local license data (DB row + keychain entry).
+pub fn purge_local_license(conn: &Connection, license_info: &LicenseInfo) -> Result<()> {
+    conn.execute(
+        "DELETE FROM licenses WHERE activation_id = ?1",
+        [&license_info.activation_id],
+    )?;
+    let app_name = get_app_name();
+    if let Ok(entry) = Entry::new(&app_name, &format!("license_key_{}", license_info.activation_id)) {
+        let _ = entry.delete_credential();
+    }
+    Ok(())
+}
+
 /// Deactivates the current license
 pub async fn deactivate_license(license_info: &LicenseInfo, conn: &Connection) -> Result<()> {
     // Retrieve license key from keychain
@@ -280,14 +293,7 @@ pub async fn deactivate_license(license_info: &LicenseInfo, conn: &Connection) -
         return Err(anyhow!("License deactivation failed ({}): {}", status, error_body));
     }
 
-    // Remove from database
-    conn.execute(
-        "DELETE FROM licenses WHERE activation_id = ?1",
-        [&license_info.activation_id],
-    )?;
-
-    // Remove from keychain
-    entry.delete_credential()?;
+    purge_local_license(conn, license_info)?;
 
     Ok(())
 }
