@@ -19,7 +19,7 @@ use crate::commands::{show_peers, unlink_peer};
 mod commands;
 #[derive(Debug, Parser)]
 #[command(name = "tiles")]
-#[command(version, about = "Your private and secure AI assistant for everyday use.", long_about = None, after_help = "Documentation: https://tiles.run/book\nReport issues: https://github.com/tilesprivacy/tiles/issues")]
+#[command(version, about = "Local-first private AI assistant for everyday use", long_about = None, after_help = "Documentation: https://tiles.run/book\nReport issues: https://github.com/tilesprivacy/tiles/issues")]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,

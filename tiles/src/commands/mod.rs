@@ -22,24 +22,27 @@ use toml::Table;
 use crate::{AccountArgs, AccountCommands};
 
 const FTUE_VERSION_TITLE: &str = "Tiles";
+const PRODUCT_DESCRIPTION: &str = "Local-first private AI assistant for everyday use.";
 const FTUE_HEADER: &str = "Initializing local account...";
 const FTUE_ASCII_ART: &str = r#"
-              ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
-             ▓▓                      ▓▓░░▓▒
-           ▓▓▓▓▓▓▓▓▓▓▓▓▓     ▓▓▓▓▓▓▓▓▓    ▓▓
-            ▓▓░░░░░░░▓▓░    ▓▓▓░░░░░▓▓   ▓▓
-             ▓▓     ░▓▒    ▓▓ ▓▒     ▒▓░▓▓
-              ▓▓▓▓▓▓▓▒    ▓▓   ▓▓▓▓▓▓▓▓▓▓
-                   ▓▓    ▓▓   ░▓░
-                  ▓▓    ▒▓░   ▓▒
-                 ▒▓    ░▓░   ▓▓
-                ▒▓    ░▓▒   ▓▓
-               ░▓░    ▓▓   ▓▓
-              ░▓▒    ▓▓   ▒▓
-              ▓▓▓▓▓▓▓▓   ▒▓░
-              ░▓▒    ▓▓ ░▓░
-                ▓▓    ▓▓▓▒
-                 ▓▓▓▓▓▓▓▓
+                               .:-::.
+                       .:-+*#%@@@@@@%#**+=
+               .:-=*#%@@@@@%%#***#%%@@@%=.
+       .:-=+#%@@@@@%%##****#%@@@@@@@%*=
+   -#%@@@@@@%#*****#%%@@@@@@%#*=-:.
+ -#@%%#####%%%%@@@%%#@@@@@#.
+-###%@@@@@@@@@%%%%%%@@@@@*
+  ..:--=+##*+==@@@@@@@@@=
+             .#@@@@@@@@:
+            -@@@@@@@@#.
+           +@@@@@%@@*
+          #@@@@#+@@=
+        .%@@@@#+@@:
+       .@@@@@##@#.
+        %@@@#%@*
+        :@@*@@=
+         -+@@:
+          .-.
 "#;
 
 // const FTUE_ASCII_ART_NEW: &str = r#"
@@ -62,7 +65,7 @@ const FTUE_ASCII_ART: &str = r#"
 //           ▓▆▄
 
 // "#;
-const FTUE_REASSURANCE_LOCAL: &str = "On-device by default.";
+const FTUE_REASSURANCE_LOCAL: &str = "Local-first private AI assistant for everyday use";
 // const FTUE_REASSURANCE_NO_CLOUD: &str = "Online models and identity optional.";
 const FTUE_NICKNAME_PROMPT: &str = "Choose a username:";
 const FTUE_NICKNAME_REQUIRED: &str = "Username is required. Please enter a username:";
@@ -97,6 +100,8 @@ pub fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
         setup_root_account(root_config.clone())?;
         setup_default_user_data_dir(&config_provider)?
     } else {
+        println!("{}", PRODUCT_DESCRIPTION);
+        println!();
         print_runtime_context(&config_provider, &root_user_details)?;
     }
 
@@ -358,8 +363,12 @@ mod tests {
 
     #[test]
     fn ftue_copy_matches_expected_constants() {
+        assert_eq!(
+            PRODUCT_DESCRIPTION,
+            "Local-first private AI assistant for everyday use."
+        );
         assert_eq!(FTUE_HEADER, "Initializing local account...");
-        assert_eq!(FTUE_REASSURANCE_LOCAL, "On-device by default.");
+        assert_eq!(FTUE_REASSURANCE_LOCAL, "Local-first private AI assistant for everyday use");
         assert_eq!(FTUE_NICKNAME_PROMPT, "Choose a username:");
         assert_eq!(FTUE_ACCOUNT_LABEL, "Account");
         assert_eq!(FTUE_ACCOUNT_DETAILS_HINT, "View full details:");
