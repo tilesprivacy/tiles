@@ -22,7 +22,7 @@ use toml::Table;
 use crate::{AccountArgs, AccountCommands};
 
 const FTUE_VERSION_TITLE: &str = "Tiles";
-const PRODUCT_DESCRIPTION: &str = "Local-first private AI assistant for everyday use.";
+const PRODUCT_DESCRIPTION: &str = "Local-first private AI assistant for everyday use";
 const FTUE_HEADER: &str = "Initializing local account...";
 const FTUE_ASCII_ART: &str = r#"
                                .:-::.
@@ -365,7 +365,7 @@ mod tests {
     fn ftue_copy_matches_expected_constants() {
         assert_eq!(
             PRODUCT_DESCRIPTION,
-            "Local-first private AI assistant for everyday use."
+            "Local-first private AI assistant for everyday use"
         );
         assert_eq!(FTUE_HEADER, "Initializing local account...");
         assert_eq!(FTUE_REASSURANCE_LOCAL, "Local-first private AI assistant for everyday use");
