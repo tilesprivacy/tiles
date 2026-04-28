@@ -368,7 +368,10 @@ mod tests {
             "Local-first private AI assistant for everyday use"
         );
         assert_eq!(FTUE_HEADER, "Initializing local account...");
-        assert_eq!(FTUE_REASSURANCE_LOCAL, "Local-first private AI assistant for everyday use");
+        assert_eq!(
+            FTUE_REASSURANCE_LOCAL,
+            "Local-first private AI assistant for everyday use"
+        );
         assert_eq!(FTUE_NICKNAME_PROMPT, "Choose a username:");
         assert_eq!(FTUE_ACCOUNT_LABEL, "Account");
         assert_eq!(FTUE_ACCOUNT_DETAILS_HINT, "View full details:");
