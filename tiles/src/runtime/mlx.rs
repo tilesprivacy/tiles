@@ -1,7 +1,7 @@
 use crate::core::account::atproto::share_session;
 use crate::core::account::local::get_current_user;
 use crate::core::chats::{
-    self, Message, create_session, fetch_chats_by_session_id, fetch_session, save_chat,
+    Message, create_session, fetch_chats_by_session_id, fetch_sessions, save_chat,
 };
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
@@ -13,7 +13,6 @@ use anyhow::{Context, Result, anyhow};
 use atrium_api::types::string::Datetime;
 use log::info;
 use reqwest::{Client, StatusCode};
-use rusqlite::Connection;
 use rustyline::completion::Completer;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -269,6 +268,10 @@ enum CommandType {
     State,
     #[serde(rename = "share")]
     Share,
+    #[serde(rename = "list-sessions")]
+    ListSessions,
+    #[serde(rename = "load-session")]
+    LoadSession,
     #[serde(other)]
     Unknown,
 }
@@ -289,11 +292,11 @@ pub struct SharedContent {
     content: String,
 }
 
-fn handle_input(input: &str, modelname: &str) -> InputType {
+fn handle_input(input: &str) -> InputType {
     if let Some(cmd) = input.strip_prefix('/') {
         match cmd {
             "help" | "?" => {
-                show_help(modelname);
+                show_help();
                 InputType::Skip
             }
             "bye" => InputType::Exit,
@@ -308,13 +311,48 @@ fn handle_input(input: &str, modelname: &str) -> InputType {
     }
 }
 
-fn show_help(model_name: &str) {
-    let _ = model_name;
+fn show_help() {
+    let help_list = vec![
+        ("status", "Show the current session state"),
+        ("list-sessions", "List available sessions"),
+        (
+            "share",
+            "Create a shareable link for currently running session",
+        ),
+        (
+            "load-session <sessionId>",
+            "Loads and resume the given session",
+        ),
+        (
+            "share",
+            "Create a shareable link for currently running session",
+        ),
+        (
+            "share <sessionId>",
+            "Create a shareable link for given sessionId",
+        ),
+        ("help", "Show this help message"),
+        ("bye", "Exit the REPL"),
+    ];
+
+    // finding the length of the longest command, for padding purposes
+    let max_length = help_list
+        .iter()
+        .fold(0, |acc, x| if x.0.len() > acc { x.0.len() } else { acc });
 
     println!("Available Commands:");
-    println!("  /state      Show the current session state");
-    println!("  /help       Show this help message");
-    println!("  /bye        Exit the REPL");
+
+    for help in help_list {
+        let final_str = format!(
+            " /{}{}\t\t{}",
+            help.0,
+            " ".repeat(max_length - help.0.len()),
+            help.1
+        );
+
+        println!("{}", final_str);
+    }
+
     println!();
 
     println!("\nDocumentation: https://tiles.run/book");
@@ -376,14 +414,13 @@ async fn start_repl(
     let _ = reader
         .read_line(&mut pi_session_state)
         .context("Failed reading pi session state")?;
-    println!("{}", pi_session_state);
     let response: PiResponse = serde_json::from_str(&pi_session_state)?;
     if let PiResponse::Response(msg) = response {
         let state: GetStateData =
             serde_json::from_value(msg.data.expect("get state parsing failed"))?;
         session_id = state.session_id;
     }
-
+    let mut session_turn_count = 0;
     loop {
         let readline = editor.readline(">>> ");
         let input = match readline {
@@ -410,7 +447,7 @@ async fn start_repl(
         if input.is_empty() {
             continue;
         }
-        match handle_input(&input, modelname.as_str()) {
+        match handle_input(&input) {
             InputType::Skip => continue,
             InputType::Exit => {
                 let end_payload = json!({
@@ -434,8 +471,10 @@ async fn start_repl(
             }
             InputType::Command(cmd) => {
                 let args: Vec<&str> = cmd.split(" ").collect();
-                let cmd_json = json!(cmd);
-                // println!("{}", cmd_json.to_string());
+                let main_cmd = args.first().expect("Main command should be there");
+
+                let cmd_json = json!(main_cmd);
+
                 let command: CommandType = serde_json::from_value(cmd_json)?;
                 match command {
                     CommandType::Unknown => {
@@ -446,7 +485,23 @@ async fn start_repl(
                         continue;
                     }
                     CommandType::Share => {
-                        process_share_session(&db_conn, &session_id, &args).await?;
+                        process_share_session(db_conn, &session_id, &args).await?;
+                        continue;
+                    }
+                    CommandType::ListSessions => {
+                        show_session_info(db_conn)?;
+                        continue;
+                    }
+                    CommandType::LoadSession => {
+                        match load_session(db_conn, &args) {
+                            Ok((sesh_id, turn_count)) => {
+                                session_id = sesh_id;
+                                session_turn_count = turn_count;
+                            }
+                            Err(err) => {
+                                println!("{}", err)
+                            }
+                        }
                         continue;
                     }
                     cmd_type => {
@@ -459,7 +514,6 @@ async fn start_repl(
         }
 
         let reader = BufReader::new(&mut stdout);
-        let mut session_turn_count = 0;
         let mut last_chat_id: String = "".to_owned();
         for line in reader.lines() {
             //TODO: handle the unwrap
@@ -603,158 +657,6 @@ async fn load_model(
         Ok(())
     }
 }
-
-//TODO: Have 2 separate chat functions for memory and non-memory
-// #[allow(clippy::too_many_arguments)]
-// async fn chat(
-//     input: &str,
-//     modelfile: &Modelfile,
-//     chat_start: bool,
-//     python_code: &str,
-//     g_reply: &str,
-//     run_args: &RunArgs,
-//     prev_response_id: &str,
-//     conn: &Connection,
-//     user: &User,
-//     conversations: &[Message],
-// ) -> Result<ChatResponse> {
-//     let client = Client::new();
-//     let modelname = modelfile
-//         .from
-//         .clone()
-//         .ok_or_else(|| anyhow!("Failed to get model name"))?;
-//     let prompt = modelfile.system.clone().unwrap_or("".to_owned());
-//     let convo_input = create_chat_input(input, prompt.as_str(), conversations);
-//     let body = json!({
-//         "model": modelname,
-//         "input": convo_input,
-//         "reasoning": {"effort": "medium"},
-//         "chat_start": chat_start,
-//         "stream": true,
-//         "previous_response_id": prev_response_id,
-//         "python_code": python_code,
-//         "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
-//     });
-
-//     let memory_body = json!({
-//         "model": modelname,
-//         "input": input,
-//         "chat_start": chat_start,
-//         "stream": true,
-//         "python_code": python_code,
-//         "messages": [{"role": "assistant", "content": g_reply}, {"role": "user", "content": input}]
-
-//     });
-//     let res = if run_args.memory {
-//         let api_url = "http://127.0.0.1:6969/v1/chat/completions";
-//         client.post(api_url).json(&memory_body).send().await?
-//     } else {
-//         let api_url = "http://127.0.0.1:6969/v1/responses";
-//         client.post(api_url).json(&body).send().await?
-//     };
-
-//     let chat = save_chat(conn, user, input, None)?;
-//     let mut stream = res.bytes_stream();
-//     let mut accumulated = String::new();
-//     let mut metrics: Option<BenchmarkMetrics> = None;
-//     let mut is_answer_start = false;
-//     let mut prev_response_id: String = String::from("");
-//     let mut output_completed: bool = false;
-//     while let Some(chunk) = stream.next().await {
-//         let chunk = chunk?;
-//         let s = String::from_utf8_lossy(&chunk);
-//         for line in s.lines() {
-//             if !line.starts_with("data: ") {
-//                 continue;
-//             }
-
-//             let data = line.trim_start_matches("data: ");
-
-//             if data == "[DONE]" {
-//                 let mut chat_resp = convert_to_chat_response(
-//                     &accumulated,
-//                     run_args.memory,
-//                     prev_response_id,
-//                     metrics,
-//                 );
-//                 chat_resp.parent_chat_id = Some(chat.id);
-//                 return Ok(chat_resp);
-//             }
-
-//             //TODO: This will break if we ask the model to give an essay and all
-//             let v: Value = serde_json::from_str(data).unwrap();
-//             // Check for metrics in the response
-//             if let Some(metrics_obj) = v.get("metrics") {
-//                 metrics = serde_json::from_value(metrics_obj.clone()).ok();
-//             }
-//             let model_text: Option<&str> = if run_args.memory {
-//                 v["choices"][0]["delta"]["content"].as_str()
-//             } else {
-//                 prev_response_id = serde_json::to_string(&v["id"])?
-//                     .trim_matches('\"')
-//                     .to_owned();
-
-//                 if serde_json::to_string(&v["status"])?.contains("completed") {
-//                     output_completed = true;
-//                 }
-
-//                 v["output"][0]["content"][0]["text"].as_str()
-//             };
-
-//             if let Some(delta) = model_text {
-//                 if !run_args.memory {
-//                     if delta.contains("**[Answer]**") {
-//                         is_answer_start = true
-//                     }
-//                     if !output_completed {
-//                         accumulated.push_str(delta);
-//                         if !is_answer_start {
-//                             print!("{}", delta.dimmed());
-//                         } else {
-//                             print!("{}", delta);
-//                         };
-//                     }
-//                 } else {
-//                     accumulated.push_str(delta);
-//                 }
-//                 use std::io::Write;
-//                 std::io::stdout().flush().ok();
-//             }
-//         }
-//     }
-
-//     Err(anyhow!("Result failed"))
-// }
-
-// fn convert_to_chat_response(
-//     content: &str,
-//     memory_mode: bool,
-//     prev_response_id: String,
-//     metrics: Option<BenchmarkMetrics>,
-// ) -> ChatResponse {
-//     ChatResponse {
-//         reply: extract_reply(content, memory_mode),
-//         code: None,
-//         prev_response_id,
-//         metrics,
-//         parent_chat_id: None,
-//     }
-// }
-
-// fn extract_reply(content: &str, memory_mode: bool) -> String {
-//     if !memory_mode && content.contains("**[Answer]**") {
-//         let list_a = content.split("**[Answer]**").collect::<Vec<&str>>();
-//         list_a[1].to_owned()
-//     } else if !memory_mode {
-//         content.to_owned()
-//     } else if content.contains("<reply>") && content.contains("</reply>") {
-//         let list_a = content.split("<reply>").collect::<Vec<&str>>();
-//         let list_b = list_a[1].split("</reply>").collect::<Vec<&str>>();
-//         list_b[0].to_owned()
-//     } else {
-//         "".to_owned()
-//     }
-// }
 
 #[allow(dead_code)]
 fn extract_python(content: &str) -> String {
@@ -976,6 +878,45 @@ async fn process_share_session(
     };
 
     share_session(&conn.common, shared_sessions).await?;
-    // pass it to the atproto share_session fn
     Ok(())
+}
+
+fn show_session_info(db_conn: &Dbconn) -> Result<()> {
+    let sessions = fetch_sessions(&db_conn.chat)?;
+
+    let mut count = 0;
+    for session in sessions {
+        count += 1;
+        println!("{}.\t{}\t{}", count, session.id, session.name);
+    }
+    Ok(())
+}
+
+//TODO: load the session via prompt into the model too
+fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize)> {
+    let args = if let Some((_main_command, sub_commands)) = args.split_first() {
+        sub_commands
+    } else {
+        return Err(anyhow!("Not a valid command"));
+    };
+
+    let session_id = if args.is_empty() {
+        println!("Please provide sessionId");
+        return Err(anyhow!("Please provide sessionId"));
+    } else {
+        args[0]
+    };
+    // fetch session and the chats for the session_id
+
+    let delta_chats = fetch_chats_by_session_id(&db_conn.chat, session_id)?;
+
+    if delta_chats.sessions.is_empty() {
+        println!("Session {} not available", session_id);
+    }
+
+    for chat in &delta_chats.chats {
+        println!("{}", chat.content);
+    }
+
+    Ok((session_id.to_string(), delta_chats.chats.len()))
 }

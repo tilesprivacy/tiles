@@ -3,10 +3,7 @@
 use anyhow::{Result, anyhow};
 use atrium_api::{
     agent::Agent,
-    types::{
-        Unknown,
-        string::{Datetime, Did},
-    },
+    types::{Unknown, string::Did},
 };
 use atrium_common::store::{Store, memory::MemoryStore};
 use atrium_identity::{
@@ -25,7 +22,6 @@ use log::info;
 use reqwest::Client;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::{fmt::Debug, process::Command, sync::Arc, time::Duration};
 use tokio::sync::oneshot;
 
@@ -290,7 +286,7 @@ fn fetch_logged_in_data(conn: &Connection) -> Result<Option<AtprotoAuthData>> {
 
 //TODO: Move the login check to common fn
 pub async fn share_session(conn: &Connection, shared_session: SharedSession) -> Result<()> {
-    if let Some(auth_data) = fetch_logged_in_data(&conn)? {
+    if let Some(auth_data) = fetch_logged_in_data(conn)? {
         let (client, mem_session_store) = create_oauth_client()?;
         let session: Session = serde_json::from_str(&auth_data.session)?;
         let did_struct =
@@ -301,19 +297,6 @@ pub async fn share_session(conn: &Connection, shared_session: SharedSession) -> 
         //TODO: Add a user friendly err latta
         let oauth_session = client.restore(&did_struct).await?;
         let agent = Agent::new(oauth_session);
-
-        // let test_record = json!({
-        //     "$type": "run.tiles.session",
-        //     "session_id": "019dd050-f337-7507-a8bc-b5eaf3547cc5",
-        //     "name": "dummy_session",
-        //     "contents": [
-        //         {
-        //             "role": "user",
-        //             "content": "dummy content"
-        //         }
-        //     ],
-        //     "created_at": Datetime::now().as_str()
-        // });
 
         let shared_session_value = serde_json::to_value(shared_session)?;
         let record: Unknown = serde_json::from_value(shared_session_value)?;
@@ -361,7 +344,7 @@ pub async fn share_session(conn: &Connection, shared_session: SharedSession) -> 
             handle: auth_data.handle,
         };
 
-        upsert_auth_data(&conn, &auth_data)?;
+        upsert_auth_data(conn, &auth_data)?;
     } else {
         println!("No logged-in user, please login")
     }

@@ -375,6 +375,28 @@ pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
     )?;
     Ok(sesh)
 }
+
+pub fn fetch_sessions(conn: &Connection) -> Result<Vec<Session>> {
+    let query = "select id, name, creator_id, created_at from sessions order by created_at desc";
+
+    let mut stmt = conn.prepare(query)?;
+    let session_rows = stmt.query_map([], |row| {
+        Ok(Session {
+            id: row.get(0)?,
+            name: row.get(1)?,
+            creator_id: row.get(2)?,
+            created_at: row.get::<usize, f64>(3)? as u64,
+        })
+    })?;
+
+    let mut sessions: Vec<Session> = vec![];
+
+    for session in session_rows {
+        sessions.push(session?);
+    }
+    Ok(sessions)
+}
+
 fn encode_delta_to_bytes(delta_chats: &DeltaChat) -> Vec<u8> {
     postcard::to_stdvec(delta_chats).expect("Failed to convert to bytes with postcard")
 }

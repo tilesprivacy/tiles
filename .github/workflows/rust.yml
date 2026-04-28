@@ -54,7 +54,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
 
       - name: Run coverage
         run: cargo tarpaulin --out Xml -- --test-threads 1
