@@ -41,11 +41,11 @@ pub struct Message {
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Chats {
     pub id: String,
-    content: String,
+    pub content: String,
     // The id of the responses api obj
     response_id: Option<String>,
     // The Model chat user role
-    role: Role,
+    pub role: Role,
     user_id: String,
     // The parent Id of a model's reply
     context_id: Option<String>,
@@ -58,8 +58,8 @@ pub struct Chats {
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct Session {
     pub id: String,
-    name: String,
-    created_at: u64,
+    pub name: String,
+    pub created_at: u64,
     creator_id: String,
 }
 
@@ -135,13 +135,26 @@ pub fn get_last_row_counter(conn: &Connection, user_id: &str) -> Result<i64> {
         Err(err) => Err(<rusqlite::Error as Into<anyhow::Error>>::into(err)),
     }
 }
+
 /// Return a Delta of chats and sessions for the given `user_id` since `last_row_counter`
 pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Result<DeltaChat> {
+    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where user_id = ?1 and row_counter > ?2 order by id";
+
+    let lrc_str = last_row_couter.to_string();
+
+    let params = vec![("?1", user_id), ("?2", &lrc_str)];
+    fetch_delta_chats(conn, query, params)
+}
+
+fn fetch_delta_chats(
+    conn: &Connection,
+    query: &str,
+    params: Vec<(&str, &str)>,
+) -> Result<DeltaChat> {
+    let mut stmt = conn.prepare(query)?;
+
     let mut session_map: HashMap<String, Session> = HashMap::new();
-
-    let mut stmt = conn.prepare("select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where user_id = ?1 and row_counter > ?2 order by id")?;
-
-    let chat_rows = stmt.query_map(params![user_id, last_row_couter], |row| {
+    let chat_rows = stmt.query_map(params.as_slice(), |row| {
         let id: String = row.get(0)?;
         let role: String = row.get(4)?;
         let created_at: f64 = row.get(6)?;
@@ -189,7 +202,6 @@ pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Resu
 
     Ok(DeltaChat { chats, sessions })
 }
-
 pub fn apply_delta(chat_conn: &mut Connection, delta_chats: DeltaChat) -> Result<()> {
     // TODO: Handle primary key conflict, for now reject it (in a way its impossible to have this scenario, and if its occuring then that means
     // some issue in syncing, so ignore it, by rejecting it), later
@@ -348,7 +360,7 @@ pub fn create_session(conn: &Connection, id: &str, name: &str, user_id: &str) ->
     }
 }
 
-fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
+pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
     let sesh = conn.query_row(
         "SELECT id, name, creator_id, created_at FROM sessions WHERE id = ?1",
         [session_id],
@@ -369,6 +381,14 @@ fn encode_delta_to_bytes(delta_chats: &DeltaChat) -> Vec<u8> {
 
 fn decode_delta_from_bytes(bytes: &[u8]) -> Result<DeltaChat> {
     postcard::from_bytes(bytes).map_err(Into::into)
+}
+
+pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<DeltaChat> {
+    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where session_id = ?1 order by id";
+
+    let params = vec![("?1", session_id)];
+
+    fetch_delta_chats(conn, query, params)
 }
 
 #[cfg(test)]
@@ -1063,6 +1083,12 @@ mod tests {
             creator_id TEXT NOT NULL,
             created_at INTEGER NOT NULL            
         )",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "CREATE INDEX idx_chats_session_id ON chats(session_id);",
             [],
         )
         .unwrap();

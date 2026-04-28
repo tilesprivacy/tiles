@@ -320,6 +320,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 login(&db_conn, &handle).await?;
             }
             AtCommands::Logout => logout(&db_conn)?,
+            // AtCommands::Share => share_session(&db_conn).await?,
         },
     }
     Ok(())

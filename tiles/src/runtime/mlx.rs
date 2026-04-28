@@ -1,5 +1,8 @@
+use crate::core::account::atproto::share_session;
 use crate::core::account::local::get_current_user;
-use crate::core::chats::{Message, create_session, save_chat};
+use crate::core::chats::{
+    self, Message, create_session, fetch_chats_by_session_id, fetch_session, save_chat,
+};
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
 use crate::utils::config::{
@@ -7,8 +10,10 @@ use crate::utils::config::{
 };
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
+use atrium_api::types::string::Datetime;
 use log::info;
 use reqwest::{Client, StatusCode};
+use rusqlite::Connection;
 use rustyline::completion::Completer;
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -262,9 +267,28 @@ enum InputType {
 enum CommandType {
     #[serde(rename = "get_state")]
     State,
+    #[serde(rename = "share")]
+    Share,
     #[serde(other)]
     Unknown,
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SharedSession {
+    #[serde(rename = "$type")]
+    r#type: String,
+    session_id: String,
+    name: String,
+    contents: Vec<SharedContent>,
+    created_at: String,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SharedContent {
+    role: Role,
+    content: String,
+}
+
 fn handle_input(input: &str, modelname: &str) -> InputType {
     if let Some(cmd) = input.strip_prefix('/') {
         match cmd {
@@ -338,10 +362,6 @@ async fn start_repl(
     let config = Config::builder().auto_add_history(true).build();
     let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config).unwrap();
     editor.set_helper(Some(TilesHinter));
-    // let mut g_reply: String = "".to_owned();
-    // let mut prev_response_id: String = String::from("");
-
-    // let mut conversations: Vec<Message> = vec![];
 
     let mut pi_process = start_pi_rpc(&modelname)?;
     let mut session_id = String::new();
@@ -413,7 +433,9 @@ async fn start_repl(
                 send_to_pi(pi_stdin, payload)?;
             }
             InputType::Command(cmd) => {
+                let args: Vec<&str> = cmd.split(" ").collect();
                 let cmd_json = json!(cmd);
+                // println!("{}", cmd_json.to_string());
                 let command: CommandType = serde_json::from_value(cmd_json)?;
                 match command {
                     CommandType::Unknown => {
@@ -421,6 +443,10 @@ async fn start_repl(
                             "Unknown command: /{}. Type /help for available commands.",
                             cmd
                         );
+                        continue;
+                    }
+                    CommandType::Share => {
+                        process_share_session(&db_conn, &session_id, &args).await?;
                         continue;
                     }
                     cmd_type => {
@@ -432,12 +458,6 @@ async fn start_repl(
             }
         }
 
-        // let mut bench_metrics: BenchmarkMetrics = BenchmarkMetrics {
-        //     ttft_ms: 0.0,
-        //     total_tokens: 0,
-        //     tokens_per_second: 0.0,
-        //     total_latency_s: 0.0,
-        // };
         let reader = BufReader::new(&mut stdout);
         let mut session_turn_count = 0;
         let mut last_chat_id: String = "".to_owned();
@@ -524,85 +544,6 @@ async fn start_repl(
                 }
             }
         }
-        // loop {
-        //     if remaining_count > 0 {
-        //         let chat_start = remaining_count == run_args.relay_count;
-
-        //         match chat(
-        //             &input,
-        //             modelfile,
-        //             chat_start,
-        //             &python_code,
-        //             &g_reply,
-        //             run_args,
-        //             &prev_response_id,
-        //             &db_conn.chat,
-        //             &current_user,
-        //             &conversations,
-        //         )
-        //         .await
-        //         {
-        //             Ok(response) => {
-        //                 if response.reply.is_empty() {
-        //                     if !response.code.is_empty() {
-        //                         python_code = response.code;
-        //                     }
-        //                     if let Some(metrics) = response.metrics {
-        //                         bench_metrics.update(metrics);
-        //                     }
-        //                     remaining_count -= 1;
-        //                 } else {
-        //                     g_reply = response.reply.clone();
-        //                     if run_args.memory {
-        //                         println!("\n{}", response.reply.trim());
-        //                     } else {
-        //                         prev_response_id = response.prev_response_id.clone();
-        //                         println!("\n");
-        //                     }
-        //                     conversations.push(Message {
-        //                         r#type: String::from("message"),
-        //                         role: Role::User,
-        //                         content: input,
-        //                     });
-        //                     conversations.push(Message {
-        //                         r#type: String::from("message"),
-        //                         role: Role::Assistant,
-        //                         content: g_reply.clone(),
-        //                     });
-
-        //                     save_chat(&db_conn.chat, &current_user, &g_reply, Some(&response))?;
-        //                     // Display benchmark metrics if available
-        //                     if let Some(metrics) = response.metrics {
-        //                         bench_metrics.update(metrics);
-        //                         println!(
-        //                             "{}",
-        //                             format!(
-        //                                 "\n{} {:.1} tok/s | {} tokens | {:.0}s TTFT",
-        //                                 "💡".yellow(),
-        //                                 bench_metrics.total_tokens as f64
-        //                                     / bench_metrics.total_latency_s,
-        //                                 bench_metrics.total_tokens,
-        //                                 bench_metrics.ttft_ms / 1000.0
-        //                             )
-        //                             .dimmed()
-        //                         );
-        //                     }
-
-        //                     break;
-        //                 }
-        //             }
-        //             Err(err) => {
-        //                 // if out of relay count, then clear the global_reply and ready for next fresh prompt
-        //                 println!("{:?}", err);
-        //                 g_reply.clear();
-        //                 break;
-        //             }
-        //         }
-        //     }
-        // }
-        // if g_reply.is_empty() {
-        //     println!("\nNo reply, try another prompt");
-        // }
     }
     Ok(())
 }
@@ -940,7 +881,7 @@ fn start_pi_rpc(model_name: &str) -> Result<Child> {
     let pi_process = Command::new(pi_exec_path)
         .arg("--mode")
         .arg("rpc")
-        .arg("--no-session")
+        // .arg("--no-session")
         .env("PI_CODING_AGENT_DIR", pi_agent_dir)
         .env("PI_OFFLINE", "true")
         .stdin(Stdio::piped())
@@ -971,6 +912,8 @@ fn get_command_payload(cmd: CommandType) -> Value {
                 "type": "get_state",
             })
         }
+        // catch-all cases are where prolly its not a Pi command
+        _ => json!([]),
     }
 }
 
@@ -983,6 +926,56 @@ fn process_command(cmd: CommandType, data: Option<Value>) -> Result<()> {
             use std::io::Write;
             std::io::stdout().flush().ok();
         }
+        // catch-all cases are non-Pi commands
+        _ => (),
     }
+    Ok(())
+}
+
+async fn process_share_session(
+    conn: &Dbconn,
+    current_session_id: &str,
+    args: &[&str],
+) -> Result<()> {
+    let args = if let Some((_main_command, sub_commands)) = args.split_first() {
+        sub_commands
+    } else {
+        println!("Not a valid command");
+        return Ok(());
+    };
+
+    let session_id = if args.is_empty() {
+        current_session_id
+    } else {
+        args[0]
+    };
+    // fetch session and the chats for the session_id
+
+    let delta_chats = fetch_chats_by_session_id(&conn.chat, session_id)?;
+
+    if delta_chats.sessions.is_empty() {
+        println!("Session {} not available", session_id);
+    }
+
+    let session = &delta_chats.sessions[0];
+
+    let mut shared_contents: Vec<SharedContent> = vec![];
+    for chat in delta_chats.chats {
+        shared_contents.push(SharedContent {
+            role: chat.role,
+            content: chat.content,
+        });
+    }
+
+    let shared_sessions = SharedSession {
+        r#type: "run.tiles.session".to_string(),
+        session_id: session_id.to_string(),
+        name: session.name.clone(),
+        contents: shared_contents,
+        created_at: Datetime::now().as_str().to_string(),
+    };
+
+    share_session(&conn.common, shared_sessions).await?;
+    // pass it to the atproto share_session fn
     Ok(())
 }

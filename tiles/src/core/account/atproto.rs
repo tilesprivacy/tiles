@@ -1,8 +1,14 @@
 //! Handles atprotocol stuff
 
 use anyhow::{Result, anyhow};
-use atrium_api::types::string::Did;
-use atrium_common::store::Store;
+use atrium_api::{
+    agent::Agent,
+    types::{
+        Unknown,
+        string::{Datetime, Did},
+    },
+};
+use atrium_common::store::{Store, memory::MemoryStore};
 use atrium_identity::{
     did::{CommonDidResolver, CommonDidResolverConfig, DEFAULT_PLC_DIRECTORY_URL},
     handle::{AtprotoHandleResolver, AtprotoHandleResolverConfig, DnsTxtResolver},
@@ -10,12 +16,16 @@ use atrium_identity::{
 use atrium_oauth::{
     AtprotoLocalhostClientMetadata, AuthorizeOptions, CallbackParams, DefaultHttpClient,
     KnownScope, OAuthClient, OAuthClientConfig, OAuthResolverConfig, Scope,
-    store::{session::MemorySessionStore, state::MemoryStateStore},
+    store::{
+        session::{MemorySessionStore, Session},
+        state::{InternalStateData, MemoryStateStore},
+    },
 };
 use log::info;
 use reqwest::Client;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::{fmt::Debug, process::Command, sync::Arc, time::Duration};
 use tokio::sync::oneshot;
 
@@ -23,7 +33,19 @@ use std::error::Error;
 
 use hickory_resolver::TokioResolver;
 
-use crate::{core::storage::db::Dbconn, daemon::start_internal_server, utils::get_unix_time_now};
+use crate::{
+    core::storage::db::Dbconn, daemon::start_internal_server, runtime::mlx::SharedSession,
+    utils::get_unix_time_now,
+};
+
+// TODO: Make this dynamic porting
+const LOGIN_PORT: u32 = 8988;
+type TOAuthClient = OAuthClient<
+    MemoryStore<String, InternalStateData>,
+    MemoryStore<Did, Session>,
+    CommonDidResolver<DefaultHttpClient>,
+    AtprotoHandleResolver<HickoryDnsTxtResolver, DefaultHttpClient>,
+>;
 
 #[derive(Deserialize)]
 struct HandleResolve {
@@ -86,40 +108,7 @@ impl DnsTxtResolver for HickoryDnsTxtResolver {
 }
 
 pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
-    let http_client = Arc::new(DefaultHttpClient::default());
-    const LOGIN_PORT: u32 = 8988;
-
-    let mem_session_store = MemorySessionStore::default();
-    let mem_state_store = MemoryStateStore::default();
-
-    let config = OAuthClientConfig {
-        client_metadata: AtprotoLocalhostClientMetadata {
-            redirect_uris: Some(vec![String::from("http://127.0.0.1:8988/callback")]),
-            scopes: Some(vec![
-                Scope::Known(KnownScope::Atproto),
-                Scope::Known(KnownScope::TransitionGeneric),
-            ]),
-        },
-        keys: None,
-        resolver: OAuthResolverConfig {
-            did_resolver: CommonDidResolver::new(CommonDidResolverConfig {
-                plc_directory_url: DEFAULT_PLC_DIRECTORY_URL.to_string(),
-                http_client: http_client.clone(),
-            }),
-            handle_resolver: AtprotoHandleResolver::new(AtprotoHandleResolverConfig {
-                dns_txt_resolver: HickoryDnsTxtResolver::default(),
-                http_client: http_client.clone(),
-            }),
-            authorization_server_metadata: Default::default(),
-            protected_resource_metadata: Default::default(),
-        },
-        state_store: mem_state_store.clone(),
-        session_store: mem_session_store.clone(),
-    };
-
-    let Ok(client) = OAuthClient::new(config) else {
-        panic!("client fuck up")
-    };
+    let (client, mem_session_store) = create_oauth_client()?;
 
     //TODO: This resolve function is hack to convert handle to DID
     // cuz for some reason the authorize fn not working for customd domains
@@ -297,6 +286,121 @@ fn fetch_logged_in_data(conn: &Connection) -> Result<Option<AtprotoAuthData>> {
             })
         },
     ).optional().map_err(Into::<anyhow::Error>::into)
+}
+
+//TODO: Move the login check to common fn
+pub async fn share_session(conn: &Connection, shared_session: SharedSession) -> Result<()> {
+    if let Some(auth_data) = fetch_logged_in_data(&conn)? {
+        let (client, mem_session_store) = create_oauth_client()?;
+        let session: Session = serde_json::from_str(&auth_data.session)?;
+        let did_struct =
+            Did::new(auth_data.key.clone()).map_err(|_e| anyhow!("Failed to convert to Did"))?;
+
+        mem_session_store.set(did_struct.clone(), session).await?;
+
+        //TODO: Add a user friendly err latta
+        let oauth_session = client.restore(&did_struct).await?;
+        let agent = Agent::new(oauth_session);
+
+        // let test_record = json!({
+        //     "$type": "run.tiles.session",
+        //     "session_id": "019dd050-f337-7507-a8bc-b5eaf3547cc5",
+        //     "name": "dummy_session",
+        //     "contents": [
+        //         {
+        //             "role": "user",
+        //             "content": "dummy content"
+        //         }
+        //     ],
+        //     "created_at": Datetime::now().as_str()
+        // });
+
+        let shared_session_value = serde_json::to_value(shared_session)?;
+        let record: Unknown = serde_json::from_value(shared_session_value)?;
+
+        //TODO: can we remove the unwrap at collection
+        let create_result = agent
+            .api
+            .com
+            .atproto
+            .repo
+            .create_record(
+                atrium_api::com::atproto::repo::create_record::InputData {
+                    collection: "run.tiles.session".parse().unwrap(),
+                    repo: did_struct.clone().into(),
+                    rkey: None,
+                    record,
+                    swap_commit: None,
+                    validate: None,
+                }
+                .into(),
+            )
+            .await?;
+
+        let url = &create_result.uri;
+
+        let base_encoded_at_url = data_encoding::BASE64.encode(url.as_bytes());
+
+        let shareable_url = format!("https://tiles.run/share/{}", base_encoded_at_url);
+        println!("successfully posted at {}", shareable_url);
+
+        // Updating the session token
+        let session = mem_session_store
+            .get(&did_struct)
+            .await?
+            .expect("Expected Session");
+        let session_string = serde_json::to_string(&session)?;
+
+        let auth_data = AtprotoAuthData {
+            key: did_struct.to_string(),
+            session: session_string,
+            state: "".to_owned(),
+            is_logged_in: true,
+            created_at: get_unix_time_now(),
+            updated_at: get_unix_time_now(),
+            handle: auth_data.handle,
+        };
+
+        upsert_auth_data(&conn, &auth_data)?;
+    } else {
+        println!("No logged-in user, please login")
+    }
+    Ok(())
+}
+
+fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
+    let http_client = Arc::new(DefaultHttpClient::default());
+
+    let mem_session_store = MemorySessionStore::default();
+    let mem_state_store = MemoryStateStore::default();
+
+    let config = OAuthClientConfig {
+        client_metadata: AtprotoLocalhostClientMetadata {
+            redirect_uris: Some(vec![String::from("http://127.0.0.1:8988/callback")]),
+            scopes: Some(vec![
+                Scope::Known(KnownScope::Atproto),
+                Scope::Known(KnownScope::TransitionGeneric),
+            ]),
+        },
+        keys: None,
+        resolver: OAuthResolverConfig {
+            did_resolver: CommonDidResolver::new(CommonDidResolverConfig {
+                plc_directory_url: DEFAULT_PLC_DIRECTORY_URL.to_string(),
+                http_client: http_client.clone(),
+            }),
+            handle_resolver: AtprotoHandleResolver::new(AtprotoHandleResolverConfig {
+                dns_txt_resolver: HickoryDnsTxtResolver::default(),
+                http_client: http_client.clone(),
+            }),
+            authorization_server_metadata: Default::default(),
+            protected_resource_metadata: Default::default(),
+        },
+        state_store: mem_state_store.clone(),
+        session_store: mem_session_store.clone(),
+    };
+
+    let client = OAuthClient::new(config).map_err(Into::<anyhow::Error>::into)?;
+    Ok((client, mem_session_store))
 }
 
 #[cfg(test)]

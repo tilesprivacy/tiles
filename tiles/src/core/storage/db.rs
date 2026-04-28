@@ -90,6 +90,7 @@ const CHATS_MIGRATION_ARRAY: &[M] = &[
             created_at INTEGER NOT NULL
         )",
     ),
+    M::up("CREATE INDEX idx_chats_session_id ON chats(session_id);"),
 ];
 
 const CHATS_MIGRATIONS: Migrations = Migrations::from_slice(CHATS_MIGRATION_ARRAY);
