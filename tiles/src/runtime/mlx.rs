@@ -432,12 +432,12 @@ async fn start_repl(
                 // called `Result::unwrap()` on an `Err` value: Os { code: 32, kind: BrokenPipe, message: "Broken pipe" }
                 //
                 // User pressed Ctrl+C or Ctrl+D
-                // let end_payload = json!({
-                //     "type": "abort",
-                // });
-                // let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
-                // pi_stdin.write_all(payload_str.as_bytes())?;
-                // pi_stdin.flush()?;
+                let end_payload = json!({
+                    "type": "abort",
+                });
+                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                pi_stdin.write_all(payload_str.as_bytes())?;
+                pi_stdin.flush()?;
                 println!("Exiting interactive mode");
                 if !cfg!(debug_assertions) {
                     let _res = mlx_runtime.stop_server_daemon().await;
@@ -452,12 +452,12 @@ async fn start_repl(
         match handle_input(&input) {
             InputType::Skip => continue,
             InputType::Exit => {
-                // let end_payload = json!({
-                //     "type": "abort",
-                // });
-                // let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
-                // pi_stdin.write_all(payload_str.as_bytes())?;
-                // pi_stdin.flush()?;
+                let end_payload = json!({
+                    "type": "abort",
+                });
+                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                pi_stdin.write_all(payload_str.as_bytes())?;
+                pi_stdin.flush()?;
                 println!("Exiting interactive mode");
                 if !cfg!(debug_assertions) {
                     let _res = mlx_runtime.stop_server_daemon().await;
@@ -530,6 +530,7 @@ async fn start_repl(
                         && msg_update.assistant_message_event.delta.is_some()
                     {
                         let delta = msg_update.assistant_message_event.delta.unwrap();
+
                         if delta.contains("**[Answer]**") {
                             has_answer_start = true;
                         }
@@ -547,6 +548,7 @@ async fn start_repl(
                     break;
                 }
                 PiResponse::TurnEnd(turn_event) => {
+                    println!("\n");
                     session_turn_count += 1;
 
                     // on agent end create a new session entry, only for the
