@@ -723,7 +723,7 @@ def build_harmony_conversation(
         )
     ]
     for item in convos:
-        print(f"ITEM {item}")
+        # print(f"ITEM {item}")
         match item:
             case CUserMessageItemParam():
                 content = ""
@@ -744,9 +744,15 @@ def build_harmony_conversation(
                     )
                 )
             case CAssistantMessageItemParam():
+                content = ""
+                if isinstance(item.content, list):
+                    content = item.content[0].text
+                else:
+                    content = item.content.root
+
                 convo_list.append(
                     Message.from_role_and_content(
-                        Role.ASSISTANT, item.content.root
+                        Role.ASSISTANT, content
                     )  # pyright: ignore
                 )
             case CSystemMessageItemParam():
@@ -761,4 +767,5 @@ def build_harmony_conversation(
 
 
 def is_harmony_family(model_name: str):
+
     return ReasoningExtractor.detect_model_type(model_name) == "gpt-oss"

@@ -13,6 +13,7 @@ use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
 use atrium_api::types::string::Datetime;
 use log::info;
+use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
 use rustyline::completion::Completer;
 use rustyline::highlight::Highlighter;
@@ -383,6 +384,7 @@ async fn run_model_with_server(
     Ok(())
 }
 
+#[allow(unused_assignments)]
 async fn start_repl(
     mlx_runtime: &MLXRuntime,
     modelfile: &Modelfile,
@@ -430,12 +432,12 @@ async fn start_repl(
                 // called `Result::unwrap()` on an `Err` value: Os { code: 32, kind: BrokenPipe, message: "Broken pipe" }
                 //
                 // User pressed Ctrl+C or Ctrl+D
-                let end_payload = json!({
-                    "type": "abort",
-                });
-                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
-                pi_stdin.write_all(payload_str.as_bytes())?;
-                pi_stdin.flush()?;
+                // let end_payload = json!({
+                //     "type": "abort",
+                // });
+                // let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                // pi_stdin.write_all(payload_str.as_bytes())?;
+                // pi_stdin.flush()?;
                 println!("Exiting interactive mode");
                 if !cfg!(debug_assertions) {
                     let _res = mlx_runtime.stop_server_daemon().await;
@@ -450,12 +452,12 @@ async fn start_repl(
         match handle_input(&input) {
             InputType::Skip => continue,
             InputType::Exit => {
-                let end_payload = json!({
-                    "type": "abort",
-                });
-                let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
-                pi_stdin.write_all(payload_str.as_bytes())?;
-                pi_stdin.flush()?;
+                // let end_payload = json!({
+                //     "type": "abort",
+                // });
+                // let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
+                // pi_stdin.write_all(payload_str.as_bytes())?;
+                // pi_stdin.flush()?;
                 println!("Exiting interactive mode");
                 if !cfg!(debug_assertions) {
                     let _res = mlx_runtime.stop_server_daemon().await;
@@ -515,6 +517,7 @@ async fn start_repl(
 
         let reader = BufReader::new(&mut stdout);
         let mut last_chat_id: String = "".to_owned();
+        let mut has_answer_start = false;
         for line in reader.lines() {
             //TODO: handle the unwrap
             let line = line?;
@@ -526,14 +529,21 @@ async fn start_repl(
                     if msg_update.assistant_message_event.r#type == "text_delta"
                         && msg_update.assistant_message_event.delta.is_some()
                     {
-                        // TODO: Can we remove the unwrap
-                        print!("{}", msg_update.assistant_message_event.delta.unwrap());
-                        // TODO: maybe can optimize check print! doc
+                        let delta = msg_update.assistant_message_event.delta.unwrap();
+                        if delta.contains("**[Answer]**") {
+                            has_answer_start = true;
+                        }
+                        if has_answer_start {
+                            print!("{}", delta);
+                        } else {
+                            print!("{}", delta.dimmed());
+                        }
                         use std::io::Write;
                         std::io::stdout().flush().ok();
                     }
                 }
                 PiResponse::AgentEnd => {
+                    has_answer_start = false;
                     break;
                 }
                 PiResponse::TurnEnd(turn_event) => {

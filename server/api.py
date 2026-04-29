@@ -106,8 +106,6 @@ async def create_chat_response(request: ResponsesRequest):
     except Exception as e:
         print(e)
 
-    print(f"REQUEST => {request}")
-
     if request.stream:
         return StreamingResponse(
             runtime.backend.generate_response_chat_stream(request),
