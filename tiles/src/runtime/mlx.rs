@@ -396,6 +396,7 @@ async fn start_repl(
         .clone()
         .ok_or_else(|| anyhow!("Error getting FROM from modelfile due to"))?;
 
+    let system_prompt = modelfile.system.clone().unwrap_or("".to_owned());
     println!("Running {} in interactive mode", modelname);
     let current_user = get_current_user(&db_conn.common)?;
 
@@ -403,7 +404,7 @@ async fn start_repl(
     let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config).unwrap();
     editor.set_helper(Some(TilesHinter));
 
-    let mut pi_process = start_pi_rpc(&modelname)?;
+    let mut pi_process = start_pi_rpc(&modelname, &system_prompt)?;
     let mut session_id = String::new();
     let pi_stdin = pi_process.stdin.as_mut().unwrap();
     let mut stdout = pi_process.stdout.take().expect("stdout");
@@ -781,7 +782,7 @@ async fn download_model(model_name: &str) -> Result<()> {
 }
 
 // Need to create models.json for the provider
-fn start_pi_rpc(model_name: &str) -> Result<Child> {
+fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
     let tiles_lib_dir = DefaultProvider.get_lib_dir()?;
     let user_data_dir = DefaultProvider.get_user_data_dir()?;
     let pi_agent_dir = user_data_dir.join("pi/agent/");
@@ -797,7 +798,9 @@ fn start_pi_rpc(model_name: &str) -> Result<Child> {
     let pi_process = Command::new(pi_exec_path)
         .arg("--mode")
         .arg("rpc")
-        // .arg("--no-session")
+        .arg("--append-system-prompt")
+        .arg(system_prompt)
+        .arg("--no-session")
         .env("PI_CODING_AGENT_DIR", pi_agent_dir)
         .env("PI_OFFLINE", "true")
         .stdin(Stdio::piped())
