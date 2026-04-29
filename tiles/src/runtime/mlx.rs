@@ -424,7 +424,11 @@ async fn start_repl(
         session_id = state.session_id;
     }
     let mut session_turn_count = 0;
+    // if true, we will prepend the resumed session history to the input
+    let mut is_resume_session_pending = false;
+    let mut resumed_session: String = String::from("");
     loop {
+        is_resume_session_pending = false;
         let readline = editor.readline(">>> ");
         let input = match readline {
             Ok(line) => line.trim().to_string().to_lowercase(),
@@ -466,9 +470,18 @@ async fn start_repl(
                 break;
             }
             InputType::Prompt => {
+                let final_input = if is_resume_session_pending {
+                    info!("Pending resumed session, prepend the history");
+                    format!(
+                        "user_chat_history - {}\nUser question- {}",
+                        resumed_session, input
+                    )
+                } else {
+                    input.to_owned()
+                };
                 let payload = json!({
                     "type": "prompt",
-                    "message": input
+                    "message": final_input
                 });
                 send_to_pi(pi_stdin, payload)?;
             }
@@ -497,10 +510,13 @@ async fn start_repl(
                     }
                     CommandType::Resume => {
                         match load_session(db_conn, &args) {
-                            Ok((sesh_id, turn_count)) => {
+                            Ok((sesh_id, turn_count, history)) => {
                                 session_id = sesh_id;
                                 session_turn_count = turn_count;
+                                is_resume_session_pending = true;
+                                resumed_session = history;
                             }
+
                             Err(err) => {
                                 println!("{}", err)
                             }
@@ -550,6 +566,9 @@ async fn start_repl(
                 }
                 PiResponse::TurnEnd(turn_event) => {
                     println!("\n");
+                    // will just toggle off if was toggledon, since we dont need to compact
+                    // every time
+                    is_resume_session_pending = false;
                     session_turn_count += 1;
 
                     // on agent end create a new session entry, only for the
@@ -912,7 +931,7 @@ fn show_session_info(db_conn: &Dbconn) -> Result<()> {
 }
 
 //TODO: load the session via prompt into the model too
-fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize)> {
+fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize, String)> {
     let args = if let Some((_main_command, sub_commands)) = args.split_first() {
         sub_commands
     } else {
@@ -933,9 +952,19 @@ fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize)> {
         println!("Session {} not available", session_id);
     }
 
+    //TODO: we will later implement a decent compaction based on Pi's for
+    // history
+    // https://github.com/badlogic/pi-mono/blob/182d4ceea33beabe7c4712b04f1f5459e613de44/packages/coding-agent/docs/compaction.md
+
+    let mut chat_history: String = "".to_owned();
     for chat in &delta_chats.chats {
+        chat_history.push_str(&chat.content);
         println!("{}", chat.content);
     }
 
-    Ok((session_id.to_string(), delta_chats.chats.len()))
+    Ok((
+        session_id.to_string(),
+        delta_chats.chats.len(),
+        chat_history,
+    ))
 }
