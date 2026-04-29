@@ -53,6 +53,7 @@ pub struct Chats {
     updated_at: u64,
     row_counter: i64,
     session_id: String,
+    model_name: String,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -99,9 +100,10 @@ pub fn save_chat(conn: &Connection, user: &User, chat_resp: ChatResponse) -> Res
         updated_at: get_unix_time_now(),
         row_counter: row_counter + 1,
         session_id: chat_resp.session_id,
+        model_name: chat_resp.model_used,
     };
 
-    conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", (&chat.id.to_string(), &chat.user_id, &chat.content, &chat.response_id, Into::<String>::into(chat.role),  &chat.context_id, &chat.created_at.to_string(), &chat.updated_at.to_string(), &chat.row_counter, &chat.session_id))?;
+    conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id, model_name) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", (&chat.id.to_string(), &chat.user_id, &chat.content, &chat.response_id, Into::<String>::into(chat.role),  &chat.context_id, &chat.created_at.to_string(), &chat.updated_at.to_string(), &chat.row_counter, &chat.session_id, &chat.model_name))?;
 
     Ok(chat)
 }
@@ -138,7 +140,7 @@ pub fn get_last_row_counter(conn: &Connection, user_id: &str) -> Result<i64> {
 
 /// Return a Delta of chats and sessions for the given `user_id` since `last_row_counter`
 pub fn get_delta(conn: &Connection, user_id: &str, last_row_couter: i64) -> Result<DeltaChat> {
-    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where user_id = ?1 and row_counter > ?2 order by id";
+    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id, model_name from chats where user_id = ?1 and row_counter > ?2 order by id";
 
     let lrc_str = last_row_couter.to_string();
 
@@ -161,6 +163,9 @@ fn fetch_delta_chats(
         let updated_at: f64 = row.get(7)?;
         let resp_id: Option<String> = row.get(3)?;
         let ctx_id = row.get(5)?;
+        let model_name_db: Option<String> = row.get(9)?;
+
+        let model_name: String = model_name_db.unwrap_or("".to_owned());
 
         // This is to handle older versions which can have null session_id in DB
         let session_id_db: Option<String> = row.get(9)?;
@@ -189,6 +194,7 @@ fn fetch_delta_chats(
             updated_at: updated_at as u64,
             row_counter: row.get(8)?,
             session_id,
+            model_name,
         })
     })?;
 
@@ -397,6 +403,26 @@ pub fn fetch_sessions(conn: &Connection) -> Result<Vec<Session>> {
     Ok(sessions)
 }
 
+pub fn fetch_models_used_by_session(conn: &Connection, session_id: &str) -> Result<Vec<String>> {
+    let query = "select distinct model_name from chats where session_id = ?1";
+
+    let mut stmt = conn.prepare(query)?;
+    let model_names_rows = stmt.query_map([session_id], |row| {
+        let model_opt: Option<String> = row.get(0)?;
+        Ok(model_opt.unwrap_or("".to_owned()))
+    })?;
+
+    let mut model_names: Vec<String> = vec![];
+
+    for model_name in model_names_rows {
+        if let Ok(model) = model_name
+            && !model.is_empty()
+        {
+            model_names.push(model);
+        }
+    }
+    Ok(model_names)
+}
 fn encode_delta_to_bytes(delta_chats: &DeltaChat) -> Vec<u8> {
     postcard::to_stdvec(delta_chats).expect("Failed to convert to bytes with postcard")
 }
@@ -427,7 +453,7 @@ mod tests {
             account::local::{ACCOUNT, User},
             chats::{
                 apply_delta, create_session, decode_delta_from_bytes, encode_delta_to_bytes,
-                get_delta, get_last_row_counter, save_chat,
+                fetch_models_used_by_session, get_delta, get_last_row_counter, save_chat,
             },
         },
         runtime::mlx::ChatResponse,
@@ -448,6 +474,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let chat = save_chat(&conn, &user, chat_response).expect("chat should be saved");
 
@@ -477,6 +504,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: Some(parent_chat_id.clone()),
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let chat = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
 
@@ -502,6 +530,7 @@ mod tests {
             prev_response_id: Some(Uuid::now_v7().to_string()),
             parent_chat_id: Some(Uuid::now_v7().to_string()),
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
 
         let chat = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -524,6 +553,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let chat =
             save_chat(&conn, &user, chat_response).expect("empty content should still be saved");
@@ -545,6 +575,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let result = save_chat(&conn, &user, chat_response);
 
@@ -563,6 +594,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let chat = save_chat(&conn, &user, chat_response).expect("chat should be saved");
 
@@ -595,6 +627,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -619,6 +652,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
 
         conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)", (Uuid::now_v7().to_string(), &user.user_id, &chat_response.input, None::<String>, Into::<String>::into(chat_response.role),  &chat_response.parent_chat_id, get_unix_time_now().to_string(), get_unix_time_now().to_string(), 1, None::<String>)).unwrap();
@@ -641,6 +675,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -664,6 +699,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -689,6 +725,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -706,6 +743,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -727,6 +765,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -751,6 +790,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -778,6 +818,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -807,6 +848,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -836,6 +878,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -860,6 +903,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
         let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -897,6 +941,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 =
             save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
@@ -914,6 +959,7 @@ mod tests {
             prev_response_id: None,
             parent_chat_id: None,
             metrics: None,
+            model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 =
             save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
@@ -1018,6 +1064,66 @@ mod tests {
         assert_eq!(user.user_id, session_2.creator_id);
     }
 
+    #[test]
+    fn test_fetching_models_used_in_session() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let input = "2+2";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "gpt-oss".to_owned(),
+        };
+
+        let chat_response_2 = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "kimi".to_owned(),
+        };
+        create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response_2.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+
+        conn.execute("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id, model_name) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)", (Uuid::now_v7().to_string(), &user.user_id, &chat_response.input, None::<String>, Into::<String>::into(chat_response.role),  &chat_response.parent_chat_id, get_unix_time_now().to_string(), get_unix_time_now().to_string(), 1, "session_abc".to_owned(), None::<String>)).unwrap();
+
+        create_session(&conn, "session_def", "sesh-2", &user.user_id).unwrap();
+
+        let input = "4+4";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_def"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "gpt-oss".to_owned(),
+        };
+        let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
+
+        let rows = get_delta(&conn, &user.user_id, 0).unwrap();
+        assert_eq!(rows.sessions.len(), 2);
+        assert_eq!(rows.chats.len(), 7);
+        let models = fetch_models_used_by_session(&conn, "session_abc").unwrap();
+
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0], "gpt-oss".to_owned());
+        assert_eq!(models[1], "kimi");
+    }
+
     struct SavedChatRow {
         content: String,
         resp_id: Option<String>,
@@ -1092,7 +1198,8 @@ mod tests {
         created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
         updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
         row_counter INTEGER,
-        session_id TEXT
+        session_id TEXT,
+        model_name TEXT
     );",
             [],
         )

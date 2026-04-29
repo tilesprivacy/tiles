@@ -1,7 +1,8 @@
 use crate::core::account::atproto::share_session;
 use crate::core::account::local::get_current_user;
 use crate::core::chats::{
-    Message, create_session, fetch_chats_by_session_id, fetch_sessions, save_chat,
+    Message, create_session, fetch_chats_by_session_id, fetch_models_used_by_session,
+    fetch_sessions, save_chat,
 };
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
@@ -68,6 +69,7 @@ pub struct ChatResponse {
     pub prev_response_id: Option<String>,
     pub parent_chat_id: Option<String>,
     pub metrics: Option<BenchmarkMetrics>,
+    pub model_used: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -264,14 +266,14 @@ enum InputType {
 
 #[derive(Deserialize, Serialize, Debug)]
 enum CommandType {
-    #[serde(rename = "get_state")]
-    State,
+    #[serde(rename = "status")]
+    Status,
     #[serde(rename = "share")]
     Share,
-    #[serde(rename = "list-sessions")]
-    ListSessions,
-    #[serde(rename = "load-session")]
-    LoadSession,
+    #[serde(rename = "sessions")]
+    Sessions,
+    #[serde(rename = "resume")]
+    Resume,
     #[serde(other)]
     Unknown,
 }
@@ -284,6 +286,7 @@ pub struct SharedSession {
     name: String,
     contents: Vec<SharedContent>,
     created_at: String,
+    models_used: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -314,15 +317,12 @@ fn handle_input(input: &str) -> InputType {
 fn show_help() {
     let help_list = vec![
         ("status", "Show the current session state"),
-        ("list-sessions", "List available sessions"),
+        ("sessions", "List available sessions"),
         (
             "share",
             "Create a shareable link for currently running session",
         ),
-        (
-            "load-session <sessionId>",
-            "Loads and resume the given session",
-        ),
+        ("resume <sessionId>", "Loads and resume the given session"),
         (
             "share",
             "Create a shareable link for currently running session",
@@ -405,7 +405,7 @@ async fn start_repl(
     let mut session_id = String::new();
     let pi_stdin = pi_process.stdin.as_mut().unwrap();
     let mut stdout = pi_process.stdout.take().expect("stdout");
-    let inti_cmd_payload = get_command_payload(CommandType::State);
+    let inti_cmd_payload = get_command_payload(CommandType::Status);
     send_to_pi(pi_stdin, inti_cmd_payload).inspect_err(|_e| eprintln!("send pi failed"))?;
 
     //TODO: Refactor session_id fetching
@@ -424,7 +424,7 @@ async fn start_repl(
     loop {
         let readline = editor.readline(">>> ");
         let input = match readline {
-            Ok(line) => line.trim().to_string(),
+            Ok(line) => line.trim().to_string().to_lowercase(),
             Err(_) => {
                 //TODO: Panic when entering another prompt after ctr-l C
                 // called `Result::unwrap()` on an `Err` value: Os { code: 32, kind: BrokenPipe, message: "Broken pipe" }
@@ -488,11 +488,11 @@ async fn start_repl(
                         process_share_session(db_conn, &session_id, &args).await?;
                         continue;
                     }
-                    CommandType::ListSessions => {
+                    CommandType::Sessions => {
                         show_session_info(db_conn)?;
                         continue;
                     }
-                    CommandType::LoadSession => {
+                    CommandType::Resume => {
                         match load_session(db_conn, &args) {
                             Ok((sesh_id, turn_count)) => {
                                 session_id = sesh_id;
@@ -542,7 +542,7 @@ async fn start_repl(
                     // on agent end create a new session entry, only for the
                     // first time
                     if session_turn_count == 1 {
-                        info!("Created session {}", session_id);
+                        // info!("Created session {}", session_id);
                         create_session(&db_conn.chat, &session_id, &input, &current_user.user_id)?;
                     }
                     let parent_chat_id = if session_turn_count == 1 {
@@ -558,6 +558,7 @@ async fn start_repl(
                         prev_response_id: None,
                         parent_chat_id,
                         metrics: None,
+                        model_used: modelname.clone(),
                     };
                     let prompt_chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
                     last_chat_id = prompt_chat.id;
@@ -572,6 +573,7 @@ async fn start_repl(
                                 prev_response_id: None,
                                 parent_chat_id: Some(last_chat_id.clone()),
                                 metrics: None,
+                                model_used: modelname.clone(),
                             };
                             let chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
                             last_chat_id = chat.id;
@@ -809,7 +811,7 @@ fn get_command_payload(cmd: CommandType) -> Value {
                 "type": "none"
             })
         }
-        CommandType::State => {
+        CommandType::Status => {
             json!({
                 "type": "get_state",
             })
@@ -822,7 +824,7 @@ fn get_command_payload(cmd: CommandType) -> Value {
 fn process_command(cmd: CommandType, data: Option<Value>) -> Result<()> {
     match cmd {
         CommandType::Unknown => (),
-        CommandType::State => {
+        CommandType::Status => {
             let state: GetStateData = serde_json::from_value(data.unwrap())?;
             println!("{:?}", state);
             use std::io::Write;
@@ -869,12 +871,14 @@ async fn process_share_session(
         });
     }
 
+    let models_used = fetch_models_used_by_session(&conn.chat, session_id)?;
     let shared_sessions = SharedSession {
         r#type: "run.tiles.session".to_string(),
         session_id: session_id.to_string(),
         name: session.name.clone(),
         contents: shared_contents,
         created_at: Datetime::now().as_str().to_string(),
+        models_used,
     };
 
     share_session(&conn.common, shared_sessions).await?;
