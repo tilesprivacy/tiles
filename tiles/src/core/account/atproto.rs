@@ -57,9 +57,9 @@ pub struct AtCallbackParams {
     error_description: Option<String>,
 }
 
-struct AtprotoAuthData {
+pub struct AtprotoAuthData {
     // did:plc
-    key: String,
+    pub key: String,
     // serialized session data
     session: String,
     // serialized state data
@@ -69,7 +69,7 @@ struct AtprotoAuthData {
     created_at: u64,
     updated_at: u64,
     #[allow(dead_code)]
-    handle: String,
+    pub handle: String,
 }
 
 struct HickoryDnsTxtResolver {
@@ -266,7 +266,7 @@ fn delete_auth_data(conn: &Connection, did: &str) -> Result<()> {
     }
 }
 
-fn fetch_logged_in_data(conn: &Connection) -> Result<Option<AtprotoAuthData>> {
+pub fn fetch_logged_in_data(conn: &Connection) -> Result<Option<AtprotoAuthData>> {
     conn.query_row(
         "SELECT key, session, state, is_logged_in, created_at, updated_at, handle FROM atproto_auth_data WHERE is_logged_in = true",
         [],

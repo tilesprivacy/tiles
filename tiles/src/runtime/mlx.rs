@@ -1,8 +1,8 @@
-use crate::core::account::atproto::share_session;
+use crate::core::account::atproto::{fetch_logged_in_data, share_session};
 use crate::core::account::local::get_current_user;
 use crate::core::chats::{
-    Message, create_session, fetch_chats_by_session_id, fetch_models_used_by_session,
-    fetch_sessions, save_chat,
+    Message, Session, create_session, fetch_chats_by_session_id, fetch_models_used_by_session,
+    fetch_session, fetch_sessions, save_chat,
 };
 use crate::core::storage::db::Dbconn;
 use crate::runtime::RunArgs;
@@ -423,6 +423,7 @@ async fn start_repl(
             serde_json::from_value(msg.data.expect("get state parsing failed"))?;
         session_id = state.session_id;
     }
+    info!("session_id: {}", session_id);
     let mut session_turn_count = 0;
     // if true, we will prepend the resumed session history to the input
     let mut is_resume_session_pending = false;
@@ -523,11 +524,56 @@ async fn start_repl(
                         }
                         continue;
                     }
-                    cmd_type => {
-                        let payload = get_command_payload(cmd_type);
-                        send_to_pi(pi_stdin, payload)
-                            .inspect_err(|_e| eprintln!("send pi failed"))?;
-                    }
+                    CommandType::Status => {
+                        //TODO: refactor , move to diff fun
+                        let cwd_pathbuf = std::env::current_dir()?;
+                        let cwd = cwd_pathbuf.to_str().expect("Failed to parse cwd to str");
+                        let logged_in_atproto = fetch_logged_in_data(&db_conn.common)?;
+                        let session_data: Option<Session> =
+                            fetch_session(&db_conn.chat, &session_id).ok();
+                        let mut status_map: Vec<(&str, &str)> = vec![];
+                        let session_status = if let Some(session) = session_data {
+                            format!("{} ({})", session.name.yellow(), session.id.dimmed())
+                        } else {
+                            "Session not started yet".to_owned()
+                        };
+                        status_map.push(("Session", &session_status));
+                        status_map.push(("Model", &modelname));
+                        status_map.push(("Working Directory", cwd));
+                        let at_proto_status = if let Some(at_auth_user) = logged_in_atproto {
+                            format!(
+                                "{}{} ({})",
+                                "@".blue(),
+                                at_auth_user.handle.blue(),
+                                at_auth_user.key.dimmed()
+                            )
+                        } else {
+                            "Not logged-in".to_owned()
+                        };
+                        status_map.push(("ATProto", &at_proto_status));
+
+                        let max_length = status_map
+                            .iter()
+                            .fold(0, |acc, x| if x.0.len() > acc { x.0.len() } else { acc });
+
+                        println!("\n");
+                        for status in status_map {
+                            let final_str = format!(
+                                "{}:{}\t{}",
+                                status.0,
+                                " ".repeat(max_length - status.0.len()),
+                                status.1
+                            );
+
+                            println!("{}", final_str);
+                        }
+
+                        continue;
+                    } // cmd_type => {
+                      //     let payload = get_command_payload(cmd_type);
+                      //     send_to_pi(pi_stdin, payload)
+                      //         .inspect_err(|_e| eprintln!("send pi failed"))?;
+                      // }
                 }
             }
         }
@@ -539,7 +585,6 @@ async fn start_repl(
             //TODO: handle the unwrap
             let line = line?;
             let response: PiResponse = serde_json::from_str(&line)?;
-
             match response {
                 PiResponse::AgentStart => {}
                 PiResponse::MessageUpdate(msg_update) => {
@@ -628,7 +673,8 @@ async fn start_repl(
                     break;
                 }
                 PiResponse::Unknown => {
-                    // Not handling now
+                    // println!("Unsupported command");
+                    continue;
                 }
             }
         }
@@ -855,18 +901,10 @@ fn get_command_payload(cmd: CommandType) -> Value {
     }
 }
 
-fn process_command(cmd: CommandType, data: Option<Value>) -> Result<()> {
-    match cmd {
-        CommandType::Unknown => (),
-        CommandType::Status => {
-            let state: GetStateData = serde_json::from_value(data.unwrap())?;
-            println!("{:?}", state);
-            use std::io::Write;
-            std::io::stdout().flush().ok();
-        }
-        // catch-all cases are non-Pi commands
-        _ => (),
-    }
+fn process_command(_cmd: CommandType, _data: Option<Value>) -> Result<()> {
+    // if let CommandType::Unknown = cmd {
+    //     ()
+    // }
     Ok(())
 }
 
@@ -895,6 +933,10 @@ async fn process_share_session(
         println!("Session {} not available", session_id);
     }
 
+    if delta_chats.sessions.is_empty() {
+        println!("Session doesn't exist or not started yet");
+        return Ok(());
+    }
     let session = &delta_chats.sessions[0];
 
     let mut shared_contents: Vec<SharedContent> = vec![];
