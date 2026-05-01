@@ -1,4 +1,4 @@
-use crate::core::account::atproto::{fetch_logged_in_data, share_session};
+use crate::core::account::atproto::{fetch_logged_in_data, login, share_session};
 use crate::core::account::local::get_current_user;
 use crate::core::chats::{
     Message, Session, create_session, fetch_chats_by_session_id, fetch_models_used_by_session,
@@ -24,7 +24,7 @@ use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::process::{ChildStdin, Stdio};
@@ -279,7 +279,7 @@ enum CommandType {
     Unknown,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SharedSession {
     #[serde(rename = "$type")]
     r#type: String,
@@ -290,7 +290,7 @@ pub struct SharedSession {
     models_used: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SharedContent {
     role: Role,
     content: String,
@@ -957,7 +957,31 @@ async fn process_share_session(
         models_used,
     };
 
-    share_session(&conn.common, shared_sessions).await?;
+    match share_session(&conn.common, shared_sessions.clone()).await {
+        Err(err) if &err.to_string() == "NOT_LOGGED_IN" => {
+            let login_prompt = format!("{}", "Sharing a chat session requires logging in, as the data is stored on your Bluesky-based ATProto PDS.\nDo you want to proceed with the login flow? (Y/n)".yellow());
+
+            println!("{}", login_prompt);
+
+            let stdin = io::stdin();
+            let mut input = String::new();
+            stdin.read_line(&mut input)?;
+            let clean_input = input.trim();
+            if clean_input.to_lowercase() == "y" {
+                input.clear();
+                println!("Please enter your Bluesky handle (ex: john.bsky.team)");
+                stdin.read_line(&mut input)?;
+                login(conn, input.trim()).await?;
+                share_session(&conn.common, shared_sessions).await?;
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to share session due to {:?}", err)
+        }
+        Ok(_) => {
+            info!("Session shared successfully")
+        }
+    }
     Ok(())
 }
 

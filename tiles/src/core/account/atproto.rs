@@ -106,6 +106,7 @@ impl DnsTxtResolver for HickoryDnsTxtResolver {
 pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
     let (client, mem_session_store) = create_oauth_client()?;
 
+    println!("Processing, will be redirected to auth page");
     //TODO: This resolve function is hack to convert handle to DID
     // cuz for some reason the authorize fn not working for customd domains
     // it does work for bluesky hosted handles and DIDs.
@@ -166,15 +167,15 @@ pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
 
         upsert_auth_data(&conn.common, &auth_data)?;
         println!("LoggedIn successfully as {}", handle);
+        Ok(())
     } else {
-        eprintln!(
+        Err(anyhow!(
             "Error authorizing due to {}",
             params
                 .error_description
                 .unwrap_or("unknow reason".to_owned())
-        );
+        ))
     }
-    Ok(())
 }
 
 pub fn logout(conn: &Dbconn) -> Result<()> {
@@ -294,6 +295,7 @@ pub async fn share_session(conn: &Connection, shared_session: SharedSession) -> 
 
         mem_session_store.set(did_struct.clone(), session).await?;
 
+        println!("Writing to PDS and generating link...");
         //TODO: Add a user friendly err latta
         let oauth_session = client.restore(&did_struct).await?;
         let agent = Agent::new(oauth_session);
@@ -346,7 +348,8 @@ pub async fn share_session(conn: &Connection, shared_session: SharedSession) -> 
 
         upsert_auth_data(conn, &auth_data)?;
     } else {
-        println!("No logged-in user, please login")
+        info!("No logged-in user, please login");
+        return Err(anyhow!("NOT_LOGGED_IN"));
     }
     Ok(())
 }
