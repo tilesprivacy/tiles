@@ -327,6 +327,7 @@ pub fn create_sync_channel() -> Sender<SyncOp> {
                 }
                 SyncOp::ApplyDelta { delta, resp } => {
                     let chat_rows = decode_delta_from_bytes(&delta)?;
+
                     let apply_res = apply_delta(&mut chat_db_conn, chat_rows);
                     resp.send(apply_res)
                         .map_err(|_| anyhow!("Error sending apply delta response"))?;
@@ -1043,6 +1044,134 @@ mod tests {
         assert_eq!(user_b_sessions, 1);
     }
 
+    #[test]
+    fn test_e2e_syncing_both_ways_w_eventual_consistency_multiple_sessions() {
+        test_logger();
+        let mut conn = setup_db_schema();
+        let mut conn_2 = setup_db_schema();
+        let user_a = create_user_by_id("user_a");
+        let user_b = create_user_by_id("user_b");
+
+        create_session(&conn, "session_abc", "sesh", &user_a.user_id).unwrap();
+        // Node user A adds stuff
+        let input = "2+2";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "gpt-oss".to_owned(),
+        };
+        let _chat_1 =
+            save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn, &user_a, chat_response.clone()).expect("chat should be saved");
+
+        // Node user B adds stuff
+        create_session(&conn_2, "session_def", "sesh", &user_b.user_id).unwrap();
+        let input = "4+4";
+        let chat_response = ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_def"),
+            role: Role::User,
+            code: None,
+            prev_response_id: None,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "gpt-oss".to_owned(),
+        };
+        let _chat_1 =
+            save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
+        let _ = save_chat(&conn_2, &user_b, chat_response.clone()).expect("chat should be saved");
+
+        // Node A wants to sync with Node B
+
+        // 1. So its sends last_row_counter of Node B to Node B and hopefully
+        //  it sends the diff since then and last_row_counter of Node A back..
+
+        let user_b_last_entry_of_user_a = get_last_row_counter(&conn, &user_b.user_id).unwrap();
+
+        // user_b is extracting the row's of it since the given last_row_counter
+        let user_bs_diff_rows =
+            get_delta(&conn_2, &user_b.user_id, user_b_last_entry_of_user_a).unwrap();
+
+        assert_eq!(user_bs_diff_rows.chats.len(), 4);
+
+        // user_bs diff is encoded
+        let user_b_chat_bytes = encode_delta_to_bytes(&user_bs_diff_rows);
+
+        // send to user_a and its decoded
+        let user_b_decoded_chat = decode_delta_from_bytes(&user_b_chat_bytes).unwrap();
+
+        // Now user_a is gonna apply the user_b diff
+        assert!(apply_delta(&mut conn, user_b_decoded_chat).is_ok());
+
+        // Just checking if we user_a has all 8 rows
+
+        let user_a_rows = conn
+            .query_row("select count(*) from chats", [], |row| {
+                row.get::<usize, i64>(0)
+            })
+            .unwrap();
+
+        assert_eq!(user_a_rows, 8);
+        let user_a_sessions = conn
+            .query_row("select count(*) from sessions", [], |row| {
+                row.get::<usize, i64>(0)
+            })
+            .unwrap();
+
+        assert_eq!(user_a_sessions, 2);
+
+        // cool, now lets do the reverse sync, user B syncs user A stuff
+
+        let user_a_last_entry_of_user_b = get_last_row_counter(&conn_2, &user_a.user_id).unwrap();
+
+        // user_a is extracting the row's of it since the given last_row_counter
+        let user_as_diff_rows =
+            get_delta(&conn, &user_a.user_id, user_a_last_entry_of_user_b).unwrap();
+
+        assert_eq!(user_as_diff_rows.chats.len(), 4);
+
+        // user_as diff is encoded
+        let user_a_chat_bytes = encode_delta_to_bytes(&user_as_diff_rows);
+
+        // send to user_b and its decoded
+        let user_a_decoded_chat = decode_delta_from_bytes(&user_a_chat_bytes).unwrap();
+
+        // Now user_b is gonna apply the user_b diff
+        assert!(apply_delta(&mut conn_2, user_a_decoded_chat).is_ok());
+
+        // Just checking eventual consistency
+
+        let user_a_rows = conn
+            .query_row("select count(*) from chats", [], |row| {
+                row.get::<usize, i64>(0)
+            })
+            .unwrap();
+
+        let user_b_rows = conn_2
+            .query_row("select count(*) from chats", [], |row| {
+                row.get::<usize, i64>(0)
+            })
+            .unwrap();
+
+        assert_eq!(user_a_rows, user_b_rows);
+
+        let user_b_sessions = conn_2
+            .query_row("select count(*) from sessions", [], |row| {
+                row.get::<usize, i64>(0)
+            })
+            .unwrap();
+
+        assert_eq!(user_b_sessions, 2);
+    }
     #[test]
     fn test_valid_input_create_session() {
         let conn = setup_db_schema();
