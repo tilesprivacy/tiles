@@ -196,7 +196,7 @@ pub async fn start_server_daemon() -> Result<()> {
         .spawn()
         .expect("failed to start server");
 
-    std::fs::write(pid_file, child.id().to_string()).unwrap();
+    std::fs::write(pid_file, child.id().to_string()).expect("Failed to write to pid file");
     println!("Server started with PID {}", child.id());
     Ok(())
 }
@@ -213,9 +213,12 @@ pub async fn stop_server_daemon() -> Result<()> {
         return Ok(());
     }
 
-    let pid = std::fs::read_to_string(&pid_file).unwrap();
-    Command::new("kill").arg(pid.trim()).status().unwrap();
-    std::fs::remove_file(pid_file).unwrap();
+    let pid = std::fs::read_to_string(&pid_file).context("Failed to read the string")?;
+    Command::new("kill")
+        .arg(pid.trim())
+        .status()
+        .context("Failed to initiate kill commad")?;
+    std::fs::remove_file(pid_file).context("Failed to removed pid file")?;
     println!("Server stopped.");
     Ok(())
 }
@@ -514,55 +517,11 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                         continue;
                     }
                     CommandType::Status => {
-                        //TODO: refactor , move to diff fun
-                        let cwd_pathbuf = std::env::current_dir()?;
-                        let cwd = cwd_pathbuf.to_str().expect("Failed to parse cwd to str");
-                        let logged_in_atproto = fetch_logged_in_data(&db_conn.common)?;
-                        let session_data: Option<Session> =
-                            fetch_session(&db_conn.chat, &session_id).ok();
-                        let mut status_map: Vec<(&str, &str)> = vec![];
-                        let session_status = if let Some(session) = session_data {
-                            format!("{} ({})", session.name.yellow(), session.id.dimmed())
-                        } else {
-                            "Session not started yet".to_owned()
-                        };
-                        status_map.push(("Session", &session_status));
-                        status_map.push(("Model", &modelname));
-                        status_map.push(("Working Directory", cwd));
-                        let at_proto_status = if let Some(at_auth_user) = logged_in_atproto {
-                            format!(
-                                "{}{} ({})",
-                                "@".blue(),
-                                at_auth_user.handle.blue(),
-                                at_auth_user.key.dimmed()
-                            )
-                        } else {
-                            "Not logged-in".to_owned()
-                        };
-                        status_map.push(("ATProto", &at_proto_status));
-
-                        let max_length = status_map
-                            .iter()
-                            .fold(0, |acc, x| if x.0.len() > acc { x.0.len() } else { acc });
-
-                        println!("\n");
-                        for status in status_map {
-                            let final_str = format!(
-                                "{}:{}\t{}",
-                                status.0,
-                                " ".repeat(max_length - status.0.len()),
-                                status.1
-                            );
-
-                            println!("{}", final_str);
+                        if let Err(err) = show_status(&session_id, &modelname, db_conn) {
+                            println!("Failed to display status due to {}", err);
                         }
-
                         continue;
-                    } // cmd_type => {
-                      //     let payload = get_command_payload(cmd_type);
-                      //     send_to_pi(pi_stdin, payload)
-                      //         .inspect_err(|_e| eprintln!("send pi failed"))?;
-                      // }
+                    }
                 }
             }
         }
@@ -987,4 +946,158 @@ fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize, Strin
         delta_chats.chats.len(),
         chat_history,
     ))
+}
+
+fn show_status(session_id: &str, modelname: &str, db_conn: &Dbconn) -> Result<()> {
+    let cwd_pathbuf = std::env::current_dir()?;
+    let cwd = cwd_pathbuf.to_string_lossy();
+    let logged_in_atproto = fetch_logged_in_data(&db_conn.common)?;
+    let session_data: Option<Session> = fetch_session(&db_conn.chat, session_id).ok();
+    let status_lines = build_status_lines(&cwd, session_data, modelname, logged_in_atproto);
+
+    println!("\n");
+    for line in status_lines {
+        println!("{}", line);
+    }
+    Ok(())
+}
+
+fn build_status_lines(
+    cwd: &str,
+    session_data: Option<Session>,
+    modelname: &str,
+    logged_in_atproto: Option<crate::core::account::atproto::AtprotoAuthData>,
+) -> Vec<String> {
+    let mut status_map: Vec<(&str, String)> = vec![];
+    let session_status = if let Some(session) = session_data {
+        format!("{} ({})", session.name.yellow(), session.id.dimmed())
+    } else {
+        "Session not started yet".to_owned()
+    };
+    status_map.push(("Session", session_status));
+    status_map.push(("Model", modelname.to_owned()));
+    status_map.push(("Working Directory", cwd.to_owned()));
+    let at_proto_status = if let Some(at_auth_user) = logged_in_atproto {
+        format!(
+            "{}{} ({})",
+            "@".blue(),
+            at_auth_user.handle.blue(),
+            at_auth_user.key.dimmed()
+        )
+    } else {
+        "Not logged-in".to_owned()
+    };
+    status_map.push(("ATProto", at_proto_status));
+
+    // for padding
+    let max_length = status_map
+        .iter()
+        .fold(0, |acc, x| if x.0.len() > acc { x.0.len() } else { acc });
+
+    status_map
+        .into_iter()
+        .map(|status| {
+            format!(
+                "{}:{}\t{}",
+                status.0,
+                " ".repeat(max_length - status.0.len()),
+                status.1
+            )
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::chats::create_session;
+    use rusqlite::Connection;
+
+    #[test]
+    fn status_lines_show_defaults_without_session_or_atproto_login() {
+        let lines = build_status_lines("/tmp/tiles", None, "test-model", None);
+
+        assert_eq!(
+            lines,
+            vec![
+                "Session:          \tSession not started yet",
+                "Model:            \ttest-model",
+                "Working Directory:\t/tmp/tiles",
+                "ATProto:          \tNot logged-in",
+            ]
+        );
+    }
+
+    #[test]
+    fn status_lines_include_session_and_atproto_login() {
+        let db_conn = setup_db_conn();
+        create_session(&db_conn.chat, "session-1", "First chat", "user-1")
+            .expect("session should be created");
+        insert_atproto_login(&db_conn.common);
+
+        let session = fetch_session(&db_conn.chat, "session-1").ok();
+        let atproto_login =
+            fetch_logged_in_data(&db_conn.common).expect("login lookup should succeed");
+        let lines = build_status_lines("/work/tiles", session, "llama", atproto_login);
+
+        assert!(lines[0].starts_with("Session:          \t"));
+        assert!(lines[0].contains("First chat"));
+        assert!(lines[0].contains("session-1"));
+        assert_eq!(lines[1], "Model:            \tllama");
+        assert_eq!(lines[2], "Working Directory:\t/work/tiles");
+        assert!(lines[3].starts_with("ATProto:          \t"));
+        assert!(lines[3].contains("@"));
+        assert!(lines[3].contains("alice.test"));
+        assert!(lines[3].contains("did:plc:alice"));
+    }
+
+    fn setup_db_conn() -> Dbconn {
+        Dbconn {
+            chat: setup_chat_db(),
+            common: setup_common_db(),
+        }
+    }
+
+    fn setup_chat_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                creator_id TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn setup_common_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS atproto_auth_data(
+                key TEXT PRIMARY KEY,
+                session TEXT,
+                state TEXT,
+                is_logged_in INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                handle TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        conn
+    }
+
+    fn insert_atproto_login(conn: &Connection) {
+        conn.execute(
+            "INSERT INTO atproto_auth_data(
+                key, session, state, is_logged_in, created_at, updated_at, handle
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            ("did:plc:alice", "{}", "", true, 1_i64, 1_i64, "alice.test"),
+        )
+        .unwrap();
+    }
 }
