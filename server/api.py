@@ -65,16 +65,17 @@ async def catch_all(request, call_next):
         raise
 
 
+async def passthrough_log_raw(reader):
+    async for chunk in reader:
+        logger.info("stream chunk: %r\n", chunk)  # logs raw bytes/str repr
+        yield chunk
+
+
 @app.post("/v1/responses")
 async def create_chat_response(request: ResponsesRequest):
     """
     Create a response stream/non-stream with openResponses format
     """
-    # try:
-    #     val_request = ResponsesRequest.model_validate(request)
-    # except ValidationError as e:
-    #     print(f"errorz\n{e}")
-    #     raise HTTPException(status_code=422, detail=e.errors())
 
     if request.stream:
         return StreamingResponse(

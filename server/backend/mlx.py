@@ -3,10 +3,13 @@ import logging
 from ssl import SSLCertVerificationError
 import time
 import uuid
+import random
+import string
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from fastapi import HTTPException, requests
 from openai_harmony import (
+    Author,
     Conversation,
     DeveloperContent,
     Message,
@@ -35,6 +38,8 @@ from ..reasoning_utils import ReasoningExtractor
 from ..schemas import (
     CAssistantMessageItemParam,
     CDeveloperMessageItemParam,
+    CFunctionCallItemParam,
+    CFunctionCallOutputItemParam,
     CReasoningItemParam,
     CSystemMessageItemParam,
     CUserMessageItemParam,
@@ -121,43 +126,6 @@ def _calc_usage(
         return {"input_tokens": 0, "output_tokens": 0}
 
 
-def _store_response(
-    response_id: str,
-    created: int,
-    completed_at: Optional[int],
-    model: str,
-    status: str,
-    output: List[Dict[str, Any]],
-    usage: Dict[str, int],
-    error: Error | None = None,
-    incomplete_details: IncompleteDetails | None = None,
-    metrics: Optional[Dict[str, Any]] = None,
-) -> ResponsesResponse:
-    """Create a ResponsesResponse, attach metrics to metadata and store it in `_responses`."""
-    resp = ResponsesResponse(
-        id=response_id,
-        created_at=created,
-        completed_at=completed_at,
-        model=model,
-        status=status,
-        object="response",
-        error=error,
-        output=output,
-        usage=usage,
-        incomplete_details=incomplete_details,
-    )
-    if metrics:
-        try:
-            resp.metadata["metrics"] = metrics
-        except Exception:
-            pass
-    try:
-        is_answerresponses[response_id] = resp
-    except Exception:
-        pass
-    return resp
-
-
 def count_tokens(text: str) -> int:
     """Rough token count estimation."""
     return int(len(text.split()) * 1.3)  # Approximation, convert to int
@@ -170,13 +138,15 @@ def handle_response_input(request: ResponsesRequest):
     if isinstance(request.input, str):
         user_input_content = request.input
     else:
-        # cz the assumption is the last one in the array will be
-        # user role input
         user_msg_item = request.input[-1]
-        if isinstance(user_msg_item.content, list):
-            user_input_content = user_msg_item.content[0].text
+        if isinstance(user_msg_item, CUserMessageItemParam):
+            if isinstance(user_msg_item.content, list):
+                user_input_content = user_msg_item.content[0].text
+            else:
+                user_input_content = user_msg_item.content.root
         else:
-            user_input_content = user_msg_item.content.root
+            # FIXME: Not a user input should handle this for non-harmonic later
+            user_input_content = ""
     return user_input_content
 
 
@@ -199,11 +169,13 @@ async def generate_response_chat_stream(
 
     input_tokens = len(runner.tokenizer.encode(user_input_content))  # pyright: ignore
 
+    # TODO: we could make this on-demand, for ex: tool_id is not needed
+    # everytime
     response_id = f"resp_{uuid.uuid4()}"
     message_id = f"msg_{uuid.uuid4()}"
     reasoning_id = f"reasoning_{uuid.uuid4()}"
     sequence_number = 0
-
+    tool_id = ""
     ## response.created envelope event ##
     initial_response = _get_response_on_create(response_id, request, created)
     resp_str, sequence_number = _sse(
@@ -219,7 +191,9 @@ async def generate_response_chat_stream(
     content_index = 0
     output_index = 0
     output_items = []
+    tool_call_text = ""
     state = ""
+    last_state = ""
     try:
         iterator: Iterator
         if is_harmony_family(request.model):
@@ -248,12 +222,42 @@ async def generate_response_chat_stream(
             output_tokens += 1
 
             if "**[Reasoning]**" in token:
+                last_state = state
                 state = "reasoning"
 
+            if "**[ToolCall]**" in token:
+                last_state = state
+                state = "toolcall"
+                tool_id = f"toolcall_{uuid.uuid4()}"
+                content_index = 0
+
             if "**[Answer]**" in token:
+                last_state = state
                 state = "answer"
                 # Resetting content_index as reasoning output_item is finished
                 content_index = 0
+
+            if last_state != state and last_state != "" and content_index == 0:
+                if last_state == "reasoning":
+                    resp_str, sequence_number, output_index, item = (
+                        _process_stop_reasoning_events(
+                            reasoning_id, output_index, reasoning_text, sequence_number
+                        )
+                    )
+                    output_items.append(item)
+                    yield resp_str
+                elif last_state == "toolcall":
+                    resp_str, sequence_number, output_index, item = (
+                        _process_stop_tool_call_events(
+                            tool_id,
+                            output_index,
+                            tool_call_text,
+                            sequence_number,
+                            request,
+                        )
+                    )
+                    output_items.append(item)
+                    yield resp_str
 
             if state == "reasoning":
                 if content_index == 0:
@@ -274,15 +278,32 @@ async def generate_response_chat_stream(
                     output_item, sequence_number
                 )
                 yield resp_str
+            elif state == "toolcall":
+                if content_index == 0:
+                    resp_str, sequence_number = _process_output_item_added(
+                        "function_call",
+                        tool_id,
+                        token,
+                        output_index,
+                        sequence_number,
+                    )
+                    yield resp_str
+                # To avoid toolcall tag in the final arguments txt
+                if content_index != 0:
+                    tool_call_text += token
+                    output_item = OutputItemDeltaModel(
+                        item_name="function_call_arguments",
+                        item_id=tool_id,
+                        index=output_index,
+                        delta=token,
+                        content_index=content_index,
+                    )
+                    resp_str, sequence_number = _process_output_item_delta(
+                        output_item, sequence_number
+                    )
+                    yield resp_str
             elif state == "answer":
                 if content_index == 0:
-                    resp_str, sequence_number, output_index, item = (
-                        _process_stop_reasoning_events(
-                            reasoning_id, output_index, reasoning_text, sequence_number
-                        )
-                    )
-                    output_items.append(item)
-                    yield resp_str
                     resp_str, sequence_number = _process_output_item_added(
                         "message", message_id, token, output_index, sequence_number
                     )
@@ -309,11 +330,30 @@ async def generate_response_chat_stream(
         yield resp_str
         return
 
-    resp_str, sequence_number, output_index, item = _process_output_item_done(
-        "message", message_id, answer_text, output_index, sequence_number
-    )
-    output_items.append(item)
-    yield resp_str
+    # TODO: seprate this event ending stuff, as its called during token gen loop
+    print(f"final state - {state}")
+    if state == "reasoning":
+        resp_str, sequence_number, output_index, item = _process_stop_reasoning_events(
+            reasoning_id, output_index, reasoning_text, sequence_number
+        )
+        output_items.append(item)
+        yield resp_str
+    elif state == "toolcall":
+        resp_str, sequence_number, output_index, item = _process_stop_tool_call_events(
+            tool_id,
+            output_index,
+            tool_call_text,
+            sequence_number,
+            request,
+        )
+        output_items.append(item)
+        yield resp_str
+    elif state == "answer":
+        resp_str, sequence_number, output_index, item = _process_output_item_done(
+            "message", message_id, answer_text, output_index, sequence_number
+        )
+        output_items.append(item)
+        yield resp_str
 
     ## Envelope, response.completed
     usage = Usage(
@@ -334,6 +374,7 @@ async def generate_response_chat_stream(
     ###############
 
     yield "data: [DONE]\n\n"
+    return
 
 
 def get_reasoning_effort(reasoning_effort_enum: ReasoningEffortEnum | None):
@@ -362,6 +403,7 @@ def build_harmony_conversation(
             Role.SYSTEM, SystemContent.new().with_reasoning_effort(reasoning_effort)
         )
     ]
+    function_name = ""
     for item in convos:
         match item:
             case CUserMessageItemParam():
@@ -397,6 +439,15 @@ def build_harmony_conversation(
             case CSystemMessageItemParam():
                 convo_list.append(
                     Message.from_role_and_content(Role.SYSTEM, item.content.root)
+                )
+            case CFunctionCallItemParam():
+                function_name = item.name
+            case CFunctionCallOutputItemParam():
+                convo_list.append(
+                    Message.from_author_and_content(
+                        Author.new(Role.TOOL, function_name),
+                        item.output,  # pyright: ignore
+                    ).with_channel("commentary")
                 )
             case CReasoningItemParam():
                 continue
@@ -570,18 +621,27 @@ def _process_output_item_added(
     type: str, id: str, token: str, output_index, sequence_number: int
 ) -> tuple[str, int]:
     event_name = "response.output_item.added"
-    item_chunk = {
-        "type": type,
-        "id": id,
-        "status": "in_progress",
-        "role": "assistant",
-        "content": [
-            {
-                "type": "output_text",
-                "text": token,
-            }
-        ],
-    }
+    if type == "function_call":
+        item_chunk = {
+            "type": type,
+            "id": id,
+            "name": "name",
+            "call_id": id,
+            "status": "in_progress",
+        }
+    else:
+        item_chunk = {
+            "type": type,
+            "id": id,
+            "status": "in_progress",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": token,
+                }
+            ],
+        }
     event = {
         "output_index": output_index,
         "item": item_chunk,
@@ -638,21 +698,37 @@ def _process_stop_reasoning_events(
 
 
 def _process_output_item_done(
-    type: str, id: str, final_text: str, output_index, sequence_number: int
+    type: str,
+    id: str,
+    final_text: str,
+    output_index,
+    sequence_number: int,
+    tool_name: str | None = None,
 ) -> tuple[str, int, int, dict]:
     event_name = "response.output_item.done"
-    item_chunk = {
-        "type": type,
-        "id": id,
-        "status": "completed",
-        "role": "assistant",
-        "content": [
-            {
-                "type": "output_text",
-                "text": final_text,
-            }
-        ],
-    }
+    item_chunk: dict
+    if type == "function_call":
+        item_chunk = {
+            "type": type,
+            "id": id,
+            "name": tool_name,
+            "call_id": id,
+            "status": "completed",
+            "arguments": final_text,
+        }
+    else:
+        item_chunk = {
+            "type": type,
+            "id": id,
+            "status": "completed",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "output_text",
+                    "text": final_text,
+                }
+            ],
+        }
     if type == "reasoning":
         item_chunk.update({"summary": [{"type": "summary_text", "text": final_text}]})
     event = {
@@ -678,3 +754,67 @@ def _process_error_event(
         response_id, request, created_at, incomplete_details, error
     )
     return _sse("response.failed", {"response": err_response}, sequence_number)
+
+
+def _random_alphanum(n=5):
+    return "".join(random.choices(string.ascii_letters + string.digits, k=n))
+
+
+def _process_stop_tool_call_events(
+    id: str,
+    output_index: int,
+    text: str,
+    sequence_number: int,
+    request: ResponsesRequest,
+) -> tuple[str, int, int, dict]:
+    event_name = "response.function_call_arguments.done"
+    tool_name = _find_tool(request.tools, text)  # pyright: ignore
+    print(f"toolz - {tool_name}")
+    event = {
+        "output_index": output_index,
+        "item_id": id,
+        "name": tool_name,
+        "arguments": text,
+    }
+    resp_str_a, sequence_number = _sse(event_name, event, sequence_number)
+    resp_str_b, sequence_number, output_index, item_chunk = _process_output_item_done(
+        "function_call", id, text, output_index, sequence_number, tool_name
+    )
+    return (
+        resp_str_a + resp_str_b,
+        sequence_number,
+        output_index,
+        item_chunk,
+    )
+
+
+def _find_tool(tools: list, arguments_str: str) -> str:
+    # FIXME: Handle cases of json load err due to wrong format
+    arguments_map = json.loads(arguments_str)
+    print(f"toolls\n{tools}")
+    response_argument_keys = list(arguments_map.keys())
+    tool_name = ""
+    # FIXME: sometimes model returns `cmd` instead of `command` as
+    # required parameters for bash, this will break the logic, either fix via prompt or handle it in code
+    for tool in tools:
+        name = tool.name
+        params = tool.parameters
+
+        print(f"params {params}")
+
+        if params is None:
+            required_params = []
+        else:
+            required_params = params.get("required", [])
+
+        print(f"required params {required_params}")
+        print(f"model argument keys {response_argument_keys}")
+
+        if set(required_params) == set(response_argument_keys):
+            tool_name = name
+            break
+
+    if tool_name == "":
+        return "bash"
+    else:
+        return tool_name

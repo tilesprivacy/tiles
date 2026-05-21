@@ -493,14 +493,27 @@ class MLXRunner:
         generated_tokens = []
         is_analysis = None
         is_final = None
+        is_commentary = None
         for token, _ in generator:
             token_id = token.item() if hasattr(token, "item") else token
             parser.process(token_id)  # pyright: ignore
             generated_tokens.append(token_id)
+            # print("--------------------------------")
+            # # print("current_role", parser.current_role)
+            # print("current_channel", parser.current_channel)
+            # print("last_content_delta", parser.last_content_delta)
+            # # print("current_content_type", parser.current_content_type)
+            # # print("current_recipient", parser.current_recipient)
+            # print("current_content", parser.current_content)
+            # print("--------------------------------")
 
             if is_analysis is None and parser.current_channel == "analysis":
                 is_analysis = True
                 yield "**[Reasoning]**\n\n"
+
+            if is_commentary is None and parser.current_channel == "commentary":
+                is_commentary = True
+                yield "**[ToolCall]**\n\n"
 
             if is_final is None and parser.current_channel == "final":
                 is_final = True

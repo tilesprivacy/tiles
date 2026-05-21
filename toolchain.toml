@@ -4,6 +4,8 @@
 
 [embedded-tools]
 pi = "v0.67.68"
+# fork of tiles-pi
+tiles-pi="v0.67.68"
 sqlcipher = "4.10.0"
 
 [dev-tools]

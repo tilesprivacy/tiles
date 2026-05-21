@@ -11,7 +11,7 @@ use crate::utils::config::{
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
 use atrium_api::types::string::Datetime;
-use log::info;
+use log::{info, warn};
 use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
 use rustyline::completion::Completer;
@@ -88,6 +88,12 @@ enum PiResponse {
     AgentEnd,
     #[serde(rename = "turn_end")]
     TurnEnd(PiTurnEndEvent),
+    // #[serde(rename = "tool_execution_start")]
+    // ToolExecutionStart,
+    // #[serde(rename = "tool_execution_update")]
+    // ToolExecutionUpdate,
+    // #[serde(rename = "tool_execution_end")]
+    // ToolExecutionEnd,
     #[serde[other]]
     Unknown,
 }
@@ -156,6 +162,16 @@ enum AsstMsgEventType {
     ThinkingDelta,
     #[serde(rename = "thinking_end")]
     ThinkingEnd,
+    #[serde(rename = "toolcall_start")]
+    ToolcallStart,
+    #[serde(rename = "toolcall_delta")]
+    ToolcallDelta,
+    #[serde(rename = "toolcall_end")]
+    ToolcallEnd,
+    #[serde(rename = "done")]
+    Done,
+    #[serde(rename = "error")]
+    Error,
 }
 
 const PY_PORT: u32 = 6969;
@@ -524,15 +540,26 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                 serde_json::from_str(&line).context("Failed to parse Pi response")?;
             match response {
                 PiResponse::AgentStart => {
-                    info!("agent start")
+                    // info!("agent start")
                 }
                 PiResponse::MessageUpdate(msg_update) => {
                     handle_pi_message_update(msg_update);
                 }
+                // PiResponse::ToolExecutionStart => {
+                //     info!("tool exec start")
+                // }
+                // PiResponse::ToolExecutionUpdate => {
+                //     info!("tool exec update")
+                // }
+                // PiResponse::ToolExecutionEnd => {
+                //     info!("tool exec end")
+                // }
                 PiResponse::AgentEnd => {
-                    info!("agent end");
+                    // info!("agent end");
                     break;
                 }
+                // TODO: We should think about process in the agent end instead of
+                // turn end, since multi-turn, means each entry in db as of now
                 PiResponse::TurnEnd(turn_event) => {
                     process_pi_turn_event(
                         turn_event,
@@ -556,7 +583,7 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                     break;
                 }
                 PiResponse::Unknown => {
-                    // info!("Unsupported command");
+                    // info!("Unsupported response {}", &line);
                     continue;
                 }
             }
@@ -698,6 +725,19 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
     let model_config = create_pi_provider_config(model_name, &endpoint_url)?;
 
     fs::write(provider_config_file_path, model_config)?;
+
+    // For easy debugging Pi, when developing when needed we can directly call the
+    // local on-demand build pi binary and point local path
+    // assuming `tiles-pi` is cloned as a sibling in the same dir
+    // let pi_exec_path =
+    //  PathBuf::from("~/tiles-pi/packages/coding-agent/binaries/darwin-arm64/pi");
+    // For example:
+    // let pi_exec_path =
+    // PathBuf::from("/Users/tiles/tiles-pi/packages/coding-agent/binaries/darwin-arm64/pi");
+    // On building binary locally, from tiles-pi root dir run
+    // `./scripts/build-binaries.sh --platform darwin-arm64`
+    // More platform flags can be seen in the `build-binaries.sh`
+
     let pi_exec_path = tiles_lib_dir.join("pi/pi");
 
     let pi_process = Command::new(pi_exec_path)
@@ -936,7 +976,9 @@ fn build_status_lines(
 
 fn handle_pi_message_update(msg_update: PiMessageUpdate) {
     match msg_update.assistant_message_event.r#type {
-        AsstMsgEventType::TextStart => {}
+        AsstMsgEventType::TextStart => {
+            info!("msg text_start")
+        }
         AsstMsgEventType::TextDelta => {
             if let Some(delta) = msg_update.assistant_message_event.delta {
                 print!("{}", delta);
@@ -944,7 +986,9 @@ fn handle_pi_message_update(msg_update: PiMessageUpdate) {
                 std::io::stdout().flush().ok();
             }
         }
-        AsstMsgEventType::TextEnd => {}
+        AsstMsgEventType::TextEnd => {
+            info!("msg text_end")
+        }
         AsstMsgEventType::ThinkingStart => {}
         AsstMsgEventType::ThinkingDelta => {
             if let Some(delta) = msg_update.assistant_message_event.delta {
@@ -953,7 +997,31 @@ fn handle_pi_message_update(msg_update: PiMessageUpdate) {
                 std::io::stdout().flush().ok();
             }
         }
-        AsstMsgEventType::ThinkingEnd => {}
+        AsstMsgEventType::ThinkingEnd => {
+            // info!("msg thinking_end")
+        }
+        AsstMsgEventType::ToolcallStart => {
+            println!("Selecting tool to execute")
+            // info!("toolcall msg_start")
+        }
+        AsstMsgEventType::ToolcallDelta => {
+            // info!("toolcall msg_delta")
+            if let Some(delta) = msg_update.assistant_message_event.delta {
+                print!("{}", delta.dimmed());
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            }
+        }
+        AsstMsgEventType::ToolcallEnd => {
+            // info!("toolcall msg_end")
+            println!("Tool call selected")
+        }
+        AsstMsgEventType::Done => {
+            info!("msg done event")
+        }
+        AsstMsgEventType::Error => {
+            warn!("msg error event")
+        }
         _ => (),
     }
 }
