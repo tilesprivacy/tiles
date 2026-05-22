@@ -1,6 +1,6 @@
 [package]
 name = "tiles"
-version = "0.4.8"
+version = "0.4.9"
 edition = "2024"
 
 [dependencies]
@@ -36,6 +36,7 @@ atrium-identity = "0.1.9"
 hickory-resolver = "0.26.0"
 atrium-common = "0.1.4"
 atrium-api = "0.25.8"
+chacha20poly1305 = { version = "0.10" }
 
 [dev-dependencies]
 tempfile = "3"

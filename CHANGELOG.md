@@ -5,6 +5,19 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.9] - 2026-05-22
+
+### Added
+
+- Added encrypted session sharing over ATproto [#141](https://github.com/tilesprivacy/tiles/pull/141)
+
+    - Use the same `/share` command, but Tiles will ask for public or private sharing.
+
+### Changed
+
+- Routine refactoring and error handling [#139](https://github.com/tilesprivacy/tiles/pull/139)
+
+
 ## [0.4.8] - 2026-05-01
 
 ## Added

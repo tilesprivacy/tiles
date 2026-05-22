@@ -310,12 +310,12 @@ enum CommandType {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SharedSession {
     #[serde(rename = "$type")]
-    r#type: String,
-    session_id: String,
-    name: String,
-    contents: Vec<SharedContent>,
-    created_at: String,
-    models_used: Vec<String>,
+    pub r#type: String,
+    pub session_id: String,
+    pub name: String,
+    pub contents: Vec<SharedContent>,
+    pub created_at: String,
+    pub models_used: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -837,7 +837,20 @@ async fn process_share_session(
         models_used,
     };
 
-    match share_session(&conn.common, shared_sessions.clone()).await {
+    let share_choice_prompt = format!(
+        "{}",
+        "Do you want to share as a private session? (Y/n)".yellow()
+    );
+
+    println!("{}", share_choice_prompt);
+
+    let stdin = io::stdin();
+    let mut input = String::new();
+    stdin.read_line(&mut input)?;
+    let clean_input = input.trim();
+    let is_private = clean_input.is_empty() || clean_input.to_lowercase() == "y";
+
+    match share_session(&conn.common, shared_sessions.clone(), is_private).await {
         Err(err) if &err.to_string() == "NOT_LOGGED_IN" => {
             let login_prompt = format!("{}", "Sharing a chat session requires logging in, as the data is stored on your Bluesky-based ATProto PDS.\nDo you want to proceed with the login flow? (Y/n)".yellow());
 
@@ -852,11 +865,11 @@ async fn process_share_session(
                 println!("Please enter your Bluesky handle (ex: john.bsky.team)");
                 stdin.read_line(&mut input)?;
                 login(conn, input.trim()).await?;
-                share_session(&conn.common, shared_sessions).await?;
+                share_session(&conn.common, shared_sessions, is_private).await?;
             }
         }
         Err(err) => {
-            eprintln!("Failed to share session due to {:?}", err)
+            eprintln!("Failed to share session due to {:?}\nTry re-login", err)
         }
         Ok(_) => {
             info!("Session shared successfully")
