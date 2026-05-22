@@ -335,7 +335,7 @@ pub async fn share_session(
         mem_session_store.set(did_struct.clone(), session).await?;
 
         let write_info = if is_private {
-            "Writing to PDS with encrypted content  and generating private link..."
+            "Writing to PDS with encrypted content and generating private link..."
         } else {
             "Writing to PDS and generating link..."
         };
