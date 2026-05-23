@@ -78,13 +78,21 @@ struct HickoryDnsTxtResolver {
     resolver: TokioResolver,
 }
 
-impl Default for HickoryDnsTxtResolver {
-    fn default() -> Self {
-        Self {
-            resolver: TokioResolver::builder_tokio()
-                .expect("Failed to create TokioResolver builder")
-                .build()
-                .expect("Failed to build tokio resolver"),
+impl HickoryDnsTxtResolver {
+    fn new() -> Result<Self> {
+        let build_resolver = if let Ok(resolver_builder) = TokioResolver::builder_tokio() {
+            resolver_builder.build()
+        } else {
+            return Err(anyhow!(
+                "Failed to resolve DNS, please check your internet connection"
+            ));
+        };
+        if let Ok(resolved) = build_resolver {
+            Ok(Self { resolver: resolved })
+        } else {
+            Err(anyhow!(
+                "Failed to resolve DNS, please check your internet connection"
+            ))
         }
     }
 }
@@ -168,7 +176,6 @@ pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
 
     let (callback_tx, callback_rx) = oneshot::channel();
 
-    //TODO: can we randomze port
     start_internal_server(Some(LOGIN_PORT), callback_tx).await?;
     let params = callback_rx.await?;
     info!("params recieved {:?}", params);
@@ -343,7 +350,7 @@ pub async fn share_session(
         let oauth_session = client
             .restore(&did_struct)
             .await
-            .context("Failed to restore the oauth session")?;
+            .context("Failed to restore the oauth session, Try re-login with ATproto")?;
 
         let agent = Agent::new(oauth_session);
 
@@ -449,7 +456,7 @@ fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
                 http_client: http_client.clone(),
             }),
             handle_resolver: AtprotoHandleResolver::new(AtprotoHandleResolverConfig {
-                dns_txt_resolver: HickoryDnsTxtResolver::default(),
+                dns_txt_resolver: HickoryDnsTxtResolver::new()?,
                 http_client: http_client.clone(),
             }),
             authorization_server_metadata: Default::default(),

@@ -902,7 +902,7 @@ async fn process_share_session(
             }
         }
         Err(err) => {
-            eprintln!("Failed to share session due to {:?}\nTry re-login", err)
+            eprintln!("Failed to share session due to {:?}", err)
         }
         Ok(_) => {
             info!("Session shared successfully")
