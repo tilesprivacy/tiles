@@ -9,6 +9,7 @@ from openresponses_types import (
     InputTextContentParam,
     InputVideoContent,
     ReasoningParam,
+    ToolChoiceValueEnum,
     TruncationEnum,
     Type15,
 )
@@ -181,7 +182,7 @@ class ResponsesRequest(BaseModel):
     stream: bool | None = False
     stream_options: StreamOptionsParam | None = None
     tools: list[CFunctionTool] | None = None
-    tool_choice: ToolChoiceParam | None = None
+    tool_choice: ToolChoiceParam | None = ToolChoiceParam(ToolChoiceValueEnum.auto)
     temperature: float | None = 0.7
     top_p: float | None = 1
     max_output_tokens: int | None = None

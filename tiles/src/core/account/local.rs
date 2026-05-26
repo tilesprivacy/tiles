@@ -430,7 +430,7 @@ pub fn create_dummy_user() -> User {
     }
 }
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::core::account::local::{
         RootUser, create_root_account, get_current_user, get_root_user_details, set_nickname,
@@ -646,7 +646,7 @@ mod tests {
         assert!(err.to_string().contains("No Root user available"));
     }
 
-    fn setup_db_schema() -> Connection {
+    pub fn setup_db_schema() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute(
             "

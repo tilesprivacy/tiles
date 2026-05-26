@@ -8,9 +8,11 @@ dependencies = [
     "uvicorn==0.38.0",
     "mlx-lm==0.31.0",
     "black==25.9.0",
-    "openai-harmony==0.0.8",
+    # "oss-harmony",
+    # "openai-harmony==0.0.8",
     "httpx==0.28.1",
-    "openresponses-types"
+    "openresponses-types",
+    "oss-harmony @ git+https://github.com/oss-harmony/harmony.git@main"
 ]
 
 [build-system]

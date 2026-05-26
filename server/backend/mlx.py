@@ -54,6 +54,7 @@ from ..schemas import (
 from .mlx_runner import MLXRunner
 
 import httpx
+import traceback
 
 client = httpx.AsyncClient()
 
@@ -324,6 +325,7 @@ async def generate_response_chat_stream(
             content_index += 1
 
     except Exception as e:
+        traceback.print_exc()
         resp_str, sequence_number = _process_error_event(
             str(e), response_id, request, created, sequence_number
         )
@@ -331,7 +333,7 @@ async def generate_response_chat_stream(
         return
 
     # TODO: seprate this event ending stuff, as its called during token gen loop
-    print(f"final state - {state}")
+
     if state == "reasoning":
         resp_str, sequence_number, output_index, item = _process_stop_reasoning_events(
             reasoning_id, output_index, reasoning_text, sequence_number
@@ -708,13 +710,23 @@ def _process_output_item_done(
     event_name = "response.output_item.done"
     item_chunk: dict
     if type == "function_call":
+        # TODO: refactor this as same code used in _find_tool
+        try:
+            arguments_map = json.loads(final_text)
+        except json.JSONDecodeError as e:
+            arguments_map = {}
+
+        new_args = {
+            ("command" if k == "cmd" else k): v for k, v in arguments_map.items()
+        }
+
         item_chunk = {
             "type": type,
             "id": id,
             "name": tool_name,
             "call_id": id,
             "status": "completed",
-            "arguments": final_text,
+            "arguments": json.dumps(new_args),
         }
     else:
         item_chunk = {
@@ -756,6 +768,7 @@ def _process_error_event(
     return _sse("response.failed", {"response": err_response}, sequence_number)
 
 
+# TODO: Maybe use this as call_id
 def _random_alphanum(n=5):
     return "".join(random.choices(string.ascii_letters + string.digits, k=n))
 
@@ -769,12 +782,19 @@ def _process_stop_tool_call_events(
 ) -> tuple[str, int, int, dict]:
     event_name = "response.function_call_arguments.done"
     tool_name = _find_tool(request.tools, text)  # pyright: ignore
-    print(f"toolz - {tool_name}")
+
+    try:
+        arguments_map = json.loads(text)
+    except json.JSONDecodeError as e:
+        arguments_map = {}
+
+    new_args = {("command" if k == "cmd" else k): v for k, v in arguments_map.items()}
+
     event = {
         "output_index": output_index,
         "item_id": id,
         "name": tool_name,
-        "arguments": text,
+        "arguments": json.dumps(new_args),
     }
     resp_str_a, sequence_number = _sse(event_name, event, sequence_number)
     resp_str_b, sequence_number, output_index, item_chunk = _process_output_item_done(
@@ -789,32 +809,36 @@ def _process_stop_tool_call_events(
 
 
 def _find_tool(tools: list, arguments_str: str) -> str:
-    # FIXME: Handle cases of json load err due to wrong format
-    arguments_map = json.loads(arguments_str)
-    print(f"toolls\n{tools}")
-    response_argument_keys = list(arguments_map.keys())
+    # TODO: Can we add tests for this error
+    try:
+        arguments_map = json.loads(arguments_str)
+    except json.JSONDecodeError as e:
+        arguments_map = {}
+
+    tool_cmd = {"cmd": "command", "rw": "read-write"}
+    response_argument_keys_raw = list(arguments_map.keys())
+    # map thru and change cmd to command
+    response_argument_keys = [tool_cmd.get(x, x) for x in response_argument_keys_raw]
+
     tool_name = ""
-    # FIXME: sometimes model returns `cmd` instead of `command` as
-    # required parameters for bash, this will break the logic, either fix via prompt or handle it in code
     for tool in tools:
         name = tool.name
         params = tool.parameters
-
-        print(f"params {params}")
 
         if params is None:
             required_params = []
         else:
             required_params = params.get("required", [])
 
-        print(f"required params {required_params}")
-        print(f"model argument keys {response_argument_keys}")
-
-        if set(required_params) == set(response_argument_keys):
+        if _is_correct_tool(required_params, response_argument_keys):
             tool_name = name
             break
 
     if tool_name == "":
-        return "bash"
+        return "read"
     else:
         return tool_name
+
+
+def _is_correct_tool(required_params: list, model_argument_list: list) -> bool:
+    return set(model_argument_list).issubset(required_params)

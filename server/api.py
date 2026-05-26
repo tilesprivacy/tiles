@@ -65,6 +65,7 @@ async def catch_all(request, call_next):
         raise
 
 
+# Can be used to debug the streaming responses
 async def passthrough_log_raw(reader):
     async for chunk in reader:
         logger.info("stream chunk: %r\n", chunk)  # logs raw bytes/str repr

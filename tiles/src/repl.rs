@@ -67,9 +67,6 @@ pub struct ChatResponse {
     pub input: String,
     pub session_id: String,
     pub role: Role,
-    pub code: Option<String>,
-    // deprecated, will remove soon
-    pub prev_response_id: Option<String>,
     pub parent_chat_id: Option<String>,
     pub metrics: Option<BenchmarkMetrics>,
     pub model_used: String,
@@ -85,15 +82,9 @@ enum PiResponse {
     #[serde(rename = "message_update")]
     MessageUpdate(PiMessageUpdate),
     #[serde(rename = "agent_end")]
-    AgentEnd,
+    AgentEnd(PiAgentEndEvent),
     #[serde(rename = "turn_end")]
     TurnEnd(PiTurnEndEvent),
-    // #[serde(rename = "tool_execution_start")]
-    // ToolExecutionStart,
-    // #[serde(rename = "tool_execution_update")]
-    // ToolExecutionUpdate,
-    // #[serde(rename = "tool_execution_end")]
-    // ToolExecutionEnd,
     #[serde[other]]
     Unknown,
 }
@@ -130,13 +121,15 @@ struct PiResponseMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct PiTurnEndEvent {
-    message: PiTurnEndEventMsg,
+    message: PiMsgEvent,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct PiTurnEndEventMsg {
-    role: String,
+struct PiMsgEvent {
+    role: Role,
     content: Vec<PiMsgContent>,
+    #[serde(rename = "stopReason")]
+    stop_reason: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -144,6 +137,11 @@ struct PiMsgContent {
     r#type: String,
     text: Option<String>,
     thinking: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PiAgentEndEvent {
+    messages: Vec<PiMsgEvent>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -326,23 +324,23 @@ pub struct SharedContent {
 
 struct ReplSession {
     pub session_id: String,
-    turn_count: usize,
     // if true, we will prepend the resumed session history to the input
     resume_session_pending: bool,
     resumed_session: String,
     pub current_modelname: String,
-    pub last_chat_id: String,
+    pub last_chat_id: Option<String>,
+    pub session_started: bool,
 }
 
 impl ReplSession {
     pub fn new(session_id: &str, model_name: &str) -> Self {
         ReplSession {
             session_id: session_id.to_owned(),
-            turn_count: 0,
             resume_session_pending: false,
             resumed_session: String::from(""),
             current_modelname: model_name.to_owned(),
-            last_chat_id: String::from(""),
+            last_chat_id: None,
+            session_started: false,
         }
     }
 
@@ -360,18 +358,6 @@ impl ReplSession {
 
     pub fn set_resumed_session(&mut self, session: String) {
         self.resumed_session = session
-    }
-
-    pub fn get_turn_count(&self) -> usize {
-        self.turn_count
-    }
-
-    pub fn set_turn_count(&mut self, count: usize) {
-        self.turn_count = count
-    }
-
-    pub fn inc_turn_count(&mut self) {
-        self.turn_count = self.turn_count + 1
     }
 }
 fn handle_input(input: &str) -> InputType {
@@ -496,8 +482,6 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
 
     // The great REPL loop
     loop {
-        repl_session.set_pending_resume_session(false);
-
         // Reads the user input
         let readline = editor.readline(">>> ");
         let input = match readline {
@@ -524,7 +508,7 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                 break;
             }
             InputType::Prompt => {
-                handle_input_prompt(pi_stdin, &repl_session, &input)?;
+                handle_input_prompt(pi_stdin, &mut repl_session, &input)?;
             }
             InputType::Command(cmd) => {
                 handle_input_commands(cmd, &mut repl_session, db_conn, &modelname).await?;
@@ -540,34 +524,25 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                 serde_json::from_str(&line).context("Failed to parse Pi response")?;
             match response {
                 PiResponse::AgentStart => {
-                    // info!("agent start")
+                    info!("agent start")
                 }
                 PiResponse::MessageUpdate(msg_update) => {
                     handle_pi_message_update(msg_update);
                 }
-                // PiResponse::ToolExecutionStart => {
-                //     info!("tool exec start")
-                // }
-                // PiResponse::ToolExecutionUpdate => {
-                //     info!("tool exec update")
-                // }
-                // PiResponse::ToolExecutionEnd => {
-                //     info!("tool exec end")
-                // }
-                PiResponse::AgentEnd => {
-                    // info!("agent end");
-                    break;
-                }
-                // TODO: We should think about process in the agent end instead of
-                // turn end, since multi-turn, means each entry in db as of now
-                PiResponse::TurnEnd(turn_event) => {
-                    process_pi_turn_event(
-                        turn_event,
+                PiResponse::AgentEnd(agent_end_event) => {
+                    info!("agent end - {}", &line);
+                    process_pi_agent_end_event(
                         &mut repl_session,
+                        agent_end_event,
+                        pi_stdin,
                         db_conn,
                         &current_user,
-                        &input,
                     )?;
+                    break;
+                }
+                PiResponse::TurnEnd(_turn_event) => {
+                    println!("\n");
+                    process_pi_turn_event();
                 }
                 PiResponse::Response(response_msg) => {
                     if response_msg.success {
@@ -583,7 +558,7 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                     break;
                 }
                 PiResponse::Unknown => {
-                    // info!("Unsupported response {}", &line);
+                    info!("Unsupported response {}", &line);
                     continue;
                 }
             }
@@ -733,7 +708,7 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
     //  PathBuf::from("~/tiles-pi/packages/coding-agent/binaries/darwin-arm64/pi");
     // For example:
     // let pi_exec_path =
-    // PathBuf::from("/Users/tiles/tiles-pi/packages/coding-agent/binaries/darwin-arm64/pi");
+    //     PathBuf::from("/Users/tiles/tiles-pi/packages/coding-agent/binaries/darwin-arm64/pi");
     // On building binary locally, from tiles-pi root dir run
     // `./scripts/build-binaries.sh --platform darwin-arm64`
     // More platform flags can be seen in the `build-binaries.sh`
@@ -869,7 +844,7 @@ async fn process_share_session(
             }
         }
         Err(err) => {
-            eprintln!("Failed to share session due to {:?}\nTry re-login", err)
+            eprintln!("Failed to share session due to {:?}", err)
         }
         Ok(_) => {
             info!("Session shared successfully")
@@ -889,8 +864,7 @@ fn show_session_info(db_conn: &Dbconn) -> Result<()> {
     Ok(())
 }
 
-//TODO: load the session via prompt into the model too
-fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize, String)> {
+fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession) -> Result<()> {
     let args = if let Some((_main_command, sub_commands)) = args.split_first() {
         sub_commands
     } else {
@@ -903,6 +877,7 @@ fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize, Strin
     } else {
         args[0]
     };
+
     // fetch session and the chats for the session_id
 
     let delta_chats = fetch_chats_by_session_id(&db_conn.chat, session_id)?;
@@ -921,11 +896,18 @@ fn load_session(db_conn: &Dbconn, args: &[&str]) -> Result<(String, usize, Strin
         println!("{}", chat.content);
     }
 
-    Ok((
-        session_id.to_string(),
-        delta_chats.chats.len(),
-        chat_history,
-    ))
+    let last_chat_id  = if let Some(chat) = delta_chats.chats.last() {
+        Some(chat.id.clone())
+    } else {
+
+        None
+    };
+    repl_session.session_id = session_id.to_string();
+    repl_session.set_pending_resume_session(true);
+    repl_session.set_resumed_session(chat_history);
+    repl_session.last_chat_id = last_chat_id;
+    // delta_chats.chats.las
+    Ok(())
 }
 
 fn show_status(session_id: &str, modelname: &str, db_conn: &Dbconn) -> Result<()> {
@@ -1010,15 +992,13 @@ fn handle_pi_message_update(msg_update: PiMessageUpdate) {
                 std::io::stdout().flush().ok();
             }
         }
-        AsstMsgEventType::ThinkingEnd => {
-            // info!("msg thinking_end")
-        }
+        AsstMsgEventType::ThinkingEnd => {}
         AsstMsgEventType::ToolcallStart => {
-            println!("Selecting tool to execute")
-            // info!("toolcall msg_start")
+            info!("Selecting tool to execute");
+            let delta = "**[Tool Calling]**";
+            println!("{}", delta.dimmed());
         }
         AsstMsgEventType::ToolcallDelta => {
-            // info!("toolcall msg_delta")
             if let Some(delta) = msg_update.assistant_message_event.delta {
                 print!("{}", delta.dimmed());
                 use std::io::Write;
@@ -1026,8 +1006,7 @@ fn handle_pi_message_update(msg_update: PiMessageUpdate) {
             }
         }
         AsstMsgEventType::ToolcallEnd => {
-            // info!("toolcall msg_end")
-            println!("Tool call selected")
+            info!("Tool call selected");
         }
         AsstMsgEventType::Done => {
             info!("msg done event")
@@ -1078,10 +1057,11 @@ async fn handle_repl_exit(pi_stdin: &mut ChildStdin) -> Result<()> {
 
 fn handle_input_prompt(
     pi_stdin: &mut ChildStdin,
-    repl_session: &ReplSession,
+    repl_session: &mut ReplSession,
     input: &str,
 ) -> Result<()> {
     let final_input = if repl_session.get_pending_resume_session() {
+        repl_session.set_pending_resume_session(false);
         info!("Pending resumed session, prepend the history");
         format!(
             "user_chat_history - {}\nUser question- {}",
@@ -1123,15 +1103,10 @@ async fn handle_input_commands(
         CommandType::Sessions => {
             show_session_info(db_conn)?;
         }
-        CommandType::Resume => match load_session(db_conn, &args) {
-            Ok((sesh_id, turn_count, history)) => {
-                repl_session.session_id = sesh_id;
-                repl_session.set_turn_count(turn_count);
-                repl_session.set_pending_resume_session(true);
-                repl_session.set_resumed_session(history);
-            }
+        CommandType::Resume => {
 
-            Err(err) => {
+            if let Err(err) = load_session(db_conn, &args, repl_session) 
+            {
                 println!("{}", err)
             }
         },
@@ -1144,84 +1119,115 @@ async fn handle_input_commands(
     Ok(())
 }
 
-fn process_pi_turn_event(
-    turn_event: PiTurnEndEvent,
+fn process_pi_turn_event() {
+    info!("Turn end");
+}
+
+fn process_pi_agent_end_event(
     repl_session: &mut ReplSession,
+    agent_end_event: PiAgentEndEvent,
+    pi_stdin: &mut ChildStdin,
     db_conn: &Dbconn,
     current_user: &crate::core::account::local::User,
-    input: &str,
 ) -> Result<()> {
-    info!("Turn end");
-    // will just toggle off if was toggledon, since we dont need to compact
-    // every time
-    repl_session.set_pending_resume_session(false);
-    repl_session.inc_turn_count();
-    // on agent end create a new session entry, only for the
-    // first time
-    if repl_session.get_turn_count() == 1 {
-        create_session(
-            &db_conn.chat,
-            &repl_session.session_id,
-            input,
-            &current_user.user_id,
-        )?;
-    }
-    let parent_chat_id = if repl_session.get_turn_count() == 1 {
-        None
-    } else {
-        Some(repl_session.last_chat_id.clone())
+    println!("{:?}", agent_end_event.messages);
+    if let Some(last_msg) = agent_end_event.messages.last() {
+        if last_msg.role == Role::Assistant {
+            if let Some(reason) = &last_msg.stop_reason
+                && reason == "error"
+            {
+                // agent fooked up, lets show a UX friendly msg to try again
+                // TODO: Send the err log to local daemon, so we can log it in daemon logs for later debuggin
+                let payload = json!({
+                    "type": "abort"
+                });
+                send_to_pi(pi_stdin, payload)?;
+                println!("An issue occured, please try again!");
+            }
+        }
     };
+
+    save_agent_session(repl_session, agent_end_event, db_conn, &current_user)?;
+    Ok(())
+}
+
+fn save_agent_session(
+    repl_session: &mut ReplSession,
+    agent_end_event: PiAgentEndEvent,
+    db_conn: &Dbconn,
+    current_user: &crate::core::account::local::User,
+) -> Result<()> {
+    let mut full_response: String = String::from("");
+    for msg in agent_end_event.messages {
+        match msg.role {
+            Role::User => {
+                let input = get_pi_msg_content(msg.content);
+                let parent_chat_id = if !repl_session.session_started {
+                    create_session(
+                        &db_conn.chat,
+                        &repl_session.session_id,
+                        &input,
+                        &current_user.user_id,
+                    )?;
+                    repl_session.session_started = true;
+                    None
+                } else {
+                    repl_session.last_chat_id.clone()
+                };
+                let chat_response = ChatResponse {
+                    input,
+                    session_id: repl_session.session_id.clone(),
+                    role: Role::User,
+                    parent_chat_id,
+                    metrics: None,
+                    model_used: repl_session.current_modelname.clone(),
+                };
+                let prompt_chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
+                repl_session.last_chat_id = Some(prompt_chat.id);
+            }
+            Role::Assistant => {
+                let response = get_pi_msg_content(msg.content);
+                full_response.push_str(&response);
+            }
+            _ => continue,
+        }
+    }
     let chat_response = ChatResponse {
-        input: input.to_owned(),
+        input: full_response,
         session_id: repl_session.session_id.clone(),
-        role: Role::User,
-        code: None,
-        prev_response_id: None,
-        parent_chat_id,
+        role: Role::Assistant,
+        parent_chat_id: repl_session.last_chat_id.clone(),
         metrics: None,
         model_used: repl_session.current_modelname.clone(),
     };
-    let prompt_chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
-    repl_session.last_chat_id = prompt_chat.id;
-    //TODO: Refactor this..
-    if turn_event.message.role == "assistant" {
-        let content = turn_event.message.content;
-        let full_content = content.iter().fold(String::new(), |mut acc, x| {
-            if x.r#type == "thinking" {
-                acc.push_str(&x.thinking.clone().unwrap_or("".to_owned()));
-                acc
-            } else if x.r#type == "text" {
-                acc.push_str(&x.text.clone().unwrap_or("".to_owned()));
-                acc
-            } else {
-                acc.push_str("");
-                acc
-            }
-        });
-        let chat_response = ChatResponse {
-            input: full_content,
-            session_id: repl_session.session_id.clone(),
-            role: Role::Assistant,
-            code: None,
-            prev_response_id: None,
-            parent_chat_id: Some(repl_session.last_chat_id.clone()),
-            metrics: None,
-            model_used: repl_session.current_modelname.clone(),
-        };
-        let chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
-        repl_session.last_chat_id = chat.id;
-    } else {
-        info!("Not handling {} role now", turn_event.message.role);
-    }
+    let chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
+    repl_session.last_chat_id = Some(chat.id);
     Ok(())
+}
+
+fn get_pi_msg_content(msgs: Vec<PiMsgContent>) -> String {
+    let mut content: String = String::new();
+    
+    //TODO: Handle type toolCall
+    for msg in msgs {
+        println!("{:?}", msg);
+        if msg.r#type == "text" {
+            content.push_str(&msg.text.unwrap_or(String::from("")));
+        } else if msg.r#type == "thinking" {
+            content.push_str(&msg.thinking.unwrap_or(String::from("")));
+        } else {
+            ()
+        }
+    }
+    content
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::chats::create_session;
+    use crate::core::chats::tests::create_user;
     use rusqlite::Connection;
-
     #[test]
     fn status_lines_show_defaults_without_session_or_atproto_login() {
         let lines = build_status_lines("/tmp/tiles", None, "test-model", None);
@@ -1266,6 +1272,203 @@ mod tests {
             common: setup_common_db(),
         }
     }
+
+    fn setup_db_conn_v2() -> Dbconn {
+        Dbconn {
+            chat: crate::core::chats::tests::setup_db_schema(),
+            common: crate::core::account::local::tests::setup_db_schema(),
+        }
+    }
+
+    #[test]
+    fn test_saving_valid_agent_session() {
+        let mut repl_session = ReplSession::new("abc", "model");
+
+        let db_conn = setup_db_conn_v2();
+        let current_user = create_user();
+
+        let agent_end_event = PiAgentEndEvent {
+            messages: vec![
+                PiMsgEvent {
+                    role: Role::User,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("what is capital of sweden".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: None,
+                },
+                PiMsgEvent {
+                    role: Role::Assistant,
+                    content: vec![
+                        PiMsgContent {
+                        r#type: String::from("thinking"),
+                        text: None,
+                        thinking: Some(
+                            "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.".to_string()),
+                        
+                    },
+                    PiMsgContent {
+                        r#type: String::from("toolCall"),
+                        text: None,
+                        thinking: None
+                     },
+                    PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
+                        thinking: None,
+                        
+                    },
+                 ],
+                 stop_reason: None,
+                },
+                PiMsgEvent {
+                    role: Role::ToolResult,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("Validation failed for tool \"read\":\n  - path: must have required property 'path'\n\nReceived arguments:\n{}".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: None,
+                },
+                PiMsgEvent {
+                    role: Role::Assistant,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: Some("stop".to_string()),
+                },
+            ],
+        };
+
+        assert!(save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok());
+
+        let session = fetch_session(&db_conn.chat, "abc").unwrap();
+
+        let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
+
+        assert_eq!(chats.chats.len(), 2);
+        assert_eq!(chats.chats.first().unwrap().content, "what is capital of sweden".to_string());
+        let last_session = chats.chats.last().unwrap();
+        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
+
+        assert_eq!(repl_session.last_chat_id.unwrap(), last_session.id);
+    }
+
+    #[test]
+    fn test_saving_session_after_resuming() {
+        // session 1 - abc
+        let mut repl_session = ReplSession::new("abc", "model");
+
+        let db_conn = setup_db_conn_v2();
+        let current_user = create_user();
+
+        let agent_end_event = PiAgentEndEvent {
+            messages: vec![
+                PiMsgEvent {
+                    role: Role::User,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("what is capital of sweden".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: None,
+                },
+                PiMsgEvent {
+                    role: Role::Assistant,
+                    content: vec![
+                        PiMsgContent {
+                        r#type: String::from("thinking"),
+                        text: None,
+                        thinking: Some(
+                            "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.".to_string()),
+                        
+                    },
+                    PiMsgContent {
+                        r#type: String::from("toolCall"),
+                        text: None,
+                        thinking: None
+                     },
+                    PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
+                        thinking: None,
+                        
+                    },
+                 ],
+                 stop_reason: None,
+                },
+                PiMsgEvent {
+                    role: Role::ToolResult,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("Validation failed for tool \"read\":\n  - path: must have required property 'path'\n\nReceived arguments:\n{}".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: None,
+                },
+                PiMsgEvent {
+                    role: Role::Assistant,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: Some("stop".to_string()),
+                },
+            ],
+        };
+
+        assert!(save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok());
+
+        let session = fetch_session(&db_conn.chat, "abc").unwrap();
+
+        let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
+
+        assert_eq!(chats.chats.len(), 2);
+        assert_eq!(chats.chats.first().unwrap().content, "what is capital of sweden".to_string());
+        let last_session = chats.chats.last().unwrap();
+        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
+
+        assert_eq!(repl_session.last_chat_id.clone().unwrap(), last_session.id);
+
+
+        // session 2: def
+
+        let mut repl_session_b = ReplSession::new("def", "model");
+
+        let agent_end_event = PiAgentEndEvent {
+            messages: vec![
+                PiMsgEvent {
+                    role: Role::User,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("what is capital of India".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: None,
+                },
+                PiMsgEvent {
+                    role: Role::Assistant,
+                    content: vec![PiMsgContent {
+                        r#type: String::from("text"),
+                        text: Some("\n---\n**[Answer]**\n\nThe capital of India is **Delhi** (often spelled \"Delhi\" in English).".to_string()),
+                        thinking: None,
+                    }],
+                    stop_reason: Some("stop".to_string()),
+                },
+            ],
+        };
+
+        assert!(save_agent_session(&mut repl_session_b, agent_end_event, &db_conn, &current_user).is_ok());
+
+        assert!(load_session(&db_conn, &["resume", "abc"], &mut repl_session_b).is_ok());
+
+        assert_eq!(repl_session_b.last_chat_id.unwrap(), repl_session.last_chat_id.unwrap());
+        
+        }
 
     fn setup_chat_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
