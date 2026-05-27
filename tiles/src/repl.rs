@@ -83,8 +83,8 @@ enum PiResponse {
     MessageUpdate(PiMessageUpdate),
     #[serde(rename = "agent_end")]
     AgentEnd(PiAgentEndEvent),
-    #[serde(rename = "turn_end")]
-    TurnEnd(PiTurnEndEvent),
+    // #[serde(rename = "turn_end")]
+    // TurnEnd(PiTurnEndEvent),
     #[serde[other]]
     Unknown,
 }
@@ -119,10 +119,10 @@ struct PiResponseMessage {
     data: Option<Value>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct PiTurnEndEvent {
-    message: PiMsgEvent,
-}
+// #[derive(Serialize, Deserialize, Debug)]
+// struct PiTurnEndEvent {
+//     message: PiMsgEvent,
+// }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct PiMsgEvent {
@@ -137,6 +137,7 @@ struct PiMsgContent {
     r#type: String,
     text: Option<String>,
     thinking: Option<String>,
+    arguments: Option<Value>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -471,13 +472,13 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
 
     // Setting up Pi rpc process handles
     let mut pi_process = start_pi_rpc(&modelname, &system_prompt)?;
-    let mut pi_stdin = pi_process.stdin.as_mut().unwrap();
+    let pi_stdin = pi_process.stdin.as_mut().unwrap();
     let mut pi_stdout = pi_process.stdout.take().expect("stdout");
     let inti_cmd_payload = get_command_payload(CommandType::Status);
     send_to_pi(pi_stdin, inti_cmd_payload)
         .inspect_err(|_e| eprintln!("sending command to  pi failed"))?;
 
-    let pi_session_id = get_initial_session_id(&mut pi_stdin, &mut pi_stdout)?;
+    let pi_session_id = get_initial_session_id(pi_stdin, &mut pi_stdout)?;
     let mut repl_session = ReplSession::new(&pi_session_id, &modelname);
 
     // The great REPL loop
@@ -540,10 +541,10 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                     )?;
                     break;
                 }
-                PiResponse::TurnEnd(_turn_event) => {
-                    println!("\n");
-                    process_pi_turn_event();
-                }
+                // PiResponse::TurnEnd(_turn_event) => {
+                //     println!("\n");
+                //     process_pi_turn_event();
+                // }
                 PiResponse::Response(response_msg) => {
                     if response_msg.success {
                         match response_msg.command {
@@ -895,18 +896,12 @@ fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession)
         chat_history.push_str(&chat.content);
         println!("{}", chat.content);
     }
+    let last_chat_id = delta_chats.chats.last().map(|chat| chat.id.clone());
 
-    let last_chat_id  = if let Some(chat) = delta_chats.chats.last() {
-        Some(chat.id.clone())
-    } else {
-
-        None
-    };
     repl_session.session_id = session_id.to_string();
     repl_session.set_pending_resume_session(true);
     repl_session.set_resumed_session(chat_history);
     repl_session.last_chat_id = last_chat_id;
-    // delta_chats.chats.las
     Ok(())
 }
 
@@ -1064,7 +1059,7 @@ fn handle_input_prompt(
         repl_session.set_pending_resume_session(false);
         info!("Pending resumed session, prepend the history");
         format!(
-            "user_chat_history - {}\nUser question- {}",
+            "user_chat_history - {}.\nUse the history as context.\nUser followup question - {}",
             repl_session.get_resumed_session(),
             input
         )
@@ -1104,14 +1099,12 @@ async fn handle_input_commands(
             show_session_info(db_conn)?;
         }
         CommandType::Resume => {
-
-            if let Err(err) = load_session(db_conn, &args, repl_session) 
-            {
+            if let Err(err) = load_session(db_conn, &args, repl_session) {
                 println!("{}", err)
             }
-        },
+        }
         CommandType::Status => {
-            if let Err(err) = show_status(&repl_session.session_id, &modelname, db_conn) {
+            if let Err(err) = show_status(&repl_session.session_id, modelname, db_conn) {
                 println!("Failed to display status due to {}", err);
             }
         }
@@ -1119,9 +1112,9 @@ async fn handle_input_commands(
     Ok(())
 }
 
-fn process_pi_turn_event() {
-    info!("Turn end");
-}
+// fn process_pi_turn_event() {
+//     info!("Turn end");
+// }
 
 fn process_pi_agent_end_event(
     repl_session: &mut ReplSession,
@@ -1130,24 +1123,21 @@ fn process_pi_agent_end_event(
     db_conn: &Dbconn,
     current_user: &crate::core::account::local::User,
 ) -> Result<()> {
-    println!("{:?}", agent_end_event.messages);
-    if let Some(last_msg) = agent_end_event.messages.last() {
-        if last_msg.role == Role::Assistant {
-            if let Some(reason) = &last_msg.stop_reason
-                && reason == "error"
-            {
-                // agent fooked up, lets show a UX friendly msg to try again
-                // TODO: Send the err log to local daemon, so we can log it in daemon logs for later debuggin
-                let payload = json!({
-                    "type": "abort"
-                });
-                send_to_pi(pi_stdin, payload)?;
-                println!("An issue occured, please try again!");
-            }
-        }
-    };
+    if let Some(last_msg) = agent_end_event.messages.last()
+        && last_msg.role == Role::Assistant
+        && let Some(reason) = &last_msg.stop_reason
+        && reason == "error"
+    {
+        // agent fooked up, lets show a UX friendly msg to try again
+        // TODO: Send the err log to local daemon, so we can log it in daemon logs for later debuggin
+        let payload = json!({
+            "type": "abort"
+        });
+        send_to_pi(pi_stdin, payload)?;
+        println!("An issue occurred, please try again!");
+    }
 
-    save_agent_session(repl_session, agent_end_event, db_conn, &current_user)?;
+    save_agent_session(repl_session, agent_end_event, db_conn, current_user)?;
     Ok(())
 }
 
@@ -1182,7 +1172,7 @@ fn save_agent_session(
                     metrics: None,
                     model_used: repl_session.current_modelname.clone(),
                 };
-                let prompt_chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
+                let prompt_chat = save_chat(&db_conn.chat, current_user, chat_response)?;
                 repl_session.last_chat_id = Some(prompt_chat.id);
             }
             Role::Assistant => {
@@ -1200,26 +1190,27 @@ fn save_agent_session(
         metrics: None,
         model_used: repl_session.current_modelname.clone(),
     };
-    let chat = save_chat(&db_conn.chat, &current_user, chat_response)?;
+    let chat = save_chat(&db_conn.chat, current_user, chat_response)?;
     repl_session.last_chat_id = Some(chat.id);
     Ok(())
 }
 
 fn get_pi_msg_content(msgs: Vec<PiMsgContent>) -> String {
-    let mut content: String = String::new();
-    
-    //TODO: Handle type toolCall
+    let mut content: Vec<String> = vec![];
     for msg in msgs {
-        println!("{:?}", msg);
         if msg.r#type == "text" {
-            content.push_str(&msg.text.unwrap_or(String::from("")));
+            content.push(msg.text.unwrap_or(String::from("")));
         } else if msg.r#type == "thinking" {
-            content.push_str(&msg.thinking.unwrap_or(String::from("")));
-        } else {
-            ()
+            content.push(msg.thinking.unwrap_or(String::from("")));
+        } else if msg.r#type == "toolCall"
+            && let Some(args) = msg.arguments
+        {
+            content.push("**[ToolCall]**\n".to_string());
+            let arguments = serde_json::to_string(&args).unwrap_or("{}".to_string());
+            content.push(arguments);
         }
     }
-    content
+    content.join("\n")
 }
 
 #[cfg(test)]
@@ -1295,6 +1286,7 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("what is capital of sweden".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: None,
                 },
@@ -1306,18 +1298,19 @@ mod tests {
                         text: None,
                         thinking: Some(
                             "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.".to_string()),
-                        
+                        arguments: None
                     },
                     PiMsgContent {
                         r#type: String::from("toolCall"),
                         text: None,
-                        thinking: None
+                        thinking: None,
+                        arguments: None
                      },
                     PiMsgContent {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
-                        
+                        arguments: None
                     },
                  ],
                  stop_reason: None,
@@ -1328,6 +1321,7 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("Validation failed for tool \"read\":\n  - path: must have required property 'path'\n\nReceived arguments:\n{}".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: None,
                 },
@@ -1337,22 +1331,28 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: Some("stop".to_string()),
                 },
             ],
         };
 
-        assert!(save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok());
+        assert!(
+            save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok()
+        );
 
         let session = fetch_session(&db_conn.chat, "abc").unwrap();
 
         let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
 
         assert_eq!(chats.chats.len(), 2);
-        assert_eq!(chats.chats.first().unwrap().content, "what is capital of sweden".to_string());
+        assert_eq!(
+            chats.chats.first().unwrap().content,
+            "what is capital of sweden".to_string()
+        );
         let last_session = chats.chats.last().unwrap();
-        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
+        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
 
         assert_eq!(repl_session.last_chat_id.unwrap(), last_session.id);
     }
@@ -1373,6 +1373,7 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("what is capital of sweden".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: None,
                 },
@@ -1384,18 +1385,19 @@ mod tests {
                         text: None,
                         thinking: Some(
                             "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.".to_string()),
-                        
+                        arguments: None
                     },
                     PiMsgContent {
                         r#type: String::from("toolCall"),
                         text: None,
-                        thinking: None
+                        thinking: None,
+                        arguments: None
                      },
                     PiMsgContent {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
-                        
+                        arguments: None
                     },
                  ],
                  stop_reason: None,
@@ -1406,6 +1408,7 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("Validation failed for tool \"read\":\n  - path: must have required property 'path'\n\nReceived arguments:\n{}".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: None,
                 },
@@ -1415,25 +1418,30 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: Some("stop".to_string()),
                 },
             ],
         };
 
-        assert!(save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok());
+        assert!(
+            save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok()
+        );
 
         let session = fetch_session(&db_conn.chat, "abc").unwrap();
 
         let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
 
         assert_eq!(chats.chats.len(), 2);
-        assert_eq!(chats.chats.first().unwrap().content, "what is capital of sweden".to_string());
+        assert_eq!(
+            chats.chats.first().unwrap().content,
+            "what is capital of sweden".to_string()
+        );
         let last_session = chats.chats.last().unwrap();
-        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
+        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
 
         assert_eq!(repl_session.last_chat_id.clone().unwrap(), last_session.id);
-
 
         // session 2: def
 
@@ -1447,6 +1455,7 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("what is capital of India".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: None,
                 },
@@ -1456,19 +1465,30 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of India is **Delhi** (often spelled \"Delhi\" in English).".to_string()),
                         thinking: None,
+                        arguments: None
                     }],
                     stop_reason: Some("stop".to_string()),
                 },
             ],
         };
 
-        assert!(save_agent_session(&mut repl_session_b, agent_end_event, &db_conn, &current_user).is_ok());
+        assert!(
+            save_agent_session(
+                &mut repl_session_b,
+                agent_end_event,
+                &db_conn,
+                &current_user
+            )
+            .is_ok()
+        );
 
         assert!(load_session(&db_conn, &["resume", "abc"], &mut repl_session_b).is_ok());
 
-        assert_eq!(repl_session_b.last_chat_id.unwrap(), repl_session.last_chat_id.unwrap());
-        
-        }
+        assert_eq!(
+            repl_session_b.last_chat_id.unwrap(),
+            repl_session.last_chat_id.unwrap()
+        );
+    }
 
     fn setup_chat_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

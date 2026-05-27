@@ -18,19 +18,12 @@ from openai_harmony import (
     SystemContent,
 )
 from openresponses_types import (
-    AssistantMessageItemParam,
     ReasoningEffortEnum,
-    ResponseCompletedStreamingEvent,
-    SystemMessageItemParam,
 )
 from openresponses_types.types import (
-    DeveloperMessageItemParam,
-    Error,
-    IncompleteDetails,
     InputTokensDetails,
     OutputTokensDetails,
     Usage,
-    UserMessageItemParam,
 )
 
 from ..reasoning_utils import ReasoningExtractor
@@ -43,13 +36,10 @@ from ..schemas import (
     CReasoningItemParam,
     CSystemMessageItemParam,
     CUserMessageItemParam,
-    ChatCompletionRequest,
     ChatMessage,
     GenerationMetrics,
-    OutputIndex,
     OutputItemDeltaModel,
     ResponsesRequest,
-    ResponsesResponse,
 )
 from .mlx_runner import MLXRunner
 
@@ -63,10 +53,7 @@ logger = logging.getLogger("app")
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 _model_cache: Dict[str, MLXRunner] = {}
-_default_max_tokens: Optional[int] = None  # Use dynamic model-aware limits by default
 _current_model_path: Optional[str] = None
-# Store generated responses for follow-up support (previous_response_id)
-_responses: Dict[str, ResponsesResponse] = {}
 
 
 def get_or_load_model(
@@ -112,19 +99,6 @@ def format_chat_messages_for_runner(
     Returns messages in dict format for the runner to apply chat templates.
     """
     return [{"role": msg.role, "content": msg.content} for msg in messages]
-
-
-# TODO: probly will remove wrto new open-responses api
-def _calc_usage(
-    runner: MLXRunner, input_text: str, generated_text: str
-) -> Dict[str, int]:
-    """Calculate token usage using the runner tokenizer; fall back to zeros on error."""
-    try:
-        input_tokens = len(runner.tokenizer.encode(input_text))
-        output_tokens = len(runner.tokenizer.encode(generated_text))
-        return {"input_tokens": input_tokens, "output_tokens": output_tokens}
-    except Exception:
-        return {"input_tokens": 0, "output_tokens": 0}
 
 
 def count_tokens(text: str) -> int:
@@ -238,6 +212,7 @@ async def generate_response_chat_stream(
                 # Resetting content_index as reasoning output_item is finished
                 content_index = 0
 
+            # State changed, so emit the stop events for the last state
             if last_state != state and last_state != "" and content_index == 0:
                 if last_state == "reasoning":
                     resp_str, sequence_number, output_index, item = (
@@ -255,6 +230,18 @@ async def generate_response_chat_stream(
                             tool_call_text,
                             sequence_number,
                             request,
+                        )
+                    )
+                    output_items.append(item)
+                    yield resp_str
+                elif state == "answer":
+                    resp_str, sequence_number, output_index, item = (
+                        _process_output_item_done(
+                            "message",
+                            message_id,
+                            answer_text,
+                            output_index,
+                            sequence_number,
                         )
                     )
                     output_items.append(item)
@@ -332,8 +319,7 @@ async def generate_response_chat_stream(
         yield resp_str
         return
 
-    # TODO: seprate this event ending stuff, as its called during token gen loop
-
+    # Emit the stop events current state
     if state == "reasoning":
         resp_str, sequence_number, output_index, item = _process_stop_reasoning_events(
             reasoning_id, output_index, reasoning_text, sequence_number
@@ -710,7 +696,6 @@ def _process_output_item_done(
     event_name = "response.output_item.done"
     item_chunk: dict
     if type == "function_call":
-        # TODO: refactor this as same code used in _find_tool
         try:
             arguments_map = json.loads(final_text)
         except json.JSONDecodeError as e:
@@ -809,11 +794,16 @@ def _process_stop_tool_call_events(
 
 
 def _find_tool(tools: list, arguments_str: str) -> str:
-    # TODO: Can we add tests for this error
     try:
         arguments_map = json.loads(arguments_str)
     except json.JSONDecodeError as e:
         arguments_map = {}
+
+    # To increase the accuracy of the selected tool, since we
+    # check the required params is a subset of model responded
+    # arguments, there is chance `read` can precede write
+
+    tools.reverse()
 
     tool_cmd = {"cmd": "command", "rw": "read-write"}
     response_argument_keys_raw = list(arguments_map.keys())
@@ -821,6 +811,7 @@ def _find_tool(tools: list, arguments_str: str) -> str:
     response_argument_keys = [tool_cmd.get(x, x) for x in response_argument_keys_raw]
 
     tool_name = ""
+
     for tool in tools:
         name = tool.name
         params = tool.parameters
@@ -841,4 +832,4 @@ def _find_tool(tools: list, arguments_str: str) -> str:
 
 
 def _is_correct_tool(required_params: list, model_argument_list: list) -> bool:
-    return set(model_argument_list).issubset(required_params)
+    return set(required_params).issubset(model_argument_list)

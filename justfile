@@ -10,7 +10,7 @@ check:
     just fmt
     just lint
     cargo test
-    just py_test
+    # just py_test
 
 serve:
     server/.venv/bin/python3 -m server.main

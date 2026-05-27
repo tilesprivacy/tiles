@@ -438,7 +438,7 @@ fn print_help_for_command(command_path: &[String]) -> Result<(), Box<dyn Error>>
 fn build_logger() {
     if cfg!(debug_assertions) {
         env_logger::Builder::from_env(
-            env_logger::Env::default().default_filter_or("warn,iroh=error,tracing=off"),
+            env_logger::Env::default().default_filter_or("info,iroh=error,tracing=off"),
         )
         .init()
     } else {
