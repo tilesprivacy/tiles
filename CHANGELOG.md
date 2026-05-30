@@ -5,6 +5,20 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.10] - 2026-05-31
+
+### Added
+- Implemented Tool calls [#144](https://github.com/tilesprivacy/tiles/pull/144)
+  - Support READ, WRITE, BASH, EDIT by default
+
+### Fixed
+
+- Handling the DNS resolver err and showing freindly user msg [#143](https://github.com/tilesprivacy/tiles/pull/143)
+
+### Changed
+
+- Major refactor related to Inference and REPL [#140](https://github.com/tilesprivacy/tiles/pull/140)
+
 ## [0.4.9] - 2026-05-22
 
 ### Added

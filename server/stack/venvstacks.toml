@@ -26,10 +26,11 @@ requirements = [
     "uvicorn==0.38.0",
     "mlx-lm==0.31.0",
     "black==25.9.0",
-    "openai-harmony==0.0.8",
+    # "openai-harmony==0.0.8",
     "openresponses-types",
-    "httpx==0.28.1"
-]
+    "httpx==0.28.1",
+    "oss-harmony @ git+https://github.com/oss-harmony/harmony.git@main"
+    ]
 
 [tool.uv]
 exclude-newer="2026-04-05T09:43:13.300458+00:00"
