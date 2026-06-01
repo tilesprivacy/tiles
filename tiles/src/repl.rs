@@ -27,6 +27,7 @@ use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command};
 use std::process::{ChildStdin, Stdio};
+use std::str::FromStr;
 use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
@@ -179,6 +180,33 @@ enum AsstMsgEventType {
     Error,
 }
 
+enum ReasoningEffort {
+    High,
+    Medium,
+    Low,
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "high" => Ok(ReasoningEffort::High),
+            "medium" => Ok(ReasoningEffort::Medium),
+            "low" => Ok(ReasoningEffort::Low),
+            _ => Err(anyhow!("Invalid Reasoning effort".to_owned())),
+        }
+    }
+}
+
+impl From<ReasoningEffort> for String {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::High => "high".to_owned(),
+            ReasoningEffort::Medium => "medium".to_owned(),
+            ReasoningEffort::Low => "low".to_owned(),
+        }
+    }
+}
 const PY_PORT: u32 = 6969;
 
 pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
@@ -308,6 +336,8 @@ enum CommandType {
     Sessions,
     #[serde(rename = "resume")]
     Resume,
+    #[serde(rename = "set_thinking_level")]
+    Reasoning,
     #[serde(other)]
     Unknown,
 }
@@ -480,8 +510,10 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
     let mut pi_process = start_pi_rpc(&modelname, &system_prompt)?;
     let pi_stdin = pi_process.stdin.as_mut().unwrap();
     let mut pi_stdout = pi_process.stdout.take().expect("stdout");
-    let inti_cmd_payload = get_command_payload(CommandType::Status);
-    send_to_pi(pi_stdin, inti_cmd_payload)
+    let init_cmd_payload = json!({
+        "type": "get_state",
+    });
+    send_to_pi(pi_stdin, init_cmd_payload)
         .inspect_err(|_e| eprintln!("sending command to  pi failed"))?;
 
     let pi_session_id = get_initial_session_id(pi_stdin, &mut pi_stdout)?;
@@ -518,8 +550,12 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                 handle_input_prompt(pi_stdin, &mut repl_session, &input)?;
             }
             InputType::Command(cmd) => {
-                handle_input_commands(cmd, &mut repl_session, db_conn, &modelname).await?;
-                continue;
+                let res =
+                    handle_input_commands(cmd, &mut repl_session, db_conn, &modelname, pi_stdin)
+                        .await?;
+                if res == 0 {
+                    continue;
+                }
             }
         }
 
@@ -527,8 +563,10 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
         let reader = BufReader::new(&mut pi_stdout);
         for line in reader.lines() {
             let line = line?;
+            info!("{:?}", line);
             let response: PiResponse =
                 serde_json::from_str(&line).context("Failed to parse Pi response")?;
+            println!("{:?}", response);
             match response {
                 PiResponse::AgentStart => {
                     info!("agent start")
@@ -556,7 +594,10 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                             CommandType::Unknown => {
                                 continue;
                             }
-                            cmd => process_command(cmd, response_msg.data)?,
+                            cmd => {
+                                process_command(cmd, response_msg.data)?;
+                                break;
+                            }
                         }
                     } else {
                         println!("Command failed")
@@ -739,33 +780,18 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
 
 fn send_to_pi(pi_child_stdin: &mut ChildStdin, payload_json: Value) -> Result<()> {
     let payload_str = format!("{}\n", serde_json::to_string(&payload_json)?);
-
+    info!("{}", payload_str);
     pi_child_stdin.write_all(payload_str.as_bytes()).unwrap();
     pi_child_stdin.flush()?;
     Ok(())
 }
 
-fn get_command_payload(cmd: CommandType) -> Value {
+fn process_command(cmd: CommandType, data: Option<Value>) -> Result<()> {
+    info!("process command {:?} {:?}", cmd, data);
     match cmd {
-        CommandType::Unknown => {
-            json!({
-                "type": "none"
-            })
-        }
-        CommandType::Status => {
-            json!({
-                "type": "get_state",
-            })
-        }
-        // catch-all cases are where prolly its not a Pi command
-        _ => json!([]),
+        CommandType::Reasoning => {}
+        _ => (),
     }
-}
-
-fn process_command(_cmd: CommandType, _data: Option<Value>) -> Result<()> {
-    // if let CommandType::Unknown = cmd {
-    //     ()
-    // }
     Ok(())
 }
 
@@ -1026,8 +1052,10 @@ fn get_initial_session_id(
     pi_stdin: &mut ChildStdin,
     pi_stdout: &mut ChildStdout,
 ) -> Result<String> {
-    let inti_cmd_payload = get_command_payload(CommandType::Status);
-    send_to_pi(pi_stdin, inti_cmd_payload)
+    let init_cmd_payload = json!({
+        "type": "get_state",
+    });
+    send_to_pi(pi_stdin, init_cmd_payload)
         .inspect_err(|_e| eprintln!("sending command to  pi failed"))?;
 
     let mut pi_session_state = String::new();
@@ -1087,38 +1115,48 @@ async fn handle_input_commands(
     repl_session: &mut ReplSession,
     db_conn: &Dbconn,
     modelname: &str,
-) -> Result<()> {
+    pi_stdin: &mut ChildStdin,
+) -> Result<u8> {
     let args: Vec<&str> = cmd.split(" ").collect();
     let main_cmd = args.first().expect("Main command should be there");
 
     let cmd_json = json!(main_cmd);
 
     let command: CommandType = serde_json::from_value(cmd_json)?;
-    match command {
+    let res = match command {
         CommandType::Unknown => {
             println!(
                 "Unknown command: /{}. Type /help for available commands.",
                 cmd
             );
+            0
         }
         CommandType::Share => {
             process_share_session(db_conn, &repl_session.session_id, &args).await?;
+            0
         }
         CommandType::Sessions => {
             show_session_info(db_conn)?;
+            0
         }
         CommandType::Resume => {
             if let Err(err) = load_session(db_conn, &args, repl_session) {
                 println!("{}", err)
-            }
+            };
+            0
         }
         CommandType::Status => {
             if let Err(err) = show_status(&repl_session.session_id, modelname, db_conn) {
                 println!("Failed to display status due to {}", err);
-            }
+            };
+            0
         }
-    }
-    Ok(())
+        CommandType::Reasoning => {
+            set_reasoning_effort(pi_stdin, &args)?;
+            1
+        }
+    };
+    Ok(res)
 }
 
 // fn process_pi_turn_event() {
@@ -1220,6 +1258,31 @@ fn get_pi_msg_content(msgs: Vec<PiMsgContent>) -> String {
         }
     }
     content.join("\n")
+}
+
+fn set_reasoning_effort(pi_stdin: &mut ChildStdin, args: &[&str]) -> Result<()> {
+    let args = if let Some((_main_command, sub_commands)) = args.split_first() {
+        sub_commands
+    } else {
+        return Err(anyhow!("Not a valid command"));
+    };
+
+    let reasoning_effort: ReasoningEffort = if args.is_empty() {
+        return Err(anyhow!(
+            "Please provide Reasoning effort (low, medium, high)"
+        ));
+    } else {
+        args[0].parse()?
+    };
+
+    let effort_str = String::from(reasoning_effort);
+
+    let pi_cmd = json!({
+        "type": "set_thinking_level",
+        "level": &effort_str
+    });
+
+    send_to_pi(pi_stdin, pi_cmd)
 }
 
 #[cfg(test)]

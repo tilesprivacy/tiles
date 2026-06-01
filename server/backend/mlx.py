@@ -84,6 +84,8 @@ async def generate_response_chat_stream(
     runner = await _get_runner(request.model)
     user_input_content = handle_response_input(request)
 
+    print(f"REASONING EFFORT {request.reasoning.effort}")
+
     if is_harmony_family(request.model):
         reasoning_effort = get_reasoning_effort(request.reasoning.effort)
         convo = build_harmony_conversation(
