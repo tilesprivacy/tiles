@@ -65,6 +65,7 @@ pub struct PiProviderConfig {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PiProviderModelConfig {
     pub id: String,
+    pub reasoning: bool,
 }
 const MODEL_SUB_PATH: &str = "models/huggingface/hub";
 pub trait ConfigProvider {
@@ -427,6 +428,7 @@ pub fn create_pi_provider_config(model_name: &str, enpoint_base_url: &str) -> Re
         base_url: enpoint_base_url.to_string(),
         models: vec![PiProviderModelConfig {
             id: model_name.to_string(),
+            reasoning: true,
         }],
     };
 
@@ -453,6 +455,7 @@ fn try_update_pi_provider_model(config: &str, model_name: &str) -> Result<String
     if tiles_provider_config.models[0].id != model_name {
         tiles_provider_config.models = vec![PiProviderModelConfig {
             id: model_name.to_owned(),
+            reasoning: true,
         }];
         let mut provider: HashMap<String, PiProviderConfig> = HashMap::new();
         provider.insert("tiles".to_owned(), tiles_provider_config);
@@ -521,7 +524,8 @@ mod tests {
               "baseUrl": "http://127.0.0.1:0000/v1",
               "models": [
                 {
-                  "id": "mlx-community/Qwen3.5-4B-MLX-4bit"
+                  "id": "mlx-community/Qwen3.5-4B-MLX-4bit",
+                  "reasoning": true
                 }
               ]
             }
@@ -549,7 +553,8 @@ mod tests {
               "baseUrl": "http://127.0.0.1:0000/v1",
               "models": [
                 {
-                  "id": "mlx-community/Qwen3.5-4B-MLX-4bit"
+                  "id": "mlx-community/Qwen3.5-4B-MLX-4bit",
+                  "reasoning": true
                 }
               ]
             }
@@ -570,7 +575,8 @@ mod tests {
               "baseUrl": "http://127.0.0.1:0000/v1",
               "models": [
                 {
-                  "id": "new_model"
+                  "id": "new_model",
+                  "reasoning": true
                 }
 
               ]
@@ -600,7 +606,8 @@ mod tests {
               "baseUrl": "http://127.0.0.1:0000/v1",
               "models": [
                 {
-                  "id": "mlx-community/Qwen3.5-4B-MLX-4bit"
+                  "id": "mlx-community/Qwen3.5-4B-MLX-4bit",
+                  "reasoning": true
                 }
               ]
             }
