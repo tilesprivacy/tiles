@@ -203,7 +203,7 @@ impl FromStr for ReasoningEffort {
             "high" => Ok(ReasoningEffort::High),
             "medium" => Ok(ReasoningEffort::Medium),
             "low" => Ok(ReasoningEffort::Low),
-            _ => Err(anyhow!("Invalid Reasoning effort".to_owned())),
+            _ => Err(anyhow!("Invalid Reasoning value, use /help".to_owned())),
         }
     }
 }
@@ -526,11 +526,6 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
     let mut pi_process = start_pi_rpc(&modelname, &system_prompt)?;
     let pi_stdin = pi_process.stdin.as_mut().unwrap();
     let mut pi_stdout = pi_process.stdout.take().expect("stdout");
-    let init_cmd_payload = json!({
-        "type": "get_state",
-    });
-    send_to_pi(pi_stdin, init_cmd_payload)
-        .inspect_err(|_e| eprintln!("sending command to  pi failed"))?;
 
     let pi_session_state = get_pi_state(pi_stdin, &mut pi_stdout)?;
     let mut repl_session = ReplSession::new(&pi_session_state);
@@ -567,9 +562,9 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
             }
             InputType::Command(cmd) => {
                 let res = handle_input_commands(cmd, &mut repl_session, db_conn, pi_stdin).await?;
-                match res {
-                    InputCommandResponse::ProcessNextInput => continue,
-                    _ => (),
+
+                if let InputCommandResponse::ProcessNextInput = res {
+                    continue;
                 }
             }
         }
@@ -798,7 +793,7 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
 
 fn send_to_pi(pi_child_stdin: &mut ChildStdin, payload_json: Value) -> Result<()> {
     let payload_str = format!("{}\n", serde_json::to_string(&payload_json)?);
-    pi_child_stdin.write_all(payload_str.as_bytes()).unwrap();
+    pi_child_stdin.write_all(payload_str.as_bytes())?;
     pi_child_stdin.flush()?;
     Ok(())
 }
@@ -809,17 +804,15 @@ fn process_command(
     pi_stdin: &mut ChildStdin,
     pi_stdout: &mut ChildStdout,
 ) -> Result<()> {
-    match response_msg.command {
-        CommandType::Reasoning => {
-            let state = get_pi_state(pi_stdin, pi_stdout)?;
-            repl_session.reasoning = state
-                .thinking_level
-                .parse::<ReasoningEffort>()
-                .context("Failed to parse reasoning effort")?;
-            println!("Reasoning settings updated successfully")
-        }
-        _ => (),
+    if let CommandType::Reasoning = response_msg.command {
+        let state = get_pi_state(pi_stdin, pi_stdout)?;
+        repl_session.reasoning = state
+            .thinking_level
+            .parse::<ReasoningEffort>()
+            .context("Failed to parse reasoning effort")?;
+        println!("Reasoning settings updated successfully")
     }
+
     Ok(())
 }
 
@@ -969,7 +962,7 @@ fn show_status(repl_session: &ReplSession, db_conn: &Dbconn) -> Result<()> {
     let cwd = cwd_pathbuf.to_string_lossy();
     let logged_in_atproto = fetch_logged_in_data(&db_conn.common)?;
     let session_data: Option<Session> = fetch_session(&db_conn.chat, &repl_session.session_id).ok();
-    let status_lines = build_status_lines(&cwd, session_data, &repl_session, logged_in_atproto);
+    let status_lines = build_status_lines(&cwd, session_data, repl_session, logged_in_atproto);
 
     println!("\n");
     for line in status_lines {
@@ -1090,7 +1083,6 @@ fn get_pi_state(pi_stdin: &mut ChildStdin, pi_stdout: &mut ChildStdout) -> Resul
         .read_line(&mut pi_session_state)
         .context("Failed reading pi session state")?;
     let response: PiResponse = serde_json::from_str(&pi_session_state)?;
-    println!("{:?}", response);
     if let PiResponse::Response(msg) = response {
         let state: GetStateData =
             serde_json::from_value(msg.data.expect("get state parsing failed"))?;
@@ -1172,14 +1164,18 @@ async fn handle_input_commands(
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Status => {
-            if let Err(err) = show_status(&repl_session, db_conn) {
+            if let Err(err) = show_status(repl_session, db_conn) {
                 println!("Failed to display status due to {}", err);
             };
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Reasoning => {
-            set_reasoning_effort(pi_stdin, &args)?;
-            InputCommandResponse::WaitForNextLine
+            if let Err(err) = set_reasoning_effort(pi_stdin, &args) {
+                println!("Failed to set reasoning effort due to {}", err);
+                InputCommandResponse::ProcessNextInput
+            } else {
+                InputCommandResponse::WaitForNextLine
+            }
         }
     };
     Ok(res)
