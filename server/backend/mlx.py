@@ -18,11 +18,13 @@ from .commons import (
     is_harmony_family,
     handle_response_input,
 )
+from .commons import get_tool_call_id
 
 from ..schemas import (
     GenerationMetrics,
     OutputItemDeltaModel,
     ResponsesRequest,
+    ToolCallStart,
 )
 from .mlx_runner import MLXRunner
 
@@ -115,6 +117,7 @@ async def generate_response_chat_stream(
     tool_call_text = ""
     state = ""
     last_state = ""
+    tool_name = None
     try:
         iterator: Iterator
         if is_harmony_family(request.model):
@@ -136,6 +139,10 @@ async def generate_response_chat_stream(
             if isinstance(token, GenerationMetrics):
                 continue
 
+            if isinstance(token, ToolCallStart):
+                tool_name = token.name
+                token = "**[ToolCall]**\n\n"
+
             if not isinstance(token, str):
                 continue
 
@@ -147,9 +154,11 @@ async def generate_response_chat_stream(
                 state = "reasoning"
 
             if "**[ToolCall]**" in token:
+                print("start tool call")
                 last_state = state
                 state = "toolcall"
                 tool_id = f"toolcall_{uuid.uuid4()}"
+                tool_call_text = ""
                 content_index = 0
 
             if "**[Answer]**" in token:
@@ -175,7 +184,7 @@ async def generate_response_chat_stream(
                             output_index,
                             tool_call_text,
                             sequence_number,
-                            request,
+                            tool_name,
                         )
                     )
                     output_items.append(item)
@@ -220,6 +229,7 @@ async def generate_response_chat_stream(
                         token,
                         output_index,
                         sequence_number,
+                        tool_name,
                     )
                     yield resp_str
                 # To avoid toolcall tag in the final arguments txt
@@ -274,11 +284,7 @@ async def generate_response_chat_stream(
         yield resp_str
     elif state == "toolcall":
         resp_str, sequence_number, output_index, item = _process_stop_tool_call_events(
-            tool_id,
-            output_index,
-            tool_call_text,
-            sequence_number,
-            request,
+            tool_id, output_index, tool_call_text, sequence_number, tool_name
         )
         output_items.append(item)
         yield resp_str
@@ -467,15 +473,22 @@ def _process_output_item_delta(
 
 
 def _process_output_item_added(
-    type: str, id: str, token: str, output_index, sequence_number: int
+    type: str,
+    id: str,
+    token: str,
+    output_index,
+    sequence_number: int,
+    tool_name: str | None = None,
 ) -> tuple[str, int]:
     event_name = "response.output_item.added"
     if type == "function_call":
+        if not tool_name:
+            raise ValueError("tool call is missing a tool name")
         item_chunk = {
             "type": type,
             "id": id,
-            "name": "name",
-            "call_id": "call_" + _random_alphanum(),
+            "name": tool_name,
+            "call_id": get_tool_call_id(id),
             "status": "in_progress",
         }
     else:
@@ -570,7 +583,7 @@ def _process_output_item_done(
             "type": type,
             "id": id,
             "name": tool_name,
-            "call_id": "call_" + _random_alphanum(),
+            "call_id": get_tool_call_id(id),
             "status": "completed",
             "arguments": json.dumps(new_args),
         }
@@ -614,19 +627,14 @@ def _process_error_event(
     return _sse("response.failed", {"response": err_response}, sequence_number)
 
 
-def _random_alphanum(n=10):
-    return "".join(random.choices(string.ascii_letters + string.digits, k=n))
-
-
 def _process_stop_tool_call_events(
     id: str,
     output_index: int,
     text: str,
     sequence_number: int,
-    request: ResponsesRequest,
+    tool_name: str | None = None,
 ) -> tuple[str, int, int, dict]:
     event_name = "response.function_call_arguments.done"
-    tool_name = _find_tool(request.tools, text)  # pyright: ignore
 
     try:
         arguments_map = json.loads(text)
@@ -651,45 +659,3 @@ def _process_stop_tool_call_events(
         output_index,
         item_chunk,
     )
-
-
-def _find_tool(tools: list, arguments_str: str) -> str:
-    try:
-        arguments_map = json.loads(arguments_str)
-    except json.JSONDecodeError as e:
-        arguments_map = {}
-
-    # To increase the accuracy of the selected tool, since we
-    # check the required params is a subset of model responded
-    # arguments, there is chance `read` can precede write
-
-    tools.reverse()
-
-    tool_cmd = {"cmd": "command", "rw": "read-write"}
-    response_argument_keys_raw = list(arguments_map.keys())
-    # map thru and change cmd to command
-    response_argument_keys = [tool_cmd.get(x, x) for x in response_argument_keys_raw]
-
-    tool_name = ""
-
-    for tool in tools:
-        name = tool.name
-        params = tool.parameters
-
-        if params is None:
-            required_params = []
-        else:
-            required_params = params.get("required", [])
-
-        if _is_correct_tool(required_params, response_argument_keys):
-            tool_name = name
-            break
-
-    if tool_name == "":
-        return "read"
-    else:
-        return tool_name
-
-
-def _is_correct_tool(required_params: list, model_argument_list: list) -> bool:
-    return set(required_params).issubset(model_argument_list)

@@ -66,6 +66,8 @@ async def catch_all(request, call_next):
 
 
 # Can be used to debug the streaming responses
+# resp = runtime.backend.generate_response_chat_stream(request)
+# chunk = passthrough_log_raw(resp)
 async def passthrough_log_raw(reader):
     async for chunk in reader:
         logger.info("stream chunk: %r\n", chunk)  # logs raw bytes/str repr

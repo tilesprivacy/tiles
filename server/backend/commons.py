@@ -132,3 +132,7 @@ def handle_response_input(request: ResponsesRequest):
             # FIXME: Not a user input should handle this for non-harmonic later
             user_input_content = ""
     return user_input_content
+
+
+def get_tool_call_id(id: str) -> str:
+    return "call_" + id.removeprefix("toolcall_")

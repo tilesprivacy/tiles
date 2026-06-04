@@ -242,6 +242,11 @@ class GenerationMetrics:
 from enum import IntEnum
 
 
+@dataclass
+class ToolCallStart:
+    name: str
+
+
 class OutputIndex(IntEnum):
     MESSAGE = 0
     REASONING = 1

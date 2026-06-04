@@ -9,10 +9,10 @@ dependencies = [
     "mlx-lm==0.31.0",
     "black==25.9.0",
     # "oss-harmony",
-    "openai-harmony==0.0.8",
+    # "openai-harmony==0.0.8",
     "httpx==0.28.1",
     "openresponses-types",
-    # "oss-harmony @ git+https://github.com/oss-harmony/harmony.git@main"
+    "oss-harmony @ git+https://github.com/oss-harmony/harmony.git@main"
 ]
 
 [build-system]
