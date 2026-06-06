@@ -483,7 +483,7 @@ def _process_output_item_added(
     event_name = "response.output_item.added"
     if type == "function_call":
         if not tool_name:
-            raise ValueError("tool call is missing a tool name")
+            print("Tool name is empty")
         item_chunk = {
             "type": type,
             "id": id,

@@ -23,14 +23,17 @@ use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self};
 use std::path::PathBuf;
-use std::process::{Child, ChildStdout, Command};
-use std::process::{ChildStdin, Stdio};
+use std::process::Stdio;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tokio::time::sleep;
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
@@ -274,8 +277,12 @@ pub async fn start_server_daemon() -> Result<()> {
         .spawn()
         .expect("failed to start server");
 
-    std::fs::write(pid_file, child.id().to_string()).expect("Failed to write to pid file");
-    println!("Server started with PID {}", child.id());
+    std::fs::write(pid_file, child.id().expect("Not child Id").to_string())
+        .expect("Failed to write to pid file");
+    println!(
+        "Server started with PID {}",
+        child.id().expect("No child Id")
+    );
     Ok(())
 }
 
@@ -295,7 +302,9 @@ pub async fn stop_server_daemon() -> Result<()> {
     Command::new("kill")
         .arg(pid.trim())
         .status()
+        .await
         .context("Failed to initiate kill commad")?;
+
     std::fs::remove_file(pid_file).context("Failed to removed pid file")?;
     println!("Server stopped.");
     Ok(())
@@ -348,6 +357,8 @@ enum CommandType {
     Resume,
     #[serde(rename = "set_thinking_level")]
     Reasoning,
+    #[serde(rename = "abort")]
+    Abort,
     #[serde(other)]
     Unknown,
 }
@@ -522,12 +533,20 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
         .context("Failed to create editor")?;
     editor.set_helper(Some(TilesHinter));
 
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        r.store(false, std::sync::atomic::Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
     // Setting up Pi rpc process handles
     let mut pi_process = start_pi_rpc(&modelname, &system_prompt)?;
     let pi_stdin = pi_process.stdin.as_mut().unwrap();
     let mut pi_stdout = pi_process.stdout.take().expect("stdout");
 
-    let pi_session_state = get_pi_state(pi_stdin, &mut pi_stdout)?;
+    let pi_session_state = get_pi_state(pi_stdin, &mut pi_stdout).await?;
     let mut repl_session = ReplSession::new(&pi_session_state);
 
     // The great REPL loop
@@ -558,7 +577,7 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                 break;
             }
             InputType::Prompt => {
-                handle_input_prompt(pi_stdin, &mut repl_session, &input)?;
+                handle_input_prompt(pi_stdin, &mut repl_session, &input).await?;
             }
             InputType::Command(cmd) => {
                 let res = handle_input_commands(cmd, &mut repl_session, db_conn, pi_stdin).await?;
@@ -570,9 +589,18 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
         }
 
         // Reads the output from Pi and process and responds to the repl
-        let reader = BufReader::new(&mut pi_stdout);
-        for line in reader.lines() {
-            let line = line?;
+        let mut reader = BufReader::new(&mut pi_stdout).lines();
+
+        while let Some(line) = reader.next_line().await? {
+            if !running.load(std::sync::atomic::Ordering::SeqCst) {
+                info!("Ctrlc detected, aborting Pi ops");
+                let end_payload = json!({
+                    "type": "abort",
+                });
+                send_to_pi(pi_stdin, end_payload).await?;
+                running.store(true, std::sync::atomic::Ordering::SeqCst);
+                continue;
+            }
             let response: PiResponse =
                 serde_json::from_str(&line).context("Failed to parse Pi response")?;
             match response {
@@ -590,7 +618,8 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                         pi_stdin,
                         db_conn,
                         &current_user,
-                    )?;
+                    )
+                    .await?;
                     break;
                 }
                 PiResponse::TurnEnd(_turn_event) => {
@@ -602,13 +631,20 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
                             CommandType::Unknown => {
                                 continue;
                             }
+                            CommandType::Abort => {
+                                info!("Abort command received");
+                                // continuing as we need to process the
+                                // agent_end event from Pi
+                                continue;
+                            }
                             _ => {
                                 process_command(
                                     response_msg,
                                     &mut repl_session,
                                     pi_stdin,
                                     &mut pi_stdout,
-                                )?;
+                                )
+                                .await?;
                                 break;
                             }
                         }
@@ -775,37 +811,42 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
 
     let pi_exec_path = tiles_lib_dir.join("pi/pi");
 
-    let pi_process = Command::new(pi_exec_path)
-        .arg("--mode")
-        .arg("rpc")
-        .arg("--append-system-prompt")
-        .arg(system_prompt)
-        .arg("--no-session")
-        .env("PI_CODING_AGENT_DIR", pi_agent_dir)
-        .env("PI_OFFLINE", "true")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("failed to run Pi");
-
+    let pi_process = unsafe {
+        Command::new(pi_exec_path)
+            .arg("--mode")
+            .arg("rpc")
+            .arg("--append-system-prompt")
+            .arg(system_prompt)
+            .arg("--no-session")
+            .env("PI_CODING_AGENT_DIR", pi_agent_dir)
+            .env("PI_OFFLINE", "true")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            })
+            .spawn()
+            .expect("failed to run Pi")
+    };
     Ok(pi_process)
 }
 
-fn send_to_pi(pi_child_stdin: &mut ChildStdin, payload_json: Value) -> Result<()> {
+async fn send_to_pi(pi_child_stdin: &mut ChildStdin, payload_json: Value) -> Result<()> {
     let payload_str = format!("{}\n", serde_json::to_string(&payload_json)?);
-    pi_child_stdin.write_all(payload_str.as_bytes())?;
-    pi_child_stdin.flush()?;
+    pi_child_stdin.write_all(payload_str.as_bytes()).await?;
+    pi_child_stdin.flush().await?;
     Ok(())
 }
 
-fn process_command(
+async fn process_command(
     response_msg: PiResponseMessage,
     repl_session: &mut ReplSession,
     pi_stdin: &mut ChildStdin,
     pi_stdout: &mut ChildStdout,
 ) -> Result<()> {
     if let CommandType::Reasoning = response_msg.command {
-        let state = get_pi_state(pi_stdin, pi_stdout)?;
+        let state = get_pi_state(pi_stdin, pi_stdout).await?;
         repl_session.reasoning = state
             .thinking_level
             .parse::<ReasoningEffort>()
@@ -1070,25 +1111,30 @@ fn handle_pi_message_update(msg_update: PiMessageUpdate) {
     }
 }
 
-fn get_pi_state(pi_stdin: &mut ChildStdin, pi_stdout: &mut ChildStdout) -> Result<GetStateData> {
+async fn get_pi_state(
+    pi_stdin: &mut ChildStdin,
+    pi_stdout: &mut ChildStdout,
+) -> Result<GetStateData> {
     let init_cmd_payload = json!({
         "type": "get_state",
     });
     send_to_pi(pi_stdin, init_cmd_payload)
+        .await
         .inspect_err(|_e| eprintln!("sending command to  pi failed"))?;
 
-    let mut pi_session_state = String::new();
-    let mut reader = BufReader::new(pi_stdout);
-    let _ = reader
-        .read_line(&mut pi_session_state)
-        .context("Failed reading pi session state")?;
-    let response: PiResponse = serde_json::from_str(&pi_session_state)?;
-    if let PiResponse::Response(msg) = response {
-        let state: GetStateData =
-            serde_json::from_value(msg.data.expect("get state parsing failed"))?;
-        Ok(state)
+    let reader = BufReader::new(pi_stdout);
+
+    if let Some(line) = reader.lines().next_line().await? {
+        let response: PiResponse = serde_json::from_str(&line)?;
+        if let PiResponse::Response(msg) = response {
+            let state: GetStateData =
+                serde_json::from_value(msg.data.expect("get state parsing failed"))?;
+            Ok(state)
+        } else {
+            Err(anyhow!("Failed to fetch initial state from Pi"))
+        }
     } else {
-        Err(anyhow!("Failed to fetch initial state from Pi"))
+        Err(anyhow!("Failed to fetch session_id from Pi"))
     }
 }
 
@@ -1097,8 +1143,8 @@ async fn handle_repl_exit(pi_stdin: &mut ChildStdin) -> Result<()> {
         "type": "abort",
     });
     let payload_str = format!("{}\n", serde_json::to_string(&end_payload)?);
-    pi_stdin.write_all(payload_str.as_bytes())?;
-    pi_stdin.flush()?;
+    pi_stdin.write_all(payload_str.as_bytes()).await?;
+    pi_stdin.flush().await?;
     println!("Exiting interactive mode");
     if !cfg!(debug_assertions) {
         let _res = stop_server_daemon().await;
@@ -1106,7 +1152,7 @@ async fn handle_repl_exit(pi_stdin: &mut ChildStdin) -> Result<()> {
     Ok(())
 }
 
-fn handle_input_prompt(
+async fn handle_input_prompt(
     pi_stdin: &mut ChildStdin,
     repl_session: &mut ReplSession,
     input: &str,
@@ -1126,7 +1172,7 @@ fn handle_input_prompt(
         "type": "prompt",
         "message": final_input
     });
-    send_to_pi(pi_stdin, payload)
+    send_to_pi(pi_stdin, payload).await
 }
 
 async fn handle_input_commands(
@@ -1170,18 +1216,19 @@ async fn handle_input_commands(
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Reasoning => {
-            if let Err(err) = set_reasoning_effort(pi_stdin, &args) {
+            if let Err(err) = set_reasoning_effort(pi_stdin, &args).await {
                 println!("Failed to set reasoning effort due to {}", err);
                 InputCommandResponse::ProcessNextInput
             } else {
                 InputCommandResponse::WaitForNextLine
             }
         }
+        _ => InputCommandResponse::ProcessNextInput,
     };
     Ok(res)
 }
 
-fn process_pi_agent_end_event(
+async fn process_pi_agent_end_event(
     repl_session: &mut ReplSession,
     agent_end_event: PiAgentEndEvent,
     pi_stdin: &mut ChildStdin,
@@ -1198,7 +1245,7 @@ fn process_pi_agent_end_event(
         let payload = json!({
             "type": "abort"
         });
-        send_to_pi(pi_stdin, payload)?;
+        send_to_pi(pi_stdin, payload).await?;
         println!("An issue occurred, please try again!");
     }
 
@@ -1278,7 +1325,7 @@ fn get_pi_msg_content(msgs: Vec<PiMsgContent>) -> String {
     content.join("\n")
 }
 
-fn set_reasoning_effort(pi_stdin: &mut ChildStdin, args: &[&str]) -> Result<()> {
+async fn set_reasoning_effort(pi_stdin: &mut ChildStdin, args: &[&str]) -> Result<()> {
     let args = if let Some((_main_command, sub_commands)) = args.split_first() {
         sub_commands
     } else {
@@ -1300,7 +1347,7 @@ fn set_reasoning_effort(pi_stdin: &mut ChildStdin, args: &[&str]) -> Result<()> 
         "level": &effort_str
     });
 
-    send_to_pi(pi_stdin, pi_cmd)
+    send_to_pi(pi_stdin, pi_cmd).await
 }
 
 #[cfg(test)]

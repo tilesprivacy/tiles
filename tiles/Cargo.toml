@@ -10,11 +10,11 @@ reqwest = { version = "0.12", features = ["json", "blocking", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-tokio = { version = "1" , features = ["macros", "rt-multi-thread"]}
+tokio = { version = "1" , features = ["macros", "rt-multi-thread", "io-util"]}
 owo-colors = "4"
 futures-util = "0.3"
 hf-hub = {version = "0.4", features = ["tokio"]}
-rustyline = "17.0"
+rustyline = "18.0"
 toml = "1.0.3"
 semver = "1.0"
 rusqlite = { version = "0.38.0", features = ["bundled-sqlcipher-vendored-openssl"] }
@@ -37,6 +37,8 @@ hickory-resolver = "0.26.0"
 atrium-common = "0.1.4"
 atrium-api = "0.25.8"
 chacha20poly1305 = { version = "0.10" }
+libc = "0.2"
+ctrlc = "3.5.2"
 
 [dev-dependencies]
 tempfile = "3"

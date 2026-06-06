@@ -505,7 +505,10 @@ class MLXRunner:
 
             if is_commentary is None and parser.current_channel == "commentary":
                 is_commentary = True
-                yield ToolCallStart(name=parser.current_recipient or "")
+                if not parser.current_recipient:
+                    # No business with an empty tool name
+                    continue
+                yield ToolCallStart(name=parser.current_recipient or "bash")
 
             if is_final is None and parser.current_channel == "final":
                 is_final = True
