@@ -363,8 +363,10 @@ enum CommandType {
     Sessions,
     #[serde(rename = "resume")]
     Resume,
-    #[serde(rename = "set_thinking_level")]
+    #[serde(rename = "reasoning")]
     Reasoning,
+    #[serde(rename = "set_thinking_level")]
+    SetThinkingLevel,
     #[serde(rename = "abort")]
     Abort,
     #[serde(other)]
@@ -453,8 +455,8 @@ fn show_help() {
             "Session",
             vec![
                 (
-                    "/set_thinking_level <reasoning_value>",
-                    "Set the reasoning effort of current model (high, medium, low)",
+                    "/reasoning <effort>",
+                    "Sets the reasoning effort of current model (high, medium, low)",
                 ),
                 ("/status", "Show the current session state"),
                 ("/sessions", "List all available sessions"),
@@ -855,7 +857,7 @@ async fn process_command(
     pi_stdin: &mut ChildStdin,
     pi_stdout: &mut ChildStdout,
 ) -> Result<()> {
-    if let CommandType::Reasoning = response_msg.command {
+    if let CommandType::SetThinkingLevel = response_msg.command {
         let state = get_pi_state(pi_stdin, pi_stdout).await?;
         repl_session.reasoning = state
             .thinking_level

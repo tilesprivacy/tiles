@@ -6940,7 +6940,7 @@ dependencies = [
 
 [[package]]
 name = "tiles"
-version = "0.4.11-rc.1"
+version = "0.4.11"
 dependencies = [
  "anyhow",
  "async-std",

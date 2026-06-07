@@ -5,6 +5,18 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.11] - 2026-06-07
+
+### Added
+- New repl command `/reasoning` to switch reasoning effort on the fly [#150](https://github.com/tilesprivacy/tiles/pull/153), [#153](https://github.com/tilesprivacy/tiles/pull/153).
+  - eg: `/reasoning low` - sets effort to low. Other options are medium, high
+
+### Fixed
+- Broken repl behaviour on SIGINT (ctr-c) [#152](https://github.com/tilesprivacy/tiles/pull/152).
+
+### Changed
+- Using the tool_call name model gives, instead of figuring out from the tool_call arguments [#151](https://github.com/tilesprivacy/tiles/pull/151).
+
 ## [0.4.10] - 2026-05-31
 
 ### Added
