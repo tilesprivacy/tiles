@@ -1,6 +1,7 @@
 //! The Demon that runs the core with his spear
 
 use std::{
+    os::unix::process::CommandExt,
     process::{Command, Stdio},
     sync::Arc,
     time::Duration,
@@ -98,13 +99,21 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
     } else {
         "tiles"
     };
-    let _process = Command::new(base_command)
-        .arg("daemon")
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_log))
-        .stderr(Stdio::from(stderr_log))
-        .spawn()
-        .expect("Failed to start daemon");
+    let _process = unsafe {
+        Command::new(base_command)
+            .arg("daemon")
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log))
+            .pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            })
+            .spawn()
+            .expect("Failed to start daemon")
+    };
 
     wait_until_server_is_up(port).await
 }

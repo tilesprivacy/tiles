@@ -268,14 +268,22 @@ pub async fn start_server_daemon() -> Result<()> {
         .open(data_dir.join("logs/server.err.log"))?;
     let server_path = server_dir.join("stack_export_prod/app-server/bin/python");
     server_dir.pop();
-    let child = Command::new(server_path)
-        .args(["-m", "server.main"])
-        .current_dir(server_dir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout_log))
-        .stderr(Stdio::from(stderr_log))
-        .spawn()
-        .expect("failed to start server");
+    let child = unsafe {
+        Command::new(server_path)
+            .args(["-m", "server.main"])
+            .current_dir(server_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout_log))
+            .stderr(Stdio::from(stderr_log))
+            .pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            })
+            .spawn()
+            .expect("failed to start server")
+    };
 
     std::fs::write(pid_file, child.id().expect("Not child Id").to_string())
         .expect("Failed to write to pid file");
@@ -823,7 +831,9 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .pre_exec(|| {
-                libc::setsid();
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
                 Ok(())
             })
             .spawn()
