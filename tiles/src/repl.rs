@@ -153,6 +153,8 @@ struct PiMsgContent {
     text: Option<String>,
     thinking: Option<String>,
     arguments: Option<Value>,
+    // Tool name
+    name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -1330,8 +1332,9 @@ fn get_pi_msg_content(msgs: Vec<PiMsgContent>) -> String {
             && let Some(args) = msg.arguments
         {
             content.push("\n**[ToolCall]**\n".to_string());
+            content.push(format!("Tool: {}", msg.name.unwrap_or("None".to_string())));
             let arguments = serde_json::to_string(&args).unwrap_or("{}".to_string());
-            content.push(arguments);
+            content.push(format!("Arguments: {}", arguments));
         }
     }
     content.join("\n")
@@ -1465,7 +1468,8 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("what is capital of sweden".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     }],
                     stop_reason: None,
                 },
@@ -1477,19 +1481,22 @@ mod tests {
                         text: None,
                         thinking: Some(
                             "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.".to_string()),
-                        arguments: None
+                        arguments: None,
+                        name: None
                     },
                     PiMsgContent {
                         r#type: String::from("toolCall"),
                         text: None,
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                      },
                     PiMsgContent {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     },
                  ],
                  stop_reason: None,
@@ -1500,7 +1507,8 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("Validation failed for tool \"read\":\n  - path: must have required property 'path'\n\nReceived arguments:\n{}".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     }],
                     stop_reason: None,
                 },
@@ -1510,7 +1518,8 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     }],
                     stop_reason: Some("stop".to_string()),
                 },
@@ -1561,7 +1570,8 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("what is capital of sweden".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     }],
                     stop_reason: None,
                 },
@@ -1573,19 +1583,22 @@ mod tests {
                         text: None,
                         thinking: Some(
                             "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.".to_string()),
-                        arguments: None
+                        arguments: None,
+                        name: None
                     },
                     PiMsgContent {
                         r#type: String::from("toolCall"),
                         text: None,
                         thinking: None,
-                        arguments: None
+                        arguments: Some(json!({"command": "bash"})),
+                        name: Some(String::from("bash"))
                      },
                     PiMsgContent {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     },
                  ],
                  stop_reason: None,
@@ -1594,9 +1607,10 @@ mod tests {
                     role: Role::ToolResult,
                     content: vec![PiMsgContent {
                         r#type: String::from("text"),
-                        text: Some("Validation failed for tool \"read\":\n  - path: must have required property 'path'\n\nReceived arguments:\n{}".to_string()),
+                        text: None,
                         thinking: None,
-                        arguments: None
+                        arguments: Some(json!({"command": "bash"})),
+                        name: Some(String::from("bash"))
                     }],
                     stop_reason: None,
                 },
@@ -1606,7 +1620,8 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     }],
                     stop_reason: Some("stop".to_string()),
                 },
@@ -1627,7 +1642,7 @@ mod tests {
             "what is capital of sweden".to_string()
         );
         let last_session = chats.chats.last().unwrap();
-        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
+        assert_eq!(last_session.content, "**[Reasoning]**\n\nUser asks: \"what is capital of sweden\". Likely they mean Sweden. Answer: Stockholm.\n\n**[ToolCall]**\n\nTool: bash\nArguments: {\"command\":\"bash\"}\n\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).\n---\n**[Answer]**\n\nThe capital of Sweden is **Stockholm** (often spelled \"Stockholm\" in English).".to_string());
 
         assert_eq!(repl_session.last_chat_id.clone().unwrap(), last_session.id);
 
@@ -1652,7 +1667,8 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("what is capital of India".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     }],
                     stop_reason: None,
                 },
@@ -1662,7 +1678,8 @@ mod tests {
                         r#type: String::from("text"),
                         text: Some("\n---\n**[Answer]**\n\nThe capital of India is **Delhi** (often spelled \"Delhi\" in English).".to_string()),
                         thinking: None,
-                        arguments: None
+                        arguments: None,
+                        name: None
                     }],
                     stop_reason: Some("stop".to_string()),
                 },

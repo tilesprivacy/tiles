@@ -501,7 +501,7 @@ class MLXRunner:
 
             if is_analysis is None and parser.current_channel == "analysis":
                 is_analysis = True
-                yield "**[Reasoning]**\n\n"
+                yield "\n\n**[Reasoning]**\n\n"
 
             if is_commentary is None and parser.current_channel == "commentary":
                 if not parser.current_recipient:

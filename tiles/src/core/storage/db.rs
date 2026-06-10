@@ -5,13 +5,12 @@
 
 use std::{env, path::PathBuf};
 
+use crate::utils::config::{ConfigProvider, DefaultProvider, get_app_name};
 use anyhow::{Result, anyhow};
 use log::info;
 use rusqlite::Connection;
-use tilekit::accounts::{create_and_save_passkey, get_passkey};
-
-use crate::utils::config::{ConfigProvider, DefaultProvider, get_app_name};
 use rusqlite_migration::{M, Migrations};
+use tilekit::accounts::{create_and_save_passkey, get_passkey};
 
 #[derive(Debug)]
 pub enum DBTYPE {
