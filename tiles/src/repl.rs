@@ -7,6 +7,7 @@ use crate::core::chats::{
 use crate::core::storage::db::Dbconn;
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, create_pi_provider_config, get_memory_path, get_model_cache,
+    update_current_model,
 };
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
@@ -536,6 +537,7 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
         .clone()
         .ok_or_else(|| anyhow!("Error getting FROM from modelfile due to"))?;
 
+    update_current_model(&modelname).context("Failed to update current model in config.toml")?;
     let system_prompt = modelfile.system.clone().unwrap_or("".to_owned());
     println!("Running {}", modelname);
     let current_user = get_current_user(&db_conn.common)?;
