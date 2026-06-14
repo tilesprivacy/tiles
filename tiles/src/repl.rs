@@ -6,8 +6,8 @@ use crate::core::chats::{
 };
 use crate::core::storage::db::Dbconn;
 use crate::utils::config::{
-    ConfigProvider, DefaultProvider, create_pi_provider_config, get_memory_path, get_model_cache,
-    update_current_model,
+    ConfigProvider, DefaultProvider, create_pi_provider_config, get_inference_config,
+    get_memory_path, get_model_cache, update_current_model,
 };
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
@@ -302,6 +302,7 @@ pub async fn stop_server_daemon() -> Result<()> {
         println!("Server is not running");
         return Ok(());
     }
+
     let pid_file = DefaultProvider.get_config_dir()?.join("server.pid");
 
     if !pid_file.exists() {
@@ -1158,7 +1159,10 @@ async fn handle_repl_exit(pi_stdin: &mut ChildStdin) -> Result<()> {
     pi_stdin.write_all(payload_str.as_bytes()).await?;
     pi_stdin.flush().await?;
     println!("Exiting interactive mode");
-    if !cfg!(debug_assertions) {
+    if !cfg!(debug_assertions)
+        && let Some(inference_config) = get_inference_config()?
+        && inference_config.daemon
+    {
         let _res = stop_server_daemon().await;
     }
     Ok(())

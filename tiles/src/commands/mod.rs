@@ -11,7 +11,8 @@ use tiles::core::account::local::{
 use tiles::core::storage::db::Dbconn;
 use tiles::repl::{start_server_daemon, stop_server_daemon};
 use tiles::utils::config::{
-    ConfigProvider, DefaultProvider, get_or_create_config, set_user_data_path,
+    ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
+    set_user_data_path, update_inference_config,
 };
 use tiles::utils::installer::{UpdateInfo, get_update_info, try_update};
 use tiles::{core::health, repl::RunArgs};
@@ -257,6 +258,19 @@ pub async fn stop_server() {
     let _ = stop_server_daemon().await;
 }
 
+#[allow(clippy::field_reassign_with_default)]
+pub fn set_inference_config_to_run_bg(is_background: bool) -> Result<()> {
+    let new_inference = if let Some(mut inference_config) = get_inference_config()? {
+        inference_config.daemon = is_background;
+        inference_config
+    } else {
+        let mut inference_config = InferenceConfig::default();
+        inference_config.daemon = is_background;
+        inference_config
+    };
+
+    update_inference_config(new_inference)
+}
 /// Runs the account command with the args being passed.
 pub async fn run_account_commands(account_args: AccountArgs) -> Result<()> {
     let config = get_or_create_config()?;

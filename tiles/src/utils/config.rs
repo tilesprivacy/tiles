@@ -39,12 +39,19 @@ struct DataConfig {
     path: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct InferenceConfig {
+    // setting this to true, will prevent repl auto-exiting inference
+    pub daemon: bool,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct RootConfig {
     #[serde(rename = "root-user")]
     pub root_user: Option<RootUserConfig>,
     pub data: Option<DataConfig>,
     pub model: Option<ModelConfig>,
+    pub inference: Option<InferenceConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -464,6 +471,17 @@ fn try_update_pi_provider_model(config: &str, model_name: &str) -> Result<String
     } else {
         Ok(config.to_owned())
     }
+}
+
+pub fn get_inference_config() -> Result<Option<InferenceConfig>> {
+    let root_config = get_or_create_root_config()?;
+    Ok(root_config.inference)
+}
+
+pub fn update_inference_config(config: InferenceConfig) -> Result<()> {
+    let mut root_config = get_or_create_root_config()?;
+    root_config.inference = Some(config);
+    save_root_config(&root_config)
 }
 
 #[cfg(test)]

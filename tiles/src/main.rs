@@ -17,7 +17,7 @@ use tiles::{
     utils::installer,
 };
 
-use crate::commands::{show_peers, unlink_peer};
+use crate::commands::{set_inference_config_to_run_bg, show_peers, unlink_peer};
 
 mod commands;
 
@@ -60,7 +60,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "  System\n",
     "    update    Update Tiles to the latest version\n",
     "    health    Check the status of dependencies\n",
-    "    server    Start or stop the daemon server\n",
+    "    inference Start or stop the inference\n",
     "    daemon    Configure daemon behavior\n\n",
     "Options:\n",
     "  -h, --help       Show help\n",
@@ -153,8 +153,8 @@ enum SystemCommands {
     /// Check the status of dependencies
     Health,
 
-    /// Start or stop the daemon server
-    Server(ServerArgs),
+    /// Start or stop the inference
+    Inference(InferenceArgs),
 
     /// Configure daemon behavior
     Daemon(DaemonArgs),
@@ -202,18 +202,21 @@ struct RunFlags {
 #[derive(Debug, Args)]
 #[command(args_conflicts_with_subcommands = true)]
 #[command(flatten_help = true)]
-struct ServerArgs {
+struct InferenceArgs {
     #[command(subcommand)]
-    command: Option<ServerCommands>,
+    command: InferenceCommands,
 }
 
 #[derive(Debug, Subcommand)]
-enum ServerCommands {
-    /// Start the py server as a daemon
+enum InferenceCommands {
+    /// Start the inference
     Start,
 
-    /// Stops the daemon py server
+    /// Stops the inference
     Stop,
+
+    /// configure the inference to run in background
+    RunBackground { flag: Option<bool> },
 }
 
 #[derive(Debug, Args)]
@@ -377,10 +380,12 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::System(SystemCommands::Health)) => {
             commands::check_health().await?;
         }
-        Some(Commands::System(SystemCommands::Server(server))) => match server.command {
-            Some(ServerCommands::Start) => commands::start_server().await,
-            Some(ServerCommands::Stop) => commands::stop_server().await,
-            _ => println!("Expected start or stop"),
+        Some(Commands::System(SystemCommands::Inference(inference))) => match inference.command {
+            InferenceCommands::Start => commands::start_server().await,
+            InferenceCommands::Stop => commands::stop_server().await,
+            InferenceCommands::RunBackground { flag } => {
+                set_inference_config_to_run_bg(flag.unwrap_or(false))?
+            }
         },
         Some(Commands::Accounts(AccountCommandsGroup::Data(data))) => match data.command {
             DataCommands::SetPath { path } => commands::set_data(path.as_str()),
