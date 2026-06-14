@@ -1161,7 +1161,7 @@ async fn handle_repl_exit(pi_stdin: &mut ChildStdin) -> Result<()> {
     println!("Exiting interactive mode");
     if !cfg!(debug_assertions)
         && let Some(inference_config) = get_inference_config()?
-        && inference_config.daemon
+        && !inference_config.daemon
     {
         let _res = stop_server_daemon().await;
     }
