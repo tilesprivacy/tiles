@@ -1159,11 +1159,16 @@ async fn handle_repl_exit(pi_stdin: &mut ChildStdin) -> Result<()> {
     pi_stdin.write_all(payload_str.as_bytes()).await?;
     pi_stdin.flush().await?;
     println!("Exiting interactive mode");
-    if !cfg!(debug_assertions)
-        && let Some(inference_config) = get_inference_config()?
-        && !inference_config.daemon
-    {
-        let _res = stop_server_daemon().await;
+    if !cfg!(debug_assertions) {
+        match get_inference_config()? {
+            Some(inference_config) if !inference_config.daemon => {
+                let _res = stop_server_daemon().await;
+            }
+            None => {
+                let _res = stop_server_daemon().await;
+            }
+            _ => (),
+        }
     }
     Ok(())
 }
