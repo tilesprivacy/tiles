@@ -11,6 +11,7 @@ platforms = [
 [[frameworks]]
 name = "mlx"
 runtime = "cpython3.13"
+macosx_target = "14"
 requirements = [
     "mlx==0.31.1"
 ]

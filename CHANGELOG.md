@@ -5,6 +5,17 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.12] - 2026-06-15
+
+### Added
+- Added full support for Linux. Model Inference(llama.cpp), keychain management, Installer etc [#138](https://github.com/tilesprivacy/tiles/pull/138).
+- Using UCAN based capability tokens for authorization in p2p syncing, thus replacing the need for synchronous peer linking [#154](https://github.com/tilesprivacy/tiles/pull/154)
+    - Added two new sub commands under `tiles link`. `tiles link create-token <DID>`, which creates a UCAN token for the DID. `tiles link add-token <token>`, adds a given UCAN token to local DB for further use in in syncing.
+
+### Changed
+- Changed `tiles server` command to `tiles inference` with a newly added sub-command `run-background` which takes a boolean value. If true, closing the Tiles repl won't close the inference [#156](https://github.com/tilesprivacy/tiles/pull/156), [#157](https://github.com/tilesprivacy/tiles/pull/157)
+- Added extra metadata regarding tool and the arguments used in a tool-call to the session records, thus can be seen in Tiles sessions hosted in ATproto PDS [#155](https://github.com/tilesprivacy/tiles/pull/155)
+
 ## [0.4.11] - 2026-06-07
 
 ### Added
