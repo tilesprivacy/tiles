@@ -6,8 +6,8 @@ use crate::core::chats::{
 };
 use crate::core::storage::db::Dbconn;
 use crate::utils::config::{
-    ConfigProvider, DefaultProvider, create_pi_provider_config, get_inference_config,
-    get_memory_path, get_model_cache, update_current_model,
+    ConfigProvider, DefaultProvider, LlamaConfig, create_pi_provider_config, get_inference_config,
+    get_memory_path, get_model_cache, update_current_model, update_llama_config,
 };
 use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
@@ -65,6 +65,7 @@ pub struct RunArgs {
     pub relay_count: u32,
     pub memory: bool, // Future flags go here
     pub pi: bool,
+    pub llama_config: Option<LlamaConfig>,
 }
 #[derive(Clone, Debug)]
 pub struct ChatResponse {
@@ -226,23 +227,36 @@ impl From<ReasoningEffort> for String {
 const PY_PORT: u32 = 6969;
 
 pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
-    let default_modelfile_path = get_default_modelfile(run_args.memory)?;
-    let default_modelfile =
-        tilekit::modelfile::parse_from_file(default_modelfile_path.to_str().unwrap()).unwrap();
-    let modelfile_parse_result = if let Some(modelfile_str) = &run_args.modelfile_path {
-        tilekit::modelfile::parse_from_file(modelfile_str.as_str())
+    let (modelfile, default_modelfile) = if let Some(modelfile_str) = &run_args.modelfile_path {
+        let modelfile = match tilekit::modelfile::parse_from_file(modelfile_str.as_str()) {
+            Ok(mf) => mf,
+            Err(_err) => {
+                println!("Invalid Modelfile");
+                return Ok(());
+            }
+        };
+        let default_modelfile = get_default_modelfile(run_args.memory)
+            .ok()
+            .and_then(|path| tilekit::modelfile::parse_from_file(path.to_str()?).ok())
+            .unwrap_or_else(|| modelfile.clone());
+        (modelfile, default_modelfile)
     } else {
-        Err("NOT PROVIDED".to_string())
+        let default_modelfile_path = get_default_modelfile(run_args.memory)?;
+        let default_modelfile =
+            match tilekit::modelfile::parse_from_file(default_modelfile_path.to_str().unwrap()) {
+                Ok(mf) => mf,
+                Err(_err) => {
+                    println!("Invalid default Modelfile");
+                    return Ok(());
+                }
+            };
+        (default_modelfile.clone(), default_modelfile)
     };
 
-    let modelfile = match modelfile_parse_result {
-        Ok(mf) => mf,
-        Err(err) if err == "NOT PROVIDED" => default_modelfile.clone(),
-        Err(_err) => {
-            println!("Invalid Modelfile");
-            return Ok(());
-        }
-    };
+    if modelfile.from.is_none() {
+        println!("Invalid Modelfile");
+        return Ok(());
+    }
 
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
 }
@@ -523,6 +537,9 @@ async fn run_model_with_server(
     }
     // loading the model from mem-agent via daemon server
     let memory_path = get_memory_path().context("Setting/Retrieving memory_path failed")?;
+    if let Some(llama_config) = &run_args.llama_config {
+        update_llama_config(llama_config.clone()).context("Failed to update llama config")?;
+    }
     match load_model(&modelfile, &default_modelfile, &memory_path, 0).await {
         Ok(_) => start_repl(&modelfile, run_args, db_conn)
             .await

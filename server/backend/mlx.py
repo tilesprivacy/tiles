@@ -48,7 +48,9 @@ _current_model_path: Optional[str] = None
 
 
 def get_or_load_model(
-    model_spec: str, model_cache_path: str | None = None, verbose: bool = True
+    model_spec: str,
+    model_cache_path: str | None = None,
+    verbose: bool = True,
 ) -> MLXRunner:
     """Get model from cache or load it if not cached."""
     global _model_cache, _current_model_path

@@ -78,17 +78,20 @@ def _preload_cuda_runtime_libs() -> None:
                 ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
 
 
-def get_model_context_length_gguf(model_path: str) -> int:
+def get_model_context_length_gguf(
+    model_path: str, configured_max_ctx: int | None = None
+) -> int:
     """Extract context length from config.json alongside the GGUF file.
 
     Args:
         model_path: Path to the model directory
 
     Returns:
-        Maximum context length for the model, capped by TILES_LLAMA_CPP_MAX_CTX
-        or 30000 by default. If model metadata is unavailable, use that cap.
+        Maximum context length for the model, capped by the configured llama
+        context or 30000 by default. If model metadata is unavailable, use
+        that cap.
     """
-    max_ctx = int(os.environ.get("TILES_LLAMA_CPP_MAX_CTX", "30000"))
+    max_ctx = configured_max_ctx or 30000
     config_path = os.path.join(model_path, "config.json")
     try:
         with open(config_path) as f:
@@ -113,17 +116,6 @@ def get_model_context_length_gguf(model_path: str) -> int:
     return max_ctx
 
 
-def _get_env_int(name: str, default: int) -> int:
-    return int(os.environ.get(name, str(default)))
-
-
-def _get_env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.lower() in {"1", "true", "yes", "on"}
-
-
 class LlamaRunner:
     """Direct llama.cpp model runner with streaming and interactive capabilities.
 
@@ -144,7 +136,12 @@ class LlamaRunner:
     verbose: bool
     _model_loaded: bool
 
-    def __init__(self, model_path: str, verbose: bool = False):
+    def __init__(
+        self,
+        model_path: str,
+        verbose: bool = False,
+        llama_config: dict | None = None,
+    ):
         """Initialize the runner with a model.
 
         Args:
@@ -153,6 +150,7 @@ class LlamaRunner:
         """
         self.model_path = Path(model_path)
         self.model = None
+        self.llama_config = llama_config or {}
 
         # Stop-token state -- populated in _extract_stop_tokens()
         self._stop_tokens: list[str] | None = None
@@ -224,12 +222,19 @@ class LlamaRunner:
             if self.verbose:
                 print(f"Using GGUF file: {gguf_file}")
 
+            configured_context_length = self.llama_config.get("context_length")
             requested_context_length = get_model_context_length_gguf(
-                str(self.model_path)
+                str(self.model_path), configured_context_length
             )
-            n_gpu_layers = _get_env_int("TILES_LLAMA_CPP_N_GPU_LAYERS", 10)
-            offload_kqv = _get_env_bool("TILES_LLAMA_CPP_OFFLOAD_KQV", True)
-            n_batch = _get_env_int("TILES_LLAMA_CPP_N_BATCH", 512)
+            n_gpu_layers = self.llama_config.get("gpu_layers")
+            if n_gpu_layers is None:
+                n_gpu_layers = 10
+            offload_kqv = self.llama_config.get("offload_kqv")
+            if offload_kqv is None:
+                offload_kqv = True
+            n_batch = self.llama_config.get("batch_size")
+            if n_batch is None:
+                n_batch = 512
 
             self._context_length = requested_context_length
             self.model = Llama(

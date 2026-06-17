@@ -14,7 +14,7 @@ use tiles::{
     },
     daemon::{start_cmd, start_server, stop_cmd},
     repl::{self, RunArgs},
-    utils::installer,
+    utils::{config::LlamaConfig, installer},
 };
 
 use crate::commands::{set_inference_config_to_run_bg, show_peers, unlink_peer};
@@ -197,6 +197,37 @@ struct RunFlags {
     // Use PI repl instead of Tiles
     #[arg(short = 'p', long, hide = true)]
     pi: bool,
+
+    /// Context window for local llama.cpp inference
+    #[arg(long)]
+    context_length: Option<u32>,
+
+    /// Number of model layers to offload to GPU for llama.cpp
+    #[arg(long)]
+    gpu_layers: Option<i32>,
+
+    /// Offload K/Q/V attention operations for llama.cpp
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    offload_kqv: Option<bool>,
+
+    /// Prompt processing batch size for llama.cpp
+    #[arg(long)]
+    batch_size: Option<u32>,
+}
+
+fn llama_config_from_flags(flags: &RunFlags) -> Option<LlamaConfig> {
+    let config = LlamaConfig {
+        context_length: flags.context_length,
+        gpu_layers: flags.gpu_layers,
+        offload_kqv: flags.offload_kqv,
+        batch_size: flags.batch_size,
+    };
+
+    if config.is_empty() {
+        None
+    } else {
+        Some(config)
+    }
 }
 
 #[derive(Debug, Args)]
@@ -328,6 +359,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 relay_count: cli.flags.relay_count,
                 memory: cli.flags.memory,
                 pi: cli.flags.pi,
+                llama_config: llama_config_from_flags(&cli.flags),
             };
 
             commands::run_setup_for_ftue(&run_args)
@@ -359,6 +391,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 relay_count: flags.relay_count,
                 memory: flags.memory,
                 pi: flags.pi,
+                llama_config: llama_config_from_flags(&flags),
             };
             commands::run_setup_for_ftue(&run_args)
                 .await
