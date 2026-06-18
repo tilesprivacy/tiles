@@ -108,6 +108,12 @@ pub trait ConfigProvider {
     fn get_lib_dir(&self) -> Result<PathBuf>;
 }
 
+// Default MAX_TOKENS passed to Pi, incase not configued
+const MAX_TOKENS: u32 = 30_000;
+
+// Hard default MIN_TOKENS passed to Pi, incase configured with something way less
+const MIN_TOKENS: u32 = 4_096;
+
 #[derive(Debug, Default)]
 pub struct DefaultProvider;
 
@@ -492,7 +498,7 @@ fn get_pi_context_window() -> Option<u32> {
 }
 
 fn get_pi_max_tokens(context_window: Option<u32>) -> Option<u32> {
-    context_window.map(|context_window| context_window.clamp(4_096, 16_384))
+    context_window.map(|context_window| context_window.clamp(MIN_TOKENS, context_window))
 }
 
 pub fn create_pi_provider_config(model_name: &str, enpoint_base_url: &str) -> Result<String> {
@@ -504,7 +510,7 @@ fn create_pi_provider_config_with_context(
     enpoint_base_url: &str,
     context_window: Option<u32>,
 ) -> Result<String> {
-    let max_tokens = get_pi_max_tokens(context_window);
+    let max_tokens = get_pi_max_tokens(context_window).unwrap_or(MAX_TOKENS);
     let provider_config = PiProviderConfig {
         api: String::from("openai-responses"),
         api_key: String::from("tiles"),
@@ -513,7 +519,7 @@ fn create_pi_provider_config_with_context(
             id: model_name.to_string(),
             reasoning: true,
             context_window,
-            max_tokens,
+            max_tokens: Some(max_tokens),
         }],
     };
 
@@ -539,12 +545,12 @@ fn try_update_pi_provider_model(config: &str, model_name: &str) -> Result<String
 
     if tiles_provider_config.models[0].id != model_name {
         let context_window = get_pi_context_window();
-        let max_tokens = get_pi_max_tokens(context_window);
+        let max_tokens = get_pi_max_tokens(context_window).unwrap_or(MAX_TOKENS);
         tiles_provider_config.models = vec![PiProviderModelConfig {
             id: model_name.to_owned(),
             reasoning: true,
             context_window,
-            max_tokens,
+            max_tokens: Some(max_tokens),
         }];
         let mut provider: HashMap<String, PiProviderConfig> = HashMap::new();
         provider.insert("tiles".to_owned(), tiles_provider_config);
@@ -576,7 +582,7 @@ pub fn get_config_json() -> Result<serde_json::Value> {
     serde_json::to_value(root_config).map_err(Into::<anyhow::Error>::into)
 }
 
-pub fn update_llama_config(config: LlamaConfig) -> Result<()> {
+pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     let mut llama_config = root_config.llama.unwrap_or_default();
 
@@ -606,7 +612,8 @@ mod tests {
     fn expected_pi_provider_json(model_name: &str, endpoint_base_url: &str) -> Value {
         let mut model = json!({
             "id": model_name,
-            "reasoning": true
+            "reasoning": true,
+            "maxTokens": MAX_TOKENS
         });
 
         if let Some(context_window) = get_pi_context_window()

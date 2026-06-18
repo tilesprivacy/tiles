@@ -63,7 +63,7 @@ impl BenchmarkMetrics {
 pub struct RunArgs {
     pub modelfile_path: Option<String>,
     pub relay_count: u32,
-    pub memory: bool, // Future flags go here
+    pub memory: bool,
     pub pi: bool,
     pub llama_config: Option<LlamaConfig>,
 }
@@ -230,8 +230,8 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
     let (modelfile, default_modelfile) = if let Some(modelfile_str) = &run_args.modelfile_path {
         let modelfile = match tilekit::modelfile::parse_from_file(modelfile_str.as_str()) {
             Ok(mf) => mf,
-            Err(_err) => {
-                println!("Invalid Modelfile");
+            Err(err) => {
+                eprintln!("Invalid Modelfile due to {:?}", err);
                 return Ok(());
             }
         };
@@ -242,21 +242,19 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
         (modelfile, default_modelfile)
     } else {
         let default_modelfile_path = get_default_modelfile(run_args.memory)?;
-        let default_modelfile =
-            match tilekit::modelfile::parse_from_file(default_modelfile_path.to_str().unwrap()) {
-                Ok(mf) => mf,
-                Err(_err) => {
-                    println!("Invalid default Modelfile");
-                    return Ok(());
-                }
-            };
+        let default_modelfile = match tilekit::modelfile::parse_from_file(
+            default_modelfile_path
+                .to_str()
+                .expect("default_modelfile_path: Failed PathBuf to str"),
+        ) {
+            Ok(mf) => mf,
+            Err(err) => {
+                eprintln!("Invalid default Modelfile due to {:?}", err);
+                return Ok(());
+            }
+        };
         (default_modelfile.clone(), default_modelfile)
     };
-
-    if modelfile.from.is_none() {
-        println!("Invalid Modelfile");
-        return Ok(());
-    }
 
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
 }
@@ -531,14 +529,14 @@ async fn run_model_with_server(
 ) -> Result<()> {
     if !cfg!(debug_assertions) {
         let _ = start_server_daemon().await.inspect_err(|e| {
-            eprintln!("Failed to start daemon server due to {:?}", e);
+            eprintln!("Failed to start inference server due to {:?}", e);
         });
         let _ = wait_until_server_is_up().await;
     }
     // loading the model from mem-agent via daemon server
     let memory_path = get_memory_path().context("Setting/Retrieving memory_path failed")?;
     if let Some(llama_config) = &run_args.llama_config {
-        update_llama_config(llama_config.clone()).context("Failed to update llama config")?;
+        update_llama_config(llama_config).context("Failed to update llama config")?;
     }
     match load_model(&modelfile, &default_modelfile, &memory_path, 0).await {
         Ok(_) => start_repl(&modelfile, run_args, db_conn)

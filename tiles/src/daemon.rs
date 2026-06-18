@@ -221,6 +221,7 @@ async fn get_model_cache_path(
     }
 }
 
+/// Gets the contents of config.toml in json
 async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, StatusCode> {
     get_config_json()
         .and_then(|config| serde_json::to_string(&config).map_err(Into::into))
