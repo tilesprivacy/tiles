@@ -25,7 +25,7 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 use crate::{
     core::account::atproto::AtCallbackParams,
-    utils::config::{ConfigProvider, DefaultProvider, get_model_cache},
+    utils::config::{ConfigProvider, DefaultProvider, get_config_json, get_model_cache},
 };
 
 struct AppState {
@@ -132,6 +132,7 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
     let shared_state = Arc::new(state);
     let app = Router::new()
         .route("/", get(root))
+        .route("/config", get(get_config))
         .route("/shutdown", get(shutdown))
         .route("/model-cache-path", get(get_model_cache_path))
         .with_state(shared_state);
@@ -218,6 +219,13 @@ async fn get_model_cache_path(
     } else {
         Err(StatusCode::NOT_FOUND)
     }
+}
+
+/// Gets the contents of config.toml in json
+async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, StatusCode> {
+    get_config_json()
+        .and_then(|config| serde_json::to_string(&config).map_err(Into::into))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 async fn stop_server(port: Option<u32>) -> Result<()> {

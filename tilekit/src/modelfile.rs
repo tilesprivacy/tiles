@@ -255,7 +255,7 @@ impl Modelfile {
 
     pub fn build(&mut self) -> Result<(), String> {
         if self.from.is_none() {
-            let error = String::from("Modelfile should need a FROM instruction");
+            let error = String::from("Modelfile must need a FROM instruction");
             self.errors.push(error.clone());
             Err(error)
         } else {
@@ -516,6 +516,7 @@ mod tests {
         let modelfile = "
             PARAMETER num_ctx 4096
         ";
+
         assert!(parse(modelfile).is_err())
     }
 
@@ -527,8 +528,6 @@ mod tests {
             You are a bot
             You also not a bot
             \"\"\"";
-        let res = parse(modelfile);
-        println!("{:?}", res);
         assert!(parse(modelfile).is_ok())
     }
 

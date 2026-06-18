@@ -35,7 +35,7 @@ fn ensure_keyring_store() -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         keyring_core::set_default_store(apple_native_keyring_store::keychain::Store::new()?);
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]

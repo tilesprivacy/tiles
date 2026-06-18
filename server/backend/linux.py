@@ -53,10 +53,12 @@ logger = logging.getLogger("app")
 from typing import Any, Dict, List, Optional, Union, Iterator
 import httpx
 from pathlib import Path
+from ..config import get_llama_config
 
 _model_cache: Dict[str, LlamaRunner] = {}
 _default_max_tokens: Optional[int] = None  # Use dynamic model-aware limits by default
 _current_model_path: Optional[str] = None
+_current_llama_config: Dict[str, Any] | None = None
 # Store generated responses for follow-up support (previous_response_id)
 _responses: Dict[str, ResponsesResponse] = {}
 
@@ -64,13 +66,20 @@ _responses: Dict[str, ResponsesResponse] = {}
 
 
 def get_or_load_model(
-    model_spec: str, model_cache_path: str | None = None, verbose: bool = True
+    model_spec: str,
+    model_cache_path: str | None = None,
+    verbose: bool = True,
 ) -> LlamaRunner:
     """Get model from cache or load it if not cached."""
-    global _model_cache, _current_model_path
+    global _model_cache, _current_model_path, _current_llama_config
     model_name = model_spec
+    llama_config = get_llama_config()
 
-    if model_cache_path is None and _current_model_path in _model_cache:
+    if (
+        model_cache_path is None
+        and _current_model_path in _model_cache
+        and _current_llama_config == llama_config
+    ):
         logger.info(f"Model {model_name} already in memory")
         return _model_cache[_current_model_path]
 
@@ -100,7 +109,10 @@ def get_or_load_model(
         )
 
     # Check if we need to load a different model
-    if _current_model_path != model_path_str:
+    if (
+        _current_model_path != model_path_str
+        or _current_llama_config != llama_config
+    ):
         # Proactively clean up any previously loaded runner to release memory
         if _model_cache:
             try:
@@ -117,11 +129,14 @@ def get_or_load_model(
             print(f"Loading model: {model_name}")
 
         logger.info(f"Loading model: {model_name}")
-        runner = LlamaRunner(model_path_str, verbose=verbose)
+        runner = LlamaRunner(
+            model_path_str, verbose=verbose, llama_config=llama_config
+        )
         runner.load_model()
 
         _model_cache[model_path_str] = runner
         _current_model_path = model_path_str
+        _current_llama_config = llama_config
     else:
         logger.info(f"Model {model_name} already in memory")
 
