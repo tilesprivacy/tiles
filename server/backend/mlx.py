@@ -24,6 +24,7 @@ from .commons import (
     get_reasoning_effort,
     handle_response_input,
     is_harmony_family,
+    normalize_harmony_tool_name,
 )
 
 from ..schemas import (
@@ -97,6 +98,8 @@ async def generate_response_chat_stream(
         convo = build_harmony_conversation(
             reasoning_effort,
             request.input,  # pyright: ignore
+            replay_function_calls=True,
+            tools=request.tools,
         )
 
     input_tokens = len(runner.tokenizer.encode(user_input_content))  # pyright: ignore
@@ -147,7 +150,7 @@ async def generate_response_chat_stream(
                 continue
 
             if isinstance(token, ToolCallStart):
-                tool_name = token.name                
+                tool_name = normalize_harmony_tool_name(token.name, request.tools)
                 token = "**[ToolCall]**\n\n"
 
             if not isinstance(token, str):
@@ -164,7 +167,6 @@ async def generate_response_chat_stream(
                 last_state = state
                 state = "toolcall"
                 tool_id = f"toolcall_{uuid.uuid4()}"
-                # Start fresh so arguments from the last tool call are not reused. I did the same in Linux.
                 tool_call_text = ""
                 content_index = 0
 
@@ -197,7 +199,7 @@ async def generate_response_chat_stream(
                     )
                     output_items.append(item)
                     yield resp_str
-                elif state == "answer":
+                elif last_state == "answer":
                     resp_str, sequence_number, output_index, item = (
                         _process_output_item_done(
                             "message",
@@ -242,7 +244,7 @@ async def generate_response_chat_stream(
                     yield resp_str
                 # To avoid toolcall tag in the final arguments txt
                 if content_index != 0:
-                    tool_call_text += token      
+                    tool_call_text += token
                     output_item = OutputItemDeltaModel(
                         item_name="function_call_arguments",
                         item_id=tool_id,

@@ -45,7 +45,7 @@ def get_model_context_length(model_path: str) -> int:
         Maximum context length for the model (defaults to 4096 if not found)
     """
     config_path = os.path.join(model_path, "config.json")
-
+    # return 40000
     try:
         with open(config_path) as f:
             config = json.load(f)
@@ -415,6 +415,7 @@ class MLXRunner:
         Returns:
             Effective max tokens to use
         """
+
         if not self._context_length:
             # Fallback when context length is unknown
             fallback = 4096 if interactive else 2048
@@ -454,6 +455,7 @@ class MLXRunner:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
         effective_max_tokens = self.get_effective_max_tokens(max_tokens, True)
+        # effective_max_tokens = 30000
 
         encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 
@@ -463,6 +465,9 @@ class MLXRunner:
             conversation, Role.ASSISTANT
         )
 
+        # print(f"{self.tokenizer.decode(prompt_tokens)}")
+
+        # print("----------END OF CONVO------------")
         prompt_array = mx.array(prompt_tokens)  # pyright: ignore
 
         start_time = time.time()
@@ -491,27 +496,45 @@ class MLXRunner:
 
         # Collect tokens and yield text
         generated_tokens = []
-        is_analysis = None
-        is_final = None
-        is_commentary = None
+        current_channel = None
         for token, _ in generator:
             token_id = token.item() if hasattr(token, "item") else token
+            # print(f"{self.tokenizer.decode(token_id)}", end="")
+
             parser.process(token_id)  # pyright: ignore
             generated_tokens.append(token_id)
 
-            if is_analysis is None and parser.current_channel == "analysis":
-                is_analysis = True
+            # if (
+            #     parser.current_channel == "analysis"
+            #     and parser.current_recipient != None
+            # ):
+            #     print("FOUND TOOL CALL IN REASONING ANOMALY")
+
+            if (
+                current_channel != "analysis"
+                and parser.current_channel == "analysis"
+                and parser.current_recipient == None
+                and parser.current_content_type == None
+            ):
+                current_channel = "analysis"
                 yield "\n\n**[Reasoning]**\n\n"
 
-            if is_commentary is None and parser.current_channel == "commentary":
+            if (
+                current_channel != "commentary"
+                and parser.current_channel == "commentary"
+            ) or (
+                current_channel != "commentary"
+                and parser.current_channel == "analysis"
+                and parser.current_recipient != None
+            ):
                 if not parser.current_recipient:
                     # No business with an empty tool name
                     continue
-                is_commentary = True
-                yield ToolCallStart(name=parser.current_recipient or "bash")
+                current_channel = "commentary"
+                yield ToolCallStart(name=parser.current_recipient or "")
 
-            if is_final is None and parser.current_channel == "final":
-                is_final = True
+            if current_channel != "final" and parser.current_channel == "final":
+                current_channel = "final"
                 yield "\n---\n**[Answer]**\n\n"
 
             if ttft is None:

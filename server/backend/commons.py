@@ -1,4 +1,3 @@
-
 import json
 import time
 from ..schemas import OutputItemDeltaModel, ResponsesRequest
@@ -65,10 +64,13 @@ def normalize_harmony_tool_name(
     if tool_name in valid_tool_names:
         return tool_name
 
-    normalized = tool_name.removeprefix("functions.")
+    # The final split is to counter model emitting stuff like
+    # functions.read<|channel|>analysis as tool name somtimes
+    normalized = tool_name.removeprefix("functions.").split("<")[0]
     if normalized in valid_tool_names:
         return normalized
 
+    # TODO: why are returning this invalid tool lul
     return tool_name
 
 
@@ -113,9 +115,13 @@ def build_harmony_conversation(
             case CUserMessageItemParam():
                 content = ""
                 if isinstance(item.content, list):
-                    content = item.content[0].text  # pyright: ignore[reportAttributeAccessIssue]
+                    content = item.content[
+                        0
+                    ].text  # pyright: ignore[reportAttributeAccessIssue]
                 else:
-                    content = item.content.root  # pyright: ignore[reportAttributeAccessIssue]
+                    content = (
+                        item.content.root
+                    )  # pyright: ignore[reportAttributeAccessIssue]
                 convo_list.append(
                     Message.from_role_and_content(Role.USER, content)  # pyright: ignore
                 )
@@ -131,9 +137,13 @@ def build_harmony_conversation(
             case CAssistantMessageItemParam():
                 content = ""
                 if isinstance(item.content, list):
-                    content = item.content[0].text  # pyright: ignore[reportAttributeAccessIssue]
+                    content = item.content[
+                        0
+                    ].text  # pyright: ignore[reportAttributeAccessIssue]
                 else:
-                    content = item.content.root  # pyright: ignore[reportAttributeAccessIssue]
+                    content = (
+                        item.content.root
+                    )  # pyright: ignore[reportAttributeAccessIssue]
 
                 convo_list.append(
                     Message.from_role_and_content(
@@ -142,7 +152,9 @@ def build_harmony_conversation(
                 )
             case CSystemMessageItemParam():
                 convo_list.append(
-                    Message.from_role_and_content(Role.SYSTEM, item.content.root)  # pyright: ignore[reportAttributeAccessIssue]
+                    Message.from_role_and_content(
+                        Role.SYSTEM, item.content.root
+                    )  # pyright: ignore[reportAttributeAccessIssue]
                 )
             case CFunctionCallItemParam():
                 function_name = item.name
@@ -165,7 +177,9 @@ def build_harmony_conversation(
                     Message.from_author_and_content(
                         Author.new(Role.TOOL, function_name),
                         item.output,  # pyright: ignore
-                    ).with_channel("commentary")
+                    )
+                    .with_channel("commentary")
+                    .with_recipient(Role.ASSISTANT)
                 )
             case CReasoningItemParam():
                 continue
@@ -173,6 +187,8 @@ def build_harmony_conversation(
                 raise TypeError("unknown type")
 
     convo = Conversation.from_messages(convo_list)
+
+    # print(f"HARMONY CONVO\n{convo}")
     return convo
 
 
@@ -190,13 +206,18 @@ def handle_response_input(request: ResponsesRequest):
         user_msg_item = request.input[-1]
         if isinstance(user_msg_item, CUserMessageItemParam):
             if isinstance(user_msg_item.content, list):
-                user_input_content = user_msg_item.content[0].text  # pyright: ignore[reportAttributeAccessIssue]
+                user_input_content = user_msg_item.content[
+                    0
+                ].text  # pyright: ignore[reportAttributeAccessIssue]
             else:
-                user_input_content = user_msg_item.content.root  # pyright: ignore[reportAttributeAccessIssue]
+                user_input_content = (
+                    user_msg_item.content.root
+                )  # pyright: ignore[reportAttributeAccessIssue]
         else:
             # FIXME: Not a user input should handle this for non-harmonic later
             user_input_content = ""
     return user_input_content
+
 
 def _sse(event_name: str, payload: dict, current_seq_no: int) -> tuple[str, int]:
     seq_no = current_seq_no + 1
