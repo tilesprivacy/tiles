@@ -6,7 +6,6 @@ requires-python = "==3.13.*"
 dependencies = [
     "fastapi==0.119.0",
     "uvicorn==0.38.0",
-    "openai-harmony==0.0.8",
     "httpx==0.28.1",
     "openresponses-types",
 ]
