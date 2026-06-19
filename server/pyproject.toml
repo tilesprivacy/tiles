@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn==0.38.0",
     "httpx==0.28.1",
     "openresponses-types",
+    "tiles-harmony==0.0.8rc4"
 ]
 
 [build-system]
@@ -18,7 +19,10 @@ build-backend = "setuptools.build_meta"
 exclude = ["backend", "backend.*"]
 
 [tool.uv]
-exclude-newer="2026-06-02T19:44:30+05:30"
+exclude-newer = "2026-06-02T19:44:30+05:30"
+
+[tool.uv.exclude-newer-package]
+ tiles-harmony="2026-06-20T03:01:00Z"
 
 [dependency-groups]
 dev = [

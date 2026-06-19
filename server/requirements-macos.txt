@@ -1,3 +1,3 @@
 mlx==0.31.1
 mlx-lm==0.31.0
-openai-harmony @ https://github.com/tilesprivacy/tiles-harmony/releases/download/v0.0.8-rc.2/openai_harmony-0.0.8rc2-cp38-abi3-macosx_11_0_arm64.whl#sha256=43d85451b30c7f4e78e3285fb8e807a7506b0acb939853d4f6b0898e12c044df
+
