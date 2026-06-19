@@ -5,6 +5,24 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.13] - 2026-06-19
+
+### Added
+- Added `tiles run` flags for llama.cpp tuning: `--context-length`, `--gpu-layers`, `--offload-kqv`, and `--batch-size` [#160](https://github.com/tilesprivacy/tiles/pull/160).
+- Added a daemon `/config` endpoint so the Python inference backend can read Rust-owned Tiles config [#160](https://github.com/tilesprivacy/tiles/pull/160).
+
+### Changed
+- Persist llama.cpp settings under `[llama]` in `config.toml` instead of using `TILES_LLAMA_CPP_*` environment variables [#160](https://github.com/tilesprivacy/tiles/pull/160).
+- Reload the Linux llama.cpp runner when llama configuration changes, even if the selected model path stays the same [#160](https://github.com/tilesprivacy/tiles/pull/160).
+- Reworked link command UX around `tiles link create`, `tiles link add`, `tiles link list-peers`, and `tiles link revoke`, with support for both offline link codes and UCAN tokens [#163](https://github.com/tilesprivacy/tiles/pull/163).
+- Renamed inference system controls to `tiles system server` with `start`, `stop`, and `daemon` subcommands [#163](https://github.com/tilesprivacy/tiles/pull/163).
+- Switched Harmony handling to `tiles-harmony` across active server manifests [#162](https://github.com/tilesprivacy/tiles/pull/162).
+
+### Fixed
+- Improved GPT-OSS tool call handling by normalizing malformed tool names, passing tool metadata into Harmony conversation replay, and detecting tool calls emitted through the analysis channel [#162](https://github.com/tilesprivacy/tiles/pull/162).
+- Fixed tool-call streaming state handling so final answers and function-call arguments are emitted more reliably [#162](https://github.com/tilesprivacy/tiles/pull/162).
+- Improved dev Modelfile handling so `cargo run -- run modelfiles/gpt-oss-gguf` no longer depends on a pre-existing copied default Modelfile [#160](https://github.com/tilesprivacy/tiles/pull/160).
+
 ## [0.4.12] - 2026-06-15
 
 ### Added

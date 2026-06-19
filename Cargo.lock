@@ -5996,7 +5996,7 @@ dependencies = [
 
 [[package]]
 name = "tiles"
-version = "0.4.13-rc.2"
+version = "0.4.13"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",

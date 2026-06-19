@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO="tilesprivacy/tiles"
 
-VERSION="0.4.12"
+VERSION="0.4.13"
 DEV="false"
 
 for arg in "$@"; do
