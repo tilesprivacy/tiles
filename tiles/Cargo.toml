@@ -21,14 +21,14 @@ rusqlite = { version = "0.38.0", features = ["bundled-sqlcipher-vendored-openssl
 rusqlite_migration = "2.4.1"
 uuid = {version = "1.21.0", features = ["v7"]}
 axum = "0.8.8"
-iroh = {version = "0.97.0", features = ["address-lookup-mdns"]}
-iroh-tickets = "0.4.0"
+iroh = {version = "1.0.0"}
+iroh-tickets = "1.0.0"
 axum-macros = "0.5.0"
-iroh-gossip = "0.97.0"
+iroh-gossip = "0.101.0"
 postcard = "1.1.3"
 data-encoding = "2.10.0"
 sha2 = "0.10.9"
-iroh-blobs = "0.99.0"
+iroh-blobs = "0.103.0"
 log = "0.4.29"
 env_logger = "0.11.10"
 atrium-oauth = "0.1.7"
@@ -46,6 +46,7 @@ dialog-varsig= { git = "https://github.com/tilesprivacy/dialog-db", rev = "af442
 serde_ipld_dagcbor = "0.6.4"
 cid = "0.11.3"
 keyring-core = "1.0.0"
+iroh-mdns-address-lookup = "0.4.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }

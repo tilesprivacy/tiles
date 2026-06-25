@@ -13,7 +13,6 @@ use axum::body::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use iroh::{
     Endpoint, EndpointId, NET_REPORT_TIMEOUT, PublicKey,
-    address_lookup::{self, MdnsAddressLookup, mdns},
     endpoint::{BindError, presets},
     endpoint_info::UserData,
     protocol::Router,
@@ -23,7 +22,7 @@ use iroh_gossip::{
     Gossip, TopicId,
     api::{Event, GossipReceiver, GossipSender},
 };
-
+use iroh_mdns_address_lookup::{DiscoveryEvent, MdnsAddressLookup};
 use log::info;
 use rusqlite::Connection;
 
@@ -126,7 +125,7 @@ pub async fn link(ticket: Option<String>) -> Result<()> {
         let topic_id = create_topic_id(DEVICE_LINK_LOCAL_TOPIC);
 
         println!("Searching for peers in the local network..");
-        let mdns = address_lookup::mdns::MdnsAddressLookup::builder().build(endpoint.id())?;
+        let mdns = MdnsAddressLookup::builder().build(endpoint.id())?;
         let (new_bootstrap_ids, user_data) = find_offline_bootstrap_peers(&endpoint, mdns).await?;
         bootstrap_ids = new_bootstrap_ids;
         let endpoint_user_data = EndpointUserData::try_from(user_data.to_string())?;
@@ -170,7 +169,7 @@ pub async fn link(ticket: Option<String>) -> Result<()> {
             return Ok(());
         }
         // RECEIVER BLOCK
-        let mdns = address_lookup::mdns::MdnsAddressLookup::builder().build(endpoint.id())?;
+        let mdns = MdnsAddressLookup::builder().build(endpoint.id())?;
         endpoint.address_lookup()?.add(mdns.clone());
 
         // Its better to have unique session'ed channels while
@@ -435,7 +434,7 @@ pub async fn sync(did: Option<String>) -> Result<()> {
     // handling the endpoint lookup separately for offline network using
     // mdns
     if !is_online {
-        let mdns = address_lookup::mdns::MdnsAddressLookup::builder().build(endpoint.id())?;
+        let mdns = MdnsAddressLookup::builder().build(endpoint.id())?;
         endpoint.address_lookup()?.add(mdns.clone());
     }
 
@@ -614,7 +613,7 @@ async fn find_offline_bootstrap_peers(
     let mut user_data = UserData::from_str("")?;
     while let Some(event) = mdns_event.next().await {
         match event {
-            mdns::DiscoveryEvent::Discovered {
+            DiscoveryEvent::Discovered {
                 endpoint_info,
                 last_updated: _,
             } => {
@@ -625,11 +624,12 @@ async fn find_offline_bootstrap_peers(
                 user_data = endpoint_info.user_data().unwrap().clone();
                 break;
             }
-            mdns::DiscoveryEvent::Expired { endpoint_id } => {
+            DiscoveryEvent::Expired { endpoint_id } => {
                 if cfg!(debug_assertions) {
                     println!("peer left {:?}", endpoint_id)
                 }
             }
+            _ => {}
         }
     }
 

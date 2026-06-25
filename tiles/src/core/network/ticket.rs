@@ -16,18 +16,18 @@ pub struct LinkTicket {
 impl Ticket for LinkTicket {
     const KIND: &'static str = "link";
 
-    fn to_bytes(&self) -> Vec<u8> {
+    fn encode_bytes(&self) -> Vec<u8> {
         postcard::to_stdvec(&self).expect("linkTicket to bytes couldnt be done")
     }
 
-    fn from_bytes(bytes: &[u8]) -> Result<Self, iroh_tickets::ParseError> {
+    fn decode_bytes(bytes: &[u8]) -> Result<Self, iroh_tickets::ParseError> {
         postcard::from_bytes(bytes).map_err(Into::into)
     }
 }
 
 impl Display for LinkTicket {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut text = data_encoding::BASE32_NOPAD.encode(&self.to_bytes()[..]);
+        let mut text = data_encoding::BASE32_NOPAD.encode(&self.encode_bytes()[..]);
         text.make_ascii_lowercase();
         write!(f, "{}", text)
     }
@@ -37,7 +37,7 @@ impl FromStr for LinkTicket {
     type Err = anyhow::Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let ticket_bytes = data_encoding::BASE32_NOPAD.decode(s.to_uppercase().as_bytes())?;
-        LinkTicket::from_bytes(&ticket_bytes).map_err(Into::into)
+        LinkTicket::decode_bytes(&ticket_bytes).map_err(Into::into)
     }
 }
 
