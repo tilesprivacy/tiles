@@ -23,6 +23,7 @@ use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self};
 use std::path::PathBuf;
@@ -127,6 +128,13 @@ struct PiResponseMessage {
     command: CommandType,
     success: bool,
     data: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct Commands {
+    name: String,
+    description: String,
+    source: String,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -384,6 +392,10 @@ enum CommandType {
     SetThinkingLevel,
     #[serde(rename = "abort")]
     Abort,
+    #[serde(rename = "skills")]
+    Skills,
+    #[serde(rename = "get_commands")]
+    GetCommands,
     #[serde(other)]
     Unknown,
 }
@@ -457,6 +469,7 @@ fn handle_input(input: &str) -> InputType {
                 println!("Empty command. Type /help for available commands.");
                 InputType::Skip
             }
+            cmd if cmd.starts_with("skill:") => InputType::Prompt,
             cmd => InputType::Command(cmd.to_owned()),
         }
     } else {
@@ -499,6 +512,13 @@ fn show_help() {
             vec![
                 ("/help", "Show this help message"),
                 ("/bye", "Exit the Chat"),
+            ],
+        ),
+        (
+            "Tools",
+            vec![
+                ("/skills", "List all the available skills"),
+                ("/skill:<skill-name>", "Use the skill directly"),
             ],
         ),
     ];
@@ -866,8 +886,14 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
 
 async fn send_to_pi(pi_child_stdin: &mut ChildStdin, payload_json: Value) -> Result<()> {
     let payload_str = format!("{}\n", serde_json::to_string(&payload_json)?);
-    pi_child_stdin.write_all(payload_str.as_bytes()).await?;
-    pi_child_stdin.flush().await?;
+    pi_child_stdin
+        .write_all(payload_str.as_bytes())
+        .await
+        .context("Failed to send to Pi's stdin")?;
+    pi_child_stdin
+        .flush()
+        .await
+        .context("Failed to flush Pi stdin")?;
     Ok(())
 }
 
@@ -877,13 +903,34 @@ async fn process_command(
     pi_stdin: &mut ChildStdin,
     pi_stdout: &mut ChildStdout,
 ) -> Result<()> {
-    if let CommandType::SetThinkingLevel = response_msg.command {
-        let state = get_pi_state(pi_stdin, pi_stdout).await?;
-        repl_session.reasoning = state
-            .thinking_level
-            .parse::<ReasoningEffort>()
-            .context("Failed to parse reasoning effort")?;
-        println!("Reasoning settings updated successfully")
+    match response_msg.command {
+        CommandType::SetThinkingLevel => {
+            let state = get_pi_state(pi_stdin, pi_stdout).await?;
+            repl_session.reasoning = state
+                .thinking_level
+                .parse::<ReasoningEffort>()
+                .context("Failed to parse reasoning effort")?;
+            println!("Reasoning settings updated successfully")
+        }
+        CommandType::GetCommands => {
+            if let Some(commands) = response_msg.data {
+                let commands_obj: HashMap<String, Vec<Commands>> =
+                    serde_json::from_value(commands)?;
+
+                if let Some(commands) = commands_obj.get("commands") {
+                    let mut index = 0;
+                    commands.iter().for_each(|cmd| {
+                        index += 1;
+                        println!("{}. {} - {}", index, cmd.name, cmd.description);
+                    });
+                } else {
+                    println!("No commands found")
+                }
+            } else {
+                println!("No commands found")
+            }
+        }
+        _ => (),
     }
 
     Ok(())
@@ -1262,6 +1309,14 @@ async fn handle_input_commands(
             } else {
                 InputCommandResponse::WaitForNextLine
             }
+        }
+        CommandType::Skills => {
+            let pi_cmd = json!({
+                "type": "get_commands",
+            });
+
+            send_to_pi(pi_stdin, pi_cmd).await?;
+            InputCommandResponse::WaitForNextLine
         }
         _ => InputCommandResponse::ProcessNextInput,
     };
