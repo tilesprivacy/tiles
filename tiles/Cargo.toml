@@ -17,7 +17,7 @@ hf-hub = {version = "0.4", features = ["tokio"]}
 rustyline = "18.0"
 toml = "1.0.3"
 semver = "1.0"
-rusqlite = { version = "0.38.0", features = ["bundled-sqlcipher-vendored-openssl"] }
+rusqlite = { version = "0.40.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 rusqlite_migration = "2.4.1"
 uuid = {version = "1.21.0", features = ["v7"]}
 axum = "0.8.8"
