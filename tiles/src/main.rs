@@ -8,6 +8,7 @@ use tiles::{
         self,
         account::atproto::{login, logout},
         network::sync,
+        plugin::{self, install, uninstall},
     },
     daemon::{start_cmd, start_server, stop_cmd},
     repl::{self, RunArgs},
@@ -60,7 +61,8 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    update    Update Tiles to the latest version\n",
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
-    "    daemon    Configure daemon behavior\n\n",
+    "    daemon    Configure daemon behavior\n",
+    "    plugin    Manage plugins such as skills, extensions etc\n\n",
     "Options:\n",
     "  -h, --help       Show help\n",
     "  -V, --version    Show version\n\n",
@@ -157,6 +159,9 @@ enum SystemCommands {
 
     /// Configure daemon behavior
     Daemon(DaemonArgs),
+
+    /// Manages plugins such as skills, extensions etc..
+    Plugin(PluginArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -295,6 +300,27 @@ enum DaemonCommands {
 #[derive(Debug, Args)]
 #[command(args_conflicts_with_subcommands = true)]
 #[command(flatten_help = true)]
+struct PluginArgs {
+    #[command(subcommand)]
+    command: PluginCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommands {
+    List,
+    /// Install a plugin
+    Install {
+        path: String,
+    },
+
+    /// Uninstall a plugin
+    Uninstall {
+        name: String,
+    },
+}
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
 struct LinkArgs {
     #[command(subcommand)]
     command: LinkCommands,
@@ -430,6 +456,24 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .inspect_err(|e| eprintln!("{:?}", e))
                 .inspect(|_| println!("Daemon stopped successfully"))?,
             _ => start_server(None).await?,
+        },
+        Some(Commands::System(SystemCommands::Plugin(plugin_args))) => match plugin_args.command {
+            PluginCommands::List => {
+                plugin::list()?;
+            }
+            PluginCommands::Install { path } => match install(path).await {
+                Ok(resp) => println!("{}", resp),
+                Err(err) => println!("Plugin failed to install due to {:?}", err),
+            },
+            PluginCommands::Uninstall { name } => {
+                // handle uninstall
+                match uninstall(&name) {
+                    Ok(resp) => println!("{}", resp),
+                    Err(_err) => eprintln!(
+                        "Plugin failed to uninstall, please check if the name is correct and try again"
+                    ),
+                }
+            }
         },
         Some(Commands::Sync(SyncCommands::Link(link_args))) => match link_args.command {
             LinkCommands::Revoke { peer_did } => unlink_peer(&db_conn, &peer_did)?,
