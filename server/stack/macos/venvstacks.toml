@@ -21,7 +21,7 @@ name = "server"
 launch_module = "../../main.py"
 frameworks = ["mlx"]
 requirements = [
-    "fastapi==0.119.0",
+    "fastapi==0.130.0",
     "uvicorn==0.38.0",
     "mlx-lm==0.31.0",
     "openresponses-types",
