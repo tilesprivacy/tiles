@@ -374,6 +374,7 @@ enum InputType {
     Command(String),
     Exit,
     Prompt,
+    Skill,
 }
 
 #[derive(Deserialize, Serialize, Debug)]
@@ -469,9 +470,10 @@ fn handle_input(input: &str) -> InputType {
                 println!("Empty command. Type /help for available commands.");
                 InputType::Skip
             }
-            cmd if cmd.starts_with("skill:") => InputType::Prompt,
             cmd => InputType::Command(cmd.to_owned()),
         }
+    } else if let Some(_skill) = input.strip_prefix('$') {
+        InputType::Skill
     } else {
         InputType::Prompt
     }
@@ -515,10 +517,10 @@ fn show_help() {
             ],
         ),
         (
-            "Tools",
+            "Plugins",
             vec![
                 ("/skills", "List all the available skills"),
-                ("/skill:<skill-name>", "Use the skill directly"),
+                ("$<skill-name>", "Use the skill directly"),
             ],
         ),
     ];
@@ -623,6 +625,11 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
             }
             InputType::Prompt => {
                 handle_input_prompt(pi_stdin, &mut repl_session, &input).await?;
+            }
+            InputType::Skill => {
+                let (_, skill_name) = input.split_at(1);
+                let skill_prompt = format!("/skill:{}", skill_name);
+                handle_input_prompt(pi_stdin, &mut repl_session, &skill_prompt).await?;
             }
             InputType::Command(cmd) => {
                 let res = handle_input_commands(cmd, &mut repl_session, db_conn, pi_stdin).await?;
@@ -921,7 +928,15 @@ async fn process_command(
                     let mut index = 0;
                     commands.iter().for_each(|cmd| {
                         index += 1;
-                        println!("{}. {} - {}", index, cmd.name, cmd.description);
+                        // chucking off `skill:` from the name
+                        let (_, skill_name) = cmd.name.split_at(6);
+                        println!(
+                            "{}. {}{} - {}",
+                            index.purple(),
+                            "$".yellow(),
+                            skill_name.bright_green(),
+                            cmd.description.bright_cyan()
+                        );
                     });
                 } else {
                     println!("No commands found")

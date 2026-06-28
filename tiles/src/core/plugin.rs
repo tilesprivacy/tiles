@@ -13,8 +13,12 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use log::info;
 use reqwest::Client;
+use tempfile::tempdir;
 
-use crate::utils::config::{ConfigProvider, DefaultProvider};
+use crate::utils::{
+    config::{ConfigProvider, DefaultProvider},
+    copy_recursive,
+};
 
 pub async fn install(path: String) -> Result<String> {
     if let Ok(url) = reqwest::Url::parse(&path) {
@@ -72,25 +76,40 @@ fn install_from_local_source(local_path: PathBuf) -> Result<String> {
         let pi_skills_dir = user_data_dir.join("pi/agent/skills");
         std::fs::create_dir_all(&pi_skills_dir).context("Failed to create Pi skills directory")?;
 
+        let tmp_dir = tempdir().expect("Failed to create tmp dir");
+
+        let mut tmp_path = tmp_dir.path().to_path_buf();
+
+        tmp_path.push("tmp_tiles_plugins");
+        std::fs::create_dir_all(&tmp_path)
+            .context("Failed to create temporary plugins directory")?;
+
         let output = if local_path.ends_with(".zip") {
             Command::new("unzip")
                 .arg(&local_path)
                 .arg("-d")
-                .arg(pi_skills_dir)
+                .arg(&tmp_path)
                 .output()?
         } else {
             Command::new("tar")
                 .arg("-xzf")
                 .arg(&local_path)
                 .arg("-C")
-                .arg(pi_skills_dir)
+                .arg(&tmp_path)
                 .output()?
         };
+
         if !output.status.success() {
             let output_str = String::from_utf8_lossy(&output.stderr);
             Err(anyhow!("{}", output_str))
         } else {
-            Ok(format!("Successfully installed plugin {}", plugin_name))
+            // For now we are only copying skills
+            if tmp_path.join(plugin_name).join("skills").is_dir() {
+                copy_recursive(&tmp_path.join(plugin_name).join("skills"), &pi_skills_dir)?;
+                Ok(format!("Successfully installed plugin {}", plugin_name))
+            } else {
+                Ok("Skills not found in this plugin".to_string())
+            }
         }
     } else {
         Err(anyhow!(
@@ -105,9 +124,6 @@ fn is_valid_file_by_extension(filename: &str) -> bool {
 }
 
 pub fn uninstall(plugin_name: &str) -> Result<String> {
-    // find if the skill is there
-    // if else do rm -rf
-    //
     let user_data_dir = DefaultProvider.get_user_data_dir()?;
     let pi_skills_dir = user_data_dir.join("pi/agent/skills");
 
@@ -146,12 +162,7 @@ pub fn list() -> Result<()> {
     for dir_result in read_dir {
         match dir_result {
             Ok(dir) => {
-                println!(
-                    "{}",
-                    dir.file_name()
-                        .to_str()
-                        .expect("Conversino from Osstr to str failed")
-                )
+                println!("{}", dir.file_name().to_string_lossy())
             }
             Err(_err) => continue,
         }

@@ -47,6 +47,7 @@ serde_ipld_dagcbor = "0.6.4"
 cid = "0.11.3"
 keyring-core = "1.0.0"
 iroh-mdns-address-lookup = "0.4.0"
+tempfile = "3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }
@@ -55,7 +56,6 @@ dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rus
 apple-native-keyring-store = { version = "1.0.0", features = ["keychain"] }
 
 [dev-dependencies]
-tempfile = "3"
 keyring-core = { version = "1.0.0", features = ["sample"] }
 wiremock = "0.6.5"
 async-std = { version = "1.12", features = ["attributes"] }
