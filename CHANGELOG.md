@@ -5,6 +5,34 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.14] - 2026-06-28
+
+### Added
+
+- Implemented Tiles plugin system [#171](https://github.com/tilesprivacy/tiles/pull/171).
+  - `tiles plugin install <url / filesystem-path>`, `tiles plugin uninstall <plugin-name>`, `tiles plugin list` (for installed plugins).
+    - Plugins should be a `.zip` or `.tar.gz` file either hosted or available in local filesystem.
+    ```markdown
+
+      ## Plugin folder structure
+
+      plugin_name
+        - extensions
+          - extension_1
+            - ...
+          - extension_2
+            - ...
+        - skills
+          - skill_1
+            - SKILLS.md
+      ```
+    - Added skills support via plugins
+      - In repl use `/skills` for list of skills and `$<skill-name>` to use the skill directly. Tiles can use available skills as needed too.
+
+### Changed
+
+- Upgraded project dependencies [#168](https://github.com/tilesprivacy/tiles/pull/168), [#170](https://github.com/tilesprivacy/tiles/pull/170).
+
 ## [0.4.13] - 2026-06-19
 
 ### Added
