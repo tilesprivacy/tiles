@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Local inference server for the Tiles CLI"
 requires-python = "==3.13.*"
 dependencies = [
-    "fastapi==0.119.0",
+    "fastapi==0.130.0",
     "uvicorn==0.38.0",
     "httpx==0.28.1",
     "openresponses-types",
