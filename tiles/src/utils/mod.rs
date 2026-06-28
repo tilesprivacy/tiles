@@ -30,7 +30,9 @@ pub fn copy_recursive(src: &PathBuf, dest: &PathBuf) -> anyhow::Result<()> {
         let filename = dir_path.file_name();
         let src_path = dir_path.path();
         let dest_path = PathBuf::new().join(dest).join(filename);
-        if file_type.is_dir() {
+        if file_type.is_symlink() {
+            anyhow::bail!("Refusing to copy symlink entry {:?}", src_path);
+        } else if file_type.is_dir() {
             copy_recursive(&src_path, &dest_path)?
         } else {
             fs::copy(&src_path, &dest_path)?;
