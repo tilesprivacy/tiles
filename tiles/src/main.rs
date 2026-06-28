@@ -59,6 +59,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    sync      Sync chats with peers\n\n",
     "  System\n",
     "    update    Update Tiles to the latest version\n",
+    "    uninstall Uninstall Tiles from this machine\n",
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
     "    daemon    Configure daemon behavior\n\n",
@@ -105,6 +106,13 @@ enum Commands {
 
     #[command(flatten, next_help_heading = "Plugins")]
     Tools(ToolsCommandsGroup),
+
+    /// Uninstall Tiles from this machine
+    Uninstall {
+        /// Remove all Tiles files, including config and local databases
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -371,6 +379,12 @@ enum AtCommands {
 pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
     let cli = Cli::parse();
+
+    if let Some(Commands::Uninstall { all }) = &cli.command {
+        commands::uninstall_tiles(*all).await?;
+        return Ok(());
+    }
+
     let db_conn = core::init()?;
 
     match cli.command {
@@ -503,6 +517,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
             AtCommands::Logout => logout(&db_conn)?,
         },
+        Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,
     }
     Ok(())
 }

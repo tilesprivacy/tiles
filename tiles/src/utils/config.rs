@@ -99,6 +99,9 @@ pub struct PiProviderModelConfig {
     pub max_tokens: Option<u32>,
 }
 const MODEL_SUB_PATH: &str = "models/huggingface/hub";
+pub const SYSTEM_BIN_PATH: &str = "/usr/local/bin/tiles";
+pub const SYSTEM_LIB_DIR: &str = "/usr/local/share/tiles";
+
 pub trait ConfigProvider {
     fn get_config_dir(&self) -> Result<PathBuf>;
     fn get_or_create_config_dir(&self) -> Result<PathBuf>;
@@ -106,6 +109,8 @@ pub trait ConfigProvider {
     fn get_or_create_data_dir(&self) -> Result<PathBuf>;
     fn get_user_data_dir(&self) -> Result<PathBuf>;
     fn get_lib_dir(&self) -> Result<PathBuf>;
+    fn get_user_bin_dir(&self) -> Result<PathBuf>;
+    fn get_user_bin_path(&self) -> Result<PathBuf>;
 }
 
 // Default MAX_TOKENS passed to Pi, incase not configued
@@ -214,29 +219,33 @@ impl ConfigProvider for DefaultProvider {
             }
 
             // If it's not next to the executable, then check if these folders are in /usr/local/share/tiles
-            let system_lib_dir = PathBuf::from_str("/usr/local/share/tiles")?;
+            let system_lib_dir = PathBuf::from(SYSTEM_LIB_DIR);
             if is_tiles_lib_dir(&system_lib_dir) {
                 return Ok(system_lib_dir);
             }
 
             // If not in the global root share files, then finally, if these files are in ~/.local/share/tiles
             // then tiles can pick that up
-            let home_dir = env::home_dir().context("Failed to fetch $HOME")?;
-            let data_dir = match env::var("XDG_DATA_HOME") {
-                Ok(val) => PathBuf::from(val),
-                Err(_err) => home_dir.join(".local/share"),
-            };
-            let user_lib_dir = data_dir.join("tiles");
+            let user_lib_dir = self.get_data_dir()?;
             if is_tiles_lib_dir(&user_lib_dir) {
                 return Ok(user_lib_dir);
             }
 
-            Ok(PathBuf::from_str("/usr/local/share/tiles")?)
+            Ok(PathBuf::from(SYSTEM_LIB_DIR))
         }
+    }
+
+    fn get_user_bin_dir(&self) -> Result<PathBuf> {
+        let home_dir = env::home_dir().context("Failed to fetch $HOME")?;
+        Ok(home_dir.join(".local/bin"))
+    }
+
+    fn get_user_bin_path(&self) -> Result<PathBuf> {
+        Ok(self.get_user_bin_dir()?.join("tiles"))
     }
 }
 
-fn is_tiles_lib_dir(path: &Path) -> bool {
+pub fn is_tiles_lib_dir(path: &Path) -> bool {
     path.join("modelfiles").is_dir() && path.join("server").is_dir() && path.join("pi").is_dir()
 }
 pub fn set_user_data_path(path: &str) -> Result<String> {
