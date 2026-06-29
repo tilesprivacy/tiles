@@ -91,7 +91,9 @@ impl UninstallPlan {
             if is_running_as_root() {
                 return false;
             }
-            self.remove_files.iter().any(|path| requires_elevation(path))
+            self.remove_files
+                .iter()
+                .any(|path| requires_elevation(path))
                 || self.remove_dirs.iter().any(|path| requires_elevation(path))
         }
         #[cfg(not(unix))]
@@ -212,10 +214,7 @@ fn read_user_data_dir(config_dir: &Path) -> Result<Option<PathBuf>> {
         .map(PathBuf::from))
 }
 
-fn resolve_user_data_dir_for_uninstall(
-    data_dir: &Path,
-    config_dir: &Path,
-) -> Result<PathBuf> {
+fn resolve_user_data_dir_for_uninstall(data_dir: &Path, config_dir: &Path) -> Result<PathBuf> {
     let user_data_dir = match read_user_data_dir(config_dir)? {
         Some(path) => canonicalize_uninstall_path(&path)?,
         None => data_dir.join("data"),
@@ -253,8 +252,7 @@ fn validate_user_data_dir_for_uninstall(data_dir: &Path, user_data_dir: &Path) -
 
 fn canonicalize_uninstall_path(path: &Path) -> Result<PathBuf> {
     if path.exists() {
-        fs::canonicalize(path)
-            .with_context(|| format!("Failed to canonicalize {}", path.display()))
+        fs::canonicalize(path).with_context(|| format!("Failed to canonicalize {}", path.display()))
     } else {
         std::path::absolute(path)
             .with_context(|| format!("Failed to resolve absolute path for {}", path.display()))
@@ -321,7 +319,7 @@ impl InstallLayout {
     }
 
     fn from_executable(provider: &DefaultProvider, exe: &Path) -> Result<Option<Self>> {
-        if !exe.file_name().is_some_and(|name| name == "tiles") {
+        if exe.file_name().is_none_or(|name| name != "tiles") {
             return Ok(None);
         }
 
@@ -396,7 +394,7 @@ fn remove_files_elevated(paths: &[&PathBuf]) -> Result<()> {
 
     #[cfg(unix)]
     {
-        return remove_files_elevated_unix(&existing);
+        remove_files_elevated_unix(&existing)
     }
 
     #[cfg(not(unix))]
@@ -416,7 +414,7 @@ fn remove_dirs_elevated(paths: &[PathBuf]) -> Result<()> {
 
     #[cfg(unix)]
     {
-        return remove_dirs_elevated_unix(&existing);
+        remove_dirs_elevated_unix(&existing)
     }
 
     #[cfg(not(unix))]
@@ -569,9 +567,7 @@ mod tests {
 
     use std::path::PathBuf;
 
-    use crate::utils::config::{
-        DefaultProvider, SYSTEM_LIB_DIR, is_tiles_lib_dir,
-    };
+    use crate::utils::config::{DefaultProvider, SYSTEM_LIB_DIR, is_tiles_lib_dir};
 
     use std::path::Path;
 
@@ -619,9 +615,15 @@ mod tests {
     #[test]
     fn requires_elevation_for_system_paths() {
         assert!(requires_elevation(Path::new("/usr/local/bin/tiles")));
-        assert!(requires_elevation(Path::new("/usr/local/share/tiles/server")));
-        assert!(!requires_elevation(Path::new("/home/user/.local/bin/tiles")));
-        assert!(!requires_elevation(Path::new("/home/user/.local/share/tiles/data")));
+        assert!(requires_elevation(Path::new(
+            "/usr/local/share/tiles/server"
+        )));
+        assert!(!requires_elevation(Path::new(
+            "/home/user/.local/bin/tiles"
+        )));
+        assert!(!requires_elevation(Path::new(
+            "/home/user/.local/share/tiles/data"
+        )));
     }
 
     #[test]
