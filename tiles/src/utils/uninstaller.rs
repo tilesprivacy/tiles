@@ -121,6 +121,9 @@ impl UninstallPlan {
             }
         }
 
+        remove_files_elevated(&elevated_files)?;
+        remove_dirs_elevated(&elevated_dirs)?;
+
         for file in user_files {
             remove_file_if_exists(file)?;
         }
@@ -132,9 +135,6 @@ impl UninstallPlan {
         for dir in user_dirs {
             remove_dir_if_exists(&dir)?;
         }
-
-        remove_files_elevated(&elevated_files)?;
-        remove_dirs_elevated(&elevated_dirs)?;
 
         Ok(())
     }
