@@ -50,28 +50,26 @@ impl UninstallPlan {
         let provider = DefaultProvider;
         let layout = InstallLayout::detect(&provider)?;
         let config_dir = provider.get_config_dir()?;
-        let data_dir = provider.get_data_dir()?;
-        let user_data_dir = match read_user_data_dir(&config_dir)? {
-            Some(path) => path,
-            None => data_dir.join("data"),
-        };
+        let data_dir = canonicalize_uninstall_path(&provider.get_data_dir()?)?;
+        let lib_dir = canonicalize_uninstall_path(&layout.lib_dir).unwrap_or(layout.lib_dir);
         let mut plan = Self::default();
 
         plan.remove_files.insert(layout.bin);
 
         if all {
+            let user_data_dir = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
             plan.remove_dirs.insert(config_dir);
             plan.remove_dirs.insert(data_dir);
             plan.remove_dirs.insert(user_data_dir);
-            plan.remove_dirs.insert(layout.lib_dir);
+            plan.remove_dirs.insert(lib_dir);
             return Ok(plan);
         }
 
         plan.clean_config_dir = Some(config_dir);
 
-        if layout.lib_dir != data_dir {
+        if lib_dir != data_dir {
             for component in LIB_COMPONENT_DIRS {
-                plan.remove_dirs.insert(layout.lib_dir.join(component));
+                plan.remove_dirs.insert(lib_dir.join(component));
             }
         }
 
@@ -212,6 +210,78 @@ fn read_user_data_dir(config_dir: &Path) -> Result<Option<PathBuf>> {
         .and_then(|path| path.as_str())
         .filter(|path| !path.is_empty())
         .map(PathBuf::from))
+}
+
+fn resolve_user_data_dir_for_uninstall(
+    data_dir: &Path,
+    config_dir: &Path,
+) -> Result<PathBuf> {
+    let user_data_dir = match read_user_data_dir(config_dir)? {
+        Some(path) => canonicalize_uninstall_path(&path)?,
+        None => data_dir.join("data"),
+    };
+    validate_user_data_dir_for_uninstall(data_dir, &user_data_dir)?;
+    Ok(user_data_dir)
+}
+
+fn validate_user_data_dir_for_uninstall(data_dir: &Path, user_data_dir: &Path) -> Result<()> {
+    if is_filesystem_root(user_data_dir) {
+        return Err(anyhow!(
+            "Refusing to delete unsafe data path {}",
+            user_data_dir.display()
+        ));
+    }
+
+    if is_strict_ancestor(user_data_dir, data_dir) {
+        return Err(anyhow!(
+            "Refusing to delete configured data path {} because it contains the Tiles data directory {}",
+            user_data_dir.display(),
+            data_dir.display()
+        ));
+    }
+
+    if !path_is_within(data_dir, user_data_dir) {
+        return Err(anyhow!(
+            "Refusing to delete configured data path {} because it is outside the Tiles data directory {}",
+            user_data_dir.display(),
+            data_dir.display()
+        ));
+    }
+
+    Ok(())
+}
+
+fn canonicalize_uninstall_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        fs::canonicalize(path)
+            .with_context(|| format!("Failed to canonicalize {}", path.display()))
+    } else {
+        std::path::absolute(path)
+            .with_context(|| format!("Failed to resolve absolute path for {}", path.display()))
+    }
+}
+
+fn is_filesystem_root(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| parent == path)
+}
+
+fn is_strict_ancestor(ancestor: &Path, path: &Path) -> bool {
+    if path == ancestor {
+        return false;
+    }
+
+    path.strip_prefix(ancestor)
+        .is_ok_and(|remainder| !remainder.as_os_str().is_empty())
+}
+
+fn path_is_within(base: &Path, candidate: &Path) -> bool {
+    if candidate == base {
+        return true;
+    }
+
+    candidate
+        .strip_prefix(base)
+        .is_ok_and(|remainder| !remainder.as_os_str().is_empty())
 }
 
 fn clean_config_dir(config_dir: &Path) -> Result<()> {
@@ -359,6 +429,60 @@ fn remove_dirs_elevated(paths: &[PathBuf]) -> Result<()> {
 }
 
 #[cfg(unix)]
+const TRUSTED_SUDO_PATHS: &[&str] = &["/usr/bin/sudo", "/bin/sudo"];
+
+#[cfg(unix)]
+fn new_trusted_sudo_command() -> Result<Command> {
+    Ok(Command::new(trusted_sudo_path()?))
+}
+
+#[cfg(unix)]
+fn trusted_sudo_path() -> Result<PathBuf> {
+    for path in TRUSTED_SUDO_PATHS {
+        let path = Path::new(path);
+        if is_trusted_sudo_binary(path)? {
+            return Ok(path.to_path_buf());
+        }
+    }
+
+    Err(anyhow!(
+        "Trusted sudo binary not found at {}",
+        TRUSTED_SUDO_PATHS.join(" or ")
+    ))
+}
+
+#[cfg(unix)]
+fn is_trusted_sudo_binary(path: &Path) -> Result<bool> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !path.is_absolute() || !path.exists() {
+        return Ok(false);
+    }
+
+    let canonical = fs::canonicalize(path)
+        .with_context(|| format!("Failed to resolve sudo path {}", path.display()))?;
+    if !TRUSTED_SUDO_PATHS
+        .iter()
+        .any(|trusted| canonical == Path::new(trusted))
+    {
+        return Ok(false);
+    }
+
+    let metadata = fs::metadata(&canonical)
+        .with_context(|| format!("Failed to read metadata for {}", canonical.display()))?;
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+
+    let mode = metadata.permissions().mode();
+    #[cfg(target_os = "linux")]
+    use std::os::linux::fs::MetadataExt;
+    #[cfg(all(unix, not(target_os = "linux")))]
+    use std::os::unix::fs::MetadataExt;
+    Ok(metadata.st_uid() == 0 && mode & 0o4000 != 0)
+}
+
+#[cfg(unix)]
 fn remove_files_elevated_unix(paths: &[&PathBuf]) -> Result<()> {
     if is_running_as_root() {
         for path in paths {
@@ -367,7 +491,7 @@ fn remove_files_elevated_unix(paths: &[&PathBuf]) -> Result<()> {
         return Ok(());
     }
 
-    let mut command = Command::new("sudo");
+    let mut command = new_trusted_sudo_command()?;
     command.arg("rm").arg("-f");
     for path in paths {
         command.arg(path);
@@ -384,7 +508,7 @@ fn remove_dirs_elevated_unix(paths: &[&PathBuf]) -> Result<()> {
         return Ok(());
     }
 
-    let mut command = Command::new("sudo");
+    let mut command = new_trusted_sudo_command()?;
     command.arg("rm").arg("-rf");
     for path in paths {
         command.arg(path);
@@ -451,7 +575,19 @@ mod tests {
 
     use std::path::Path;
 
-    use super::{InstallLayout, clean_config_dir, requires_elevation};
+    use super::{
+        InstallLayout, clean_config_dir, requires_elevation, resolve_user_data_dir_for_uninstall,
+        validate_user_data_dir_for_uninstall,
+    };
+
+    #[cfg(unix)]
+    #[test]
+    fn trusted_sudo_path_uses_absolute_location() -> Result<()> {
+        let sudo_path = super::trusted_sudo_path()?;
+        assert!(sudo_path.is_absolute());
+        assert!(super::is_trusted_sudo_binary(&sudo_path)?);
+        Ok(())
+    }
 
     #[test]
     fn install_layout_from_system_executable_path() -> Result<()> {
@@ -486,6 +622,62 @@ mod tests {
         assert!(requires_elevation(Path::new("/usr/local/share/tiles/server")));
         assert!(!requires_elevation(Path::new("/home/user/.local/bin/tiles")));
         assert!(!requires_elevation(Path::new("/home/user/.local/share/tiles/data")));
+    }
+
+    #[test]
+    fn validate_user_data_dir_rejects_unsafe_targets() -> Result<()> {
+        let root = tempdir()?;
+        fs::create_dir_all(root.path().join("tiles"))?;
+        let data_dir = fs::canonicalize(root.path().join("tiles"))?;
+        let safe_child = data_dir.join("data/memory");
+        fs::create_dir_all(&safe_child)?;
+
+        validate_user_data_dir_for_uninstall(&data_dir, &safe_child)?;
+
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside)?;
+        assert!(validate_user_data_dir_for_uninstall(&data_dir, &outside).is_err());
+
+        let ancestor = root.path();
+        assert!(validate_user_data_dir_for_uninstall(&data_dir, ancestor).is_err());
+
+        assert!(validate_user_data_dir_for_uninstall(&data_dir, Path::new("/")).is_err());
+
+        let prefix_trap = data_dir.with_file_name("tiles-evil");
+        fs::create_dir_all(&prefix_trap)?;
+        assert!(validate_user_data_dir_for_uninstall(&data_dir, &prefix_trap).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_user_data_dir_uses_default_child_when_unconfigured() -> Result<()> {
+        let root = tempdir()?;
+        fs::create_dir_all(root.path().join("tiles"))?;
+        let data_dir = fs::canonicalize(root.path().join("tiles"))?;
+        let config_dir = root.path().join("config");
+        fs::create_dir_all(&config_dir)?;
+
+        let resolved = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
+        assert_eq!(resolved, data_dir.join("data"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_user_data_dir_rejects_configured_path_outside_data_dir() -> Result<()> {
+        let root = tempdir()?;
+        fs::create_dir_all(root.path().join("tiles"))?;
+        let data_dir = fs::canonicalize(root.path().join("tiles"))?;
+        let config_dir = root.path().join("config");
+        fs::create_dir_all(&config_dir)?;
+        fs::create_dir_all(root.path().join("outside"))?;
+        let outside = fs::canonicalize(root.path().join("outside"))?;
+        fs::write(
+            config_dir.join("config.toml"),
+            format!("[data]\npath = \"{}\"\n", outside.display()),
+        )?;
+
+        assert!(resolve_user_data_dir_for_uninstall(&data_dir, &config_dir).is_err());
+        Ok(())
     }
 
     #[test]

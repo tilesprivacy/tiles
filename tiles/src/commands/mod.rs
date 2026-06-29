@@ -2,7 +2,7 @@
 
 use std::io;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use owo_colors::OwoColorize;
 use tiles::core::account::local::{
     RootUser, add_token, create_root_account, create_token, get_peer_list, get_root_user_details,
@@ -10,7 +10,7 @@ use tiles::core::account::local::{
 };
 use tiles::core::network::link;
 use tiles::core::storage::db::Dbconn;
-use tiles::daemon::stop_cmd;
+use tiles::daemon::{ping as ping_daemon, stop_cmd};
 use tiles::repl::{start_server_daemon, stop_server_daemon};
 use tiles::utils::config::{
     ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
@@ -262,8 +262,18 @@ pub async fn stop_server() {
 }
 
 pub async fn uninstall_tiles(all: bool) -> Result<()> {
-    let _ = stop_server_daemon().await;
-    let _ = stop_cmd().await;
+    if tiles::repl::ping().await.is_ok() {
+        return Err(anyhow!(
+            "Inference server is still running. Stop it with `tiles server stop` and try again."
+        ));
+    }
+
+    if ping_daemon(None).await.is_ok() {
+        stop_cmd()
+            .await
+            .context("Failed to stop Tiles daemon before uninstall")?;
+    }
+
     uninstaller::uninstall(all)
 }
 

@@ -107,9 +107,7 @@ enum Commands {
     #[command(flatten, next_help_heading = "Plugins")]
     Tools(ToolsCommandsGroup),
 
-    /// Uninstall Tiles from this machine
     Uninstall {
-        /// Remove all Tiles files, including config and local databases
         #[arg(long)]
         all: bool,
     },
