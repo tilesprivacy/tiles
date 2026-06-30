@@ -36,7 +36,6 @@ atrium-identity = "0.1.9"
 hickory-resolver = "0.26.0"
 atrium-common = "0.1.4"
 atrium-api = "0.25.8"
-libc = "0.2"
 ctrlc = "3.5.2"
 dialog-ucan = { git = "https://github.com/tilesprivacy/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-ucan"}
 dialog-credentials = { git = "https://github.com/tilesprivacy/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-credentials"}
@@ -50,7 +49,7 @@ iroh-mdns-address-lookup = "0.4.0"
 tempfile = "3"
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["user"] }
+nix = { version = "0.29", features = ["user", "process"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service-keyring-store = { version = "1.0.0", features = ["crypto-rust"] }

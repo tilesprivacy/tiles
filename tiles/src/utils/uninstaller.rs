@@ -22,7 +22,7 @@ struct InstallLayout {
 }
 
 pub fn uninstall(all: bool) -> Result<()> {
-    let plan = UninstallPlan::from_current_system(all)?;
+    let plan = UninstallPlanner::from_current_system(all)?;
 
     if plan.is_empty() {
         println!("No Tiles files found to uninstall.");
@@ -39,13 +39,13 @@ pub fn uninstall(all: bool) -> Result<()> {
 }
 
 #[derive(Debug, Default)]
-struct UninstallPlan {
+struct UninstallPlanner {
     remove_files: BTreeSet<PathBuf>,
     remove_dirs: BTreeSet<PathBuf>,
     clean_config_dir: Option<PathBuf>,
 }
 
-impl UninstallPlan {
+impl UninstallPlanner {
     fn from_current_system(all: bool) -> Result<Self> {
         let provider = DefaultProvider;
         let layout = InstallLayout::detect(&provider)?;
@@ -67,6 +67,7 @@ impl UninstallPlan {
 
         plan.clean_config_dir = Some(config_dir);
 
+        // in case of macos
         if lib_dir != data_dir {
             for component in LIB_COMPONENT_DIRS {
                 plan.remove_dirs.insert(lib_dir.join(component));
@@ -142,7 +143,7 @@ impl UninstallPlan {
     }
 }
 
-fn print_plan(plan: &UninstallPlan) {
+fn print_plan(plan: &UninstallPlanner) {
     println!("Tiles uninstall will remove:");
 
     for file in plan.remove_files.iter().filter(|path| path.exists()) {
@@ -339,6 +340,7 @@ impl InstallLayout {
             }));
         }
 
+        // The cases when libs are near to the executable, mostly in dev
         if let Some(exe_dir) = exe.parent()
             && is_tiles_lib_dir(exe_dir)
         {
@@ -473,10 +475,10 @@ fn is_trusted_sudo_binary(path: &Path) -> Result<bool> {
     }
 
     let mode = metadata.permissions().mode();
+    #[cfg(all(unix, not(target_os = "linux")))]
+    use std::os::darwin::fs::MetadataExt;
     #[cfg(target_os = "linux")]
     use std::os::linux::fs::MetadataExt;
-    #[cfg(all(unix, not(target_os = "linux")))]
-    use std::os::unix::fs::MetadataExt;
     Ok(metadata.st_uid() == 0 && mode & 0o4000 != 0)
 }
 

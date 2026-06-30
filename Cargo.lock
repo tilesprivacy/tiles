@@ -6079,7 +6079,6 @@ dependencies = [
  "iroh-mdns-address-lookup",
  "iroh-tickets",
  "keyring-core",
- "libc",
  "log",
  "nix 0.29.0",
  "owo-colors",

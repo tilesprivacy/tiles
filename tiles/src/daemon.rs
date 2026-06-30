@@ -17,6 +17,7 @@ use axum::{
 };
 use axum_macros::debug_handler;
 use log::info;
+use nix::unistd::setsid;
 use reqwest::Client;
 use semver::Version;
 use std::fs::OpenOptions;
@@ -107,10 +108,11 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log))
             .pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
+                if let Err(err) = setsid() {
+                    Err(Into::into(err))
+                } else {
+                    Ok(())
                 }
-                Ok(())
             })
             .spawn()
             .expect("Failed to start daemon")

@@ -13,6 +13,7 @@ use crate::utils::hf_model_downloader::*;
 use anyhow::{Context, Result, anyhow};
 use atrium_api::types::string::Datetime;
 use log::{info, warn};
+use nix::unistd::setsid;
 use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
 use rustyline::completion::Completer;
@@ -298,10 +299,11 @@ pub async fn start_server_daemon() -> Result<()> {
             .stdout(Stdio::from(stdout_log))
             .stderr(Stdio::from(stderr_log))
             .pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
+                if let Err(err) = setsid() {
+                    Err(Into::into(err))
+                } else {
+                    Ok(())
                 }
-                Ok(())
             })
             .spawn()
             .expect("failed to start server")
@@ -880,10 +882,11 @@ fn start_pi_rpc(model_name: &str, system_prompt: &str) -> Result<Child> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
+                if let Err(err) = setsid() {
+                    Err(Into::into(err))
+                } else {
+                    Ok(())
                 }
-                Ok(())
             })
             .spawn()
             .expect("failed to run Pi")
