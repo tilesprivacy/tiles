@@ -99,8 +99,12 @@ pub struct PiProviderModelConfig {
     pub max_tokens: Option<u32>,
 }
 const MODEL_SUB_PATH: &str = "models/huggingface/hub";
+pub const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
 pub const SYSTEM_BIN_PATH: &str = "/usr/local/bin/tiles";
 pub const SYSTEM_LIB_DIR: &str = "/usr/local/share/tiles";
+
+/// Bundled runtime directories under lib_dir removed on default uninstall.
+pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "models"];
 
 pub trait ConfigProvider {
     fn get_config_dir(&self) -> Result<PathBuf>;

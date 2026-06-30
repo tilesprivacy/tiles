@@ -9,11 +9,9 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 
 use crate::utils::config::{
-    ConfigProvider, DefaultProvider, SYSTEM_BIN_PATH, SYSTEM_LIB_DIR, is_tiles_lib_dir,
+    ConfigProvider, DefaultProvider, LIB_RUNTIME_DIRS_TO_REMOVE, SYSTEM_BIN_DIR, SYSTEM_BIN_PATH,
+    SYSTEM_LIB_DIR, is_tiles_lib_dir,
 };
-
-const LIB_COMPONENT_DIRS: &[&str] = &["server", "modelfiles", "pi", "models"];
-const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstallLayout {
@@ -24,14 +22,16 @@ struct InstallLayout {
 pub fn uninstall(all: bool) -> Result<()> {
     let plan = UninstallPlanner::from_current_system(all)?;
 
-    if plan.is_empty() {
+    if !plan.remove_files.iter().any(|path| path.exists())
+        && !plan.remove_dirs.iter().any(|path| path.exists())
+    {
         println!("No Tiles files found to uninstall.");
         return Ok(());
     }
 
-    print_plan(&plan);
     let needs_elevation = plan.needs_elevation();
-    confirm_uninstall(all, needs_elevation)?;
+    print_plan(&plan, needs_elevation);
+    confirm_uninstall(all)?;
     plan.apply()?;
 
     println!("Tiles uninstalled successfully.");
@@ -42,7 +42,6 @@ pub fn uninstall(all: bool) -> Result<()> {
 struct UninstallPlanner {
     remove_files: BTreeSet<PathBuf>,
     remove_dirs: BTreeSet<PathBuf>,
-    clean_config_dir: Option<PathBuf>,
 }
 
 impl UninstallPlanner {
@@ -65,25 +64,10 @@ impl UninstallPlanner {
             return Ok(plan);
         }
 
-        plan.clean_config_dir = Some(config_dir);
-
-        // in case of macos
-        if lib_dir != data_dir {
-            for component in LIB_COMPONENT_DIRS {
-                plan.remove_dirs.insert(lib_dir.join(component));
-            }
-        }
+        add_config_dir_entries_to_plan(&mut plan, &config_dir)?;
+        add_default_uninstall_cleanup_to_plan(&mut plan, &data_dir, &lib_dir, &config_dir)?;
 
         Ok(plan)
-    }
-
-    fn is_empty(&self) -> bool {
-        !self.remove_files.iter().any(|path| path.exists())
-            && !self.remove_dirs.iter().any(|path| path.exists())
-            && !self
-                .clean_config_dir
-                .as_ref()
-                .is_some_and(|path| path.exists())
     }
 
     fn needs_elevation(&self) -> bool {
@@ -116,8 +100,8 @@ impl UninstallPlanner {
 
         let mut user_dirs = Vec::new();
         let mut elevated_dirs = Vec::new();
-        for dir in sorted_child_first(&self.remove_dirs) {
-            if requires_elevation(&dir) {
+        for dir in &self.remove_dirs {
+            if requires_elevation(dir) {
                 elevated_dirs.push(dir);
             } else {
                 user_dirs.push(dir);
@@ -131,53 +115,38 @@ impl UninstallPlanner {
             remove_file_if_exists(file)?;
         }
 
-        if let Some(config_dir) = &self.clean_config_dir {
-            clean_config_dir(config_dir)?;
-        }
-
         for dir in user_dirs {
-            remove_dir_if_exists(&dir)?;
+            remove_dir_if_exists(dir)?;
         }
 
         Ok(())
     }
 }
 
-fn print_plan(plan: &UninstallPlanner) {
+fn print_plan(plan: &UninstallPlanner, needs_elevation: bool) {
     println!("Tiles uninstall will remove:");
 
     for file in plan.remove_files.iter().filter(|path| path.exists()) {
         println!("  {}", file.display());
     }
 
-    if let Some(config_dir) = &plan.clean_config_dir
-        && config_dir.exists()
-    {
-        println!("  {} (everything except config.toml)", config_dir.display());
-    }
-
     for dir in plan.remove_dirs.iter().filter(|path| path.exists()) {
         println!("  {}", dir.display());
     }
 
-    if plan.needs_elevation() {
+    if needs_elevation {
         println!();
         println!("Administrator privileges are required to remove system files under /usr/local.");
+        println!();
     }
 }
 
-fn confirm_uninstall(all: bool, needs_elevation: bool) -> Result<()> {
-    let prompt = match (all, needs_elevation) {
-        (true, true) => {
-            "This will remove all Tiles files, including config and databases. Administrator privileges are required to remove system files. Continue? [y/N] "
-        }
-        (true, false) => {
+fn confirm_uninstall(all: bool) -> Result<()> {
+    let prompt = match all {
+        true => {
             "This will remove all Tiles files, including config and databases. Continue? [y/N] "
         }
-        (false, true) => {
-            "This will remove Tiles but keep config.toml and your data folder. Administrator privileges are required to remove system files. Continue? [y/N] "
-        }
-        (false, false) => {
+        false => {
             "This will remove Tiles but keep config.toml and your data folder. Continue? [y/N] "
         }
     };
@@ -225,14 +194,21 @@ fn resolve_user_data_dir_for_uninstall(data_dir: &Path, config_dir: &Path) -> Re
 }
 
 fn validate_user_data_dir_for_uninstall(data_dir: &Path, user_data_dir: &Path) -> Result<()> {
-    if is_filesystem_root(user_data_dir) {
+    if user_data_dir
+        .parent()
+        .is_some_and(|parent| parent == user_data_dir)
+    {
         return Err(anyhow!(
             "Refusing to delete unsafe data path {}",
             user_data_dir.display()
         ));
     }
 
-    if is_strict_ancestor(user_data_dir, data_dir) {
+    if user_data_dir != data_dir
+        && data_dir
+            .strip_prefix(user_data_dir)
+            .is_ok_and(|remainder| !remainder.as_os_str().is_empty())
+    {
         return Err(anyhow!(
             "Refusing to delete configured data path {} because it contains the Tiles data directory {}",
             user_data_dir.display(),
@@ -240,7 +216,11 @@ fn validate_user_data_dir_for_uninstall(data_dir: &Path, user_data_dir: &Path) -
         ));
     }
 
-    if !path_is_within(data_dir, user_data_dir) {
+    let within_data_dir = user_data_dir == data_dir
+        || user_data_dir
+            .strip_prefix(data_dir)
+            .is_ok_and(|remainder| !remainder.as_os_str().is_empty());
+    if !within_data_dir {
         return Err(anyhow!(
             "Refusing to delete configured data path {} because it is outside the Tiles data directory {}",
             user_data_dir.display(),
@@ -251,39 +231,55 @@ fn validate_user_data_dir_for_uninstall(data_dir: &Path, user_data_dir: &Path) -
     Ok(())
 }
 
-fn canonicalize_uninstall_path(path: &Path) -> Result<PathBuf> {
-    if path.exists() {
-        fs::canonicalize(path).with_context(|| format!("Failed to canonicalize {}", path.display()))
-    } else {
-        std::path::absolute(path)
-            .with_context(|| format!("Failed to resolve absolute path for {}", path.display()))
-    }
-}
+/// Default uninstall keeps only `config.toml` and the configured user data directory.
+fn add_default_uninstall_cleanup_to_plan(
+    plan: &mut UninstallPlanner,
+    data_dir: &Path,
+    lib_dir: &Path,
+    config_dir: &Path,
+) -> Result<()> {
+    let user_data_dir = resolve_user_data_dir_for_uninstall(data_dir, config_dir)?;
 
-fn is_filesystem_root(path: &Path) -> bool {
-    path.parent().is_some_and(|parent| parent == path)
-}
-
-fn is_strict_ancestor(ancestor: &Path, path: &Path) -> bool {
-    if path == ancestor {
-        return false;
+    if lib_dir != data_dir {
+        for component in LIB_RUNTIME_DIRS_TO_REMOVE {
+            plan.remove_dirs.insert(lib_dir.join(component));
+        }
     }
 
-    path.strip_prefix(ancestor)
-        .is_ok_and(|remainder| !remainder.as_os_str().is_empty())
+    add_data_dir_entries_except_user_data(plan, data_dir, &user_data_dir)
 }
 
-fn path_is_within(base: &Path, candidate: &Path) -> bool {
-    if candidate == base {
-        return true;
+fn add_data_dir_entries_except_user_data(
+    plan: &mut UninstallPlanner,
+    data_dir: &Path,
+    user_data_dir: &Path,
+) -> Result<()> {
+    if !data_dir.exists() {
+        return Ok(());
     }
 
-    candidate
-        .strip_prefix(base)
-        .is_ok_and(|remainder| !remainder.as_os_str().is_empty())
+    for entry in fs::read_dir(data_dir)? {
+        let path = entry?.path();
+        if paths_equal_for_uninstall(&path, user_data_dir) {
+            continue;
+        }
+        if path.is_dir() {
+            plan.remove_dirs.insert(path);
+        } else {
+            plan.remove_files.insert(path);
+        }
+    }
+
+    Ok(())
 }
 
-fn clean_config_dir(config_dir: &Path) -> Result<()> {
+fn paths_equal_for_uninstall(a: &Path, b: &Path) -> bool {
+    let a = canonicalize_uninstall_path(a).unwrap_or_else(|_| a.to_path_buf());
+    let b = canonicalize_uninstall_path(b).unwrap_or_else(|_| b.to_path_buf());
+    a == b
+}
+
+fn add_config_dir_entries_to_plan(plan: &mut UninstallPlanner, config_dir: &Path) -> Result<()> {
     if !config_dir.exists() {
         return Ok(());
     }
@@ -294,10 +290,28 @@ fn clean_config_dir(config_dir: &Path) -> Result<()> {
         if path.file_name().is_some_and(|name| name == "config.toml") {
             continue;
         }
-        remove_path(&path)?;
+        if path.is_dir() {
+            plan.remove_dirs.insert(path);
+        } else {
+            plan.remove_files.insert(path);
+        }
     }
 
     Ok(())
+}
+
+/// Normalize a path for uninstall planning.
+///
+/// Uses `canonicalize` when the path exists so symlinked or relative paths compare
+/// reliably (e.g. `lib_dir != data_dir`). Falls back to `absolute` when the path is
+/// missing so planning still works on partial installs.
+fn canonicalize_uninstall_path(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        fs::canonicalize(path).with_context(|| format!("Failed to canonicalize {}", path.display()))
+    } else {
+        std::path::absolute(path)
+            .with_context(|| format!("Failed to resolve absolute path for {}", path.display()))
+    }
 }
 
 impl InstallLayout {
@@ -310,13 +324,25 @@ impl InstallLayout {
 
         let user_lib_dir = provider.get_data_dir()?;
         if is_tiles_lib_dir(&user_lib_dir) {
-            return Ok(Self {
-                bin: provider.get_user_bin_path()?,
-                lib_dir: user_lib_dir,
-            });
+            return Self::user_install_layout(provider, provider.get_user_bin_path()?);
         }
 
-        default_install_layout(provider)
+        #[cfg(target_os = "linux")]
+        if !is_running_as_root() {
+            return Self::user_install_layout(provider, provider.get_user_bin_path()?);
+        }
+
+        Ok(InstallLayout {
+            bin: PathBuf::from(SYSTEM_BIN_PATH),
+            lib_dir: PathBuf::from(SYSTEM_LIB_DIR),
+        })
+    }
+
+    fn user_install_layout(provider: &DefaultProvider, bin: PathBuf) -> Result<Self> {
+        Ok(Self {
+            bin,
+            lib_dir: provider.get_data_dir()?,
+        })
     }
 
     fn from_executable(provider: &DefaultProvider, exe: &Path) -> Result<Option<Self>> {
@@ -324,7 +350,7 @@ impl InstallLayout {
             return Ok(None);
         }
 
-        if exe.starts_with("/usr/local/bin") {
+        if exe.starts_with(SYSTEM_BIN_DIR) {
             return Ok(Some(Self {
                 bin: exe.to_path_buf(),
                 lib_dir: PathBuf::from(SYSTEM_LIB_DIR),
@@ -334,10 +360,10 @@ impl InstallLayout {
         if let Ok(user_bin_dir) = provider.get_user_bin_dir()
             && exe.starts_with(&user_bin_dir)
         {
-            return Ok(Some(Self {
-                bin: exe.to_path_buf(),
-                lib_dir: provider.get_data_dir()?,
-            }));
+            return Ok(Some(Self::user_install_layout(
+                provider,
+                exe.to_path_buf(),
+            )?));
         }
 
         // The cases when libs are near to the executable, mostly in dev
@@ -351,31 +377,6 @@ impl InstallLayout {
         }
 
         Ok(None)
-    }
-}
-
-fn default_install_layout(provider: &DefaultProvider) -> Result<InstallLayout> {
-    if uses_user_install_paths() {
-        Ok(InstallLayout {
-            bin: provider.get_user_bin_path()?,
-            lib_dir: provider.get_data_dir()?,
-        })
-    } else {
-        Ok(InstallLayout {
-            bin: PathBuf::from(SYSTEM_BIN_PATH),
-            lib_dir: PathBuf::from(SYSTEM_LIB_DIR),
-        })
-    }
-}
-
-fn uses_user_install_paths() -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        !is_running_as_root()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        false
     }
 }
 
@@ -408,8 +409,8 @@ fn remove_files_elevated(paths: &[&PathBuf]) -> Result<()> {
     }
 }
 
-fn remove_dirs_elevated(paths: &[PathBuf]) -> Result<()> {
-    let existing: Vec<&PathBuf> = paths.iter().filter(|path| path.exists()).collect();
+fn remove_dirs_elevated(paths: &[&PathBuf]) -> Result<()> {
+    let existing: Vec<&PathBuf> = paths.iter().copied().filter(|path| path.exists()).collect();
     if existing.is_empty() {
         return Ok(());
     }
@@ -530,20 +531,6 @@ fn run_elevated_command(command: &mut Command, action: &str) -> Result<()> {
     }
 }
 
-fn sorted_child_first(paths: &BTreeSet<PathBuf>) -> Vec<PathBuf> {
-    let mut paths = paths.iter().cloned().collect::<Vec<_>>();
-    paths.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    paths
-}
-
-fn remove_path(path: &Path) -> Result<()> {
-    if path.is_dir() {
-        remove_dir_if_exists(path)
-    } else {
-        remove_file_if_exists(path)
-    }
-}
-
 fn remove_file_if_exists(path: &Path) -> Result<()> {
     if !path.exists() {
         return Ok(());
@@ -574,8 +561,9 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        InstallLayout, clean_config_dir, requires_elevation, resolve_user_data_dir_for_uninstall,
-        validate_user_data_dir_for_uninstall,
+        InstallLayout, UninstallPlanner, add_config_dir_entries_to_plan,
+        add_data_dir_entries_except_user_data, remove_file_if_exists, requires_elevation,
+        resolve_user_data_dir_for_uninstall, validate_user_data_dir_for_uninstall,
     };
 
     #[cfg(unix)]
@@ -685,12 +673,39 @@ mod tests {
     }
 
     #[test]
-    fn clean_config_dir_preserves_config_toml() -> Result<()> {
+    fn data_dir_cleanup_preserves_only_user_data() -> Result<()> {
+        let root = tempdir()?;
+        let data_dir = root.path().join("tiles");
+        fs::create_dir_all(data_dir.join("data/memory"))?;
+        fs::create_dir_all(data_dir.join("server"))?;
+        fs::create_dir_all(data_dir.join("logs"))?;
+        fs::write(data_dir.join("logs/server.out.log"), "log")?;
+
+        let user_data_dir = data_dir.join("data");
+        let mut plan = UninstallPlanner::default();
+        add_data_dir_entries_except_user_data(&mut plan, &data_dir, &user_data_dir)?;
+
+        assert!(plan.remove_dirs.contains(&data_dir.join("server")));
+        assert!(plan.remove_dirs.contains(&data_dir.join("logs")));
+        assert!(!plan.remove_dirs.contains(&user_data_dir));
+        Ok(())
+    }
+
+    #[test]
+    fn plan_config_cleanup_preserves_config_toml() -> Result<()> {
         let dir = tempdir()?;
         fs::write(dir.path().join("config.toml"), "config")?;
         fs::write(dir.path().join("server.pid"), "123")?;
 
-        clean_config_dir(dir.path())?;
+        let mut plan = UninstallPlanner::default();
+        add_config_dir_entries_to_plan(&mut plan, dir.path())?;
+
+        assert!(plan.remove_files.contains(&dir.path().join("server.pid")));
+        assert!(!plan.remove_files.contains(&dir.path().join("config.toml")));
+
+        for file in &plan.remove_files {
+            remove_file_if_exists(file)?;
+        }
 
         assert!(dir.path().join("config.toml").exists());
         assert!(!dir.path().join("server.pid").exists());
