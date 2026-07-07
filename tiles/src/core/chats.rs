@@ -62,6 +62,7 @@ pub struct Session {
     pub name: String,
     pub created_at: u64,
     creator_id: String,
+    pub snapshot: Option<String>,
 }
 
 type Responder<T> = oneshot::Sender<T>;
@@ -348,14 +349,15 @@ pub fn create_session(conn: &Connection, id: &str, name: &str, user_id: &str) ->
     // log a warning if session already exists, and skip the conflict
 
     let mut stmt = conn.prepare(
-        "insert into sessions(id, name, creator_id, created_at) values (?1, ?2, ?3, ?4)",
+        "insert into sessions(id, name, creator_id, created_at, snapshot) values (?1, ?2, ?3, ?4, ?5)",
     )?;
 
     match stmt.execute(params![
         id.to_owned(),
         name.to_owned(),
         user_id.to_owned(),
-        get_unix_time_now() as f64
+        get_unix_time_now() as f64,
+        None::<String>
     ]) {
         Ok(_res) => {
             let sesh = fetch_session(conn, id)?;
@@ -374,7 +376,7 @@ pub fn create_session(conn: &Connection, id: &str, name: &str, user_id: &str) ->
 
 pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
     let sesh = conn.query_row(
-        "SELECT id, name, creator_id, created_at FROM sessions WHERE id = ?1",
+        "SELECT id, name, creator_id, created_at, snapshot FROM sessions WHERE id = ?1",
         [session_id],
         |row| {
             Ok(Session {
@@ -382,6 +384,7 @@ pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
                 name: row.get(1)?,
                 creator_id: row.get(2)?,
                 created_at: row.get::<usize, f64>(3)? as u64,
+                snapshot: row.get(4)?,
             })
         },
     )?;
@@ -389,7 +392,8 @@ pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
 }
 
 pub fn fetch_sessions(conn: &Connection) -> Result<Vec<Session>> {
-    let query = "select id, name, creator_id, created_at from sessions order by created_at desc";
+    let query =
+        "select id, name, creator_id, created_at, snapshot from sessions order by created_at desc";
 
     let mut stmt = conn.prepare(query)?;
     let session_rows = stmt.query_map([], |row| {
@@ -398,6 +402,7 @@ pub fn fetch_sessions(conn: &Connection) -> Result<Vec<Session>> {
             name: row.get(1)?,
             creator_id: row.get(2)?,
             created_at: row.get::<usize, f64>(3)? as u64,
+            snapshot: row.get(4)?,
         })
     })?;
 
@@ -445,6 +450,16 @@ pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<
     fetch_delta_chats(conn, query, params)
 }
 
+pub fn update_snapshot(conn: &Connection, id: &str, snapshot: String) -> Result<Session> {
+    let mut stmt = conn.prepare("update sessions set snapshot = ?1 where id = ?2")?;
+    match stmt.execute(params![snapshot, id.to_owned(),]) {
+        Ok(_res) => {
+            let sesh = fetch_session(conn, id)?;
+            Ok(sesh)
+        }
+        Err(err) => Err(anyhow!("Err updating session snapshot due to {}", err)),
+    }
+}
 #[cfg(test)]
 pub mod tests {
 
@@ -1294,7 +1309,8 @@ pub mod tests {
             id TEXT PRIMARY KEY,
             name TEXT NOT NULL,
             creator_id TEXT NOT NULL,
-            created_at INTEGER NOT NULL            
+            created_at INTEGER NOT NULL,
+            snapshot TEXT
         )",
             [],
         )

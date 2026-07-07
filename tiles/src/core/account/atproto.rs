@@ -32,8 +32,7 @@ use hickory_resolver::TokioResolver;
 use crate::{
     core::storage::db::Dbconn,
     daemon::start_internal_server,
-    repl::SharedSession,
-    utils::{crypto::encrypt_to_base64, get_unix_time_now},
+    utils::{crypto::encrypt_to_base64, get_unix_time_now, lexicons::SessionSnapshotRecord},
 };
 
 // TODO: Make this dynamic porting
@@ -330,7 +329,7 @@ pub fn fetch_logged_in_data(conn: &Connection) -> Result<Option<AtprotoAuthData>
 // TODO: Add tests for share session plss
 pub async fn share_session(
     conn: &Connection,
-    shared_session: SharedSession,
+    shared_session: &SessionSnapshotRecord,
     is_private: bool,
 ) -> Result<()> {
     if let Some(auth_data) = fetch_logged_in_data(conn)? {
@@ -378,7 +377,7 @@ pub async fn share_session(
             .repo
             .create_record(
                 atrium_api::com::atproto::repo::create_record::InputData {
-                    collection: "run.tiles.session"
+                    collection: "run.tiles.chat.sessionSnapshot"
                         .parse()
                         .map_err(|_e| anyhow!("Failed to parse to nsid"))?,
                     repo: did_struct.clone().into(),
@@ -395,7 +394,7 @@ pub async fn share_session(
 
         let base_encoded_at_url = data_encoding::BASE64.encode(url.as_bytes());
 
-        let shareable_base_url = format!("https://tiles.run/share/{}", base_encoded_at_url);
+        let shareable_base_url = format!("https://chat.tiles.run/share/{}", base_encoded_at_url);
 
         let shareable_url = if is_private {
             format!(

@@ -1,8 +1,8 @@
 use crate::core::account::atproto::{fetch_logged_in_data, login, share_session};
 use crate::core::account::local::get_current_user;
 use crate::core::chats::{
-    Session, create_session, fetch_chats_by_session_id, fetch_models_used_by_session,
-    fetch_session, fetch_sessions, save_chat,
+    Session, create_session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat,
+    update_snapshot,
 };
 use crate::core::storage::db::Dbconn;
 use crate::utils::config::{
@@ -11,8 +11,8 @@ use crate::utils::config::{
     update_llama_config,
 };
 use crate::utils::hf_model_downloader::*;
+use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Context, Result, anyhow};
-use atrium_api::types::string::Datetime;
 use log::{info, warn};
 use nix::unistd::setsid;
 use owo_colors::OwoColorize;
@@ -23,7 +23,7 @@ use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -170,22 +170,48 @@ struct PiTurnEndEventMsg {
     content: Vec<PiMsgContent>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct PiMsgEvent {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct PiMsgEvent {
     role: Role,
     content: Vec<PiMsgContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(rename = "stopReason")]
     stop_reason: Option<String>,
+    timestamp: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "toolName")]
+    tool_name: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct PiMsgContent {
     r#type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<String>,
-    arguments: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "map_to_option_string")]
+    pub arguments: Option<String>,
     // Tool name
+    #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
+}
+
+fn map_to_option_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt = Option::<Value>::deserialize(deserializer)?;
+
+    match opt {
+        Some(Value::String(s)) => Ok(Some(s)),
+        Some(Value::Object(map)) => serde_json::to_string(&map)
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+        Some(other) => Ok(Some(other.to_string())),
+        None => Ok(None),
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -453,6 +479,7 @@ struct ReplSession {
     pub last_chat_id: Option<String>,
     pub session_started: bool,
     pub reasoning: ReasoningEffort,
+    pub session_snapshot: SessionSnapshotRecord,
 }
 
 impl ReplSession {
@@ -465,6 +492,7 @@ impl ReplSession {
             last_chat_id: None,
             session_started: false,
             reasoning: state.thinking_level.parse().unwrap_or(ReasoningEffort::Low),
+            session_snapshot: SessionSnapshotRecord::new("", &state.session_id),
         }
     }
 
@@ -631,7 +659,7 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
         // Reads the user input
         let readline = editor.readline(">>> ");
         let input = match readline {
-            Ok(line) => line.trim().to_string().to_lowercase(),
+            Ok(line) => line.trim().to_string(),
             Err(_) => {
                 handle_repl_exit(pi_stdin).await?;
                 break;
@@ -643,7 +671,7 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
         }
 
         // Process the user input in the repl
-        match handle_input(&input) {
+        match handle_input(&input.to_lowercase()) {
             InputType::Skip => continue,
             InputType::Exit => {
                 handle_repl_exit(pi_stdin).await?;
@@ -666,6 +694,12 @@ async fn start_repl(modelfile: &Modelfile, _run_args: &RunArgs, db_conn: &Dbconn
             }
         }
 
+        // This is to prevent the session name being messeup if user starts
+        // with skills. Pi unfurls skills command to entire skill doc.So we
+        // cant put that as session name.
+        if !repl_session.session_started {
+            repl_session.session_snapshot.name = input.clone();
+        };
         // Reads the output from Pi and process and responds to the repl
         let mut reader = BufReader::new(&mut pi_stdout).lines();
 
@@ -1009,23 +1043,11 @@ async fn process_share_session(
         return Ok(());
     }
     let session = &delta_chats.sessions[0];
-
-    let mut shared_contents: Vec<SharedContent> = vec![];
-    for chat in delta_chats.chats {
-        shared_contents.push(SharedContent {
-            role: chat.role,
-            content: chat.content,
-        });
-    }
-
-    let models_used = fetch_models_used_by_session(&conn.chat, session_id)?;
-    let shared_sessions = SharedSession {
-        r#type: "run.tiles.session".to_string(),
-        session_id: session_id.to_string(),
-        name: session.name.clone(),
-        contents: shared_contents,
-        created_at: Datetime::now().as_str().to_string(),
-        models_used,
+    let shared_session: SessionSnapshotRecord = if let Some(snapshot_record) = &session.snapshot {
+        serde_json::from_str(snapshot_record)?
+    } else {
+        eprintln!("Older sessions are not supported");
+        return Ok(());
     };
 
     let share_choice_prompt = format!(
@@ -1041,7 +1063,7 @@ async fn process_share_session(
     let clean_input = input.trim();
     let is_private = clean_input.is_empty() || clean_input.to_lowercase() == "y";
 
-    match share_session(&conn.common, shared_sessions.clone(), is_private).await {
+    match share_session(&conn.common, &shared_session, is_private).await {
         Err(err) if &err.to_string() == "NOT_LOGGED_IN" => {
             let login_prompt = format!("{}", "Sharing a chat session requires logging in, as the data is stored on your ATmosphere PDS.\nDo you want to proceed with the login flow? (Y/n)".yellow());
 
@@ -1056,7 +1078,7 @@ async fn process_share_session(
                 println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
                 stdin.read_line(&mut input)?;
                 login(conn, input.trim()).await?;
-                share_session(&conn.common, shared_sessions, is_private).await?;
+                share_session(&conn.common, &shared_session, is_private).await?;
             }
         }
         Err(err) => {
@@ -1112,11 +1134,17 @@ fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession)
         println!("{}", chat.content);
     }
     let last_chat_id = delta_chats.chats.last().map(|chat| chat.id.clone());
-
+    let saved_session = delta_chats.sessions[0].clone();
     repl_session.session_id = session_id.to_string();
     repl_session.set_pending_resume_session(true);
     repl_session.set_resumed_session(chat_history);
     repl_session.last_chat_id = last_chat_id;
+    repl_session.session_started = true;
+    repl_session.session_snapshot = if let Some(snapshot_record) = saved_session.snapshot {
+        serde_json::from_str(&snapshot_record)?
+    } else {
+        SessionSnapshotRecord::new(&saved_session.name, &saved_session.id)
+    };
     Ok(())
 }
 
@@ -1398,7 +1426,16 @@ fn save_agent_session(
     current_user: &crate::core::account::local::User,
 ) -> Result<()> {
     let mut full_response: String = String::from("");
+    let mut turn = Turn {
+        api: Some(String::from("open-responses")),
+        provider: Some(String::from("tiles")),
+        model: repl_session.current_modelname.clone(),
+        messages: vec![],
+    };
+    //TODO: We need to these at the `message_end` event maybe, need to check
     for msg in agent_end_event.messages {
+        //TODO: could avoid this cloning here
+        let msg_copy = msg.clone();
         match msg.role {
             Role::User => {
                 let input = get_pi_msg_content(msg.content);
@@ -1406,7 +1443,7 @@ fn save_agent_session(
                     create_session(
                         &db_conn.chat,
                         &repl_session.session_id,
-                        &input,
+                        &repl_session.session_snapshot.name,
                         &current_user.user_id,
                     )?;
                     repl_session.session_started = true;
@@ -1429,8 +1466,9 @@ fn save_agent_session(
                 let response = get_pi_msg_content(msg.content);
                 full_response.push_str(&response);
             }
-            _ => continue,
+            _ => (),
         }
+        turn.messages.push(msg_copy);
     }
     let chat_response = ChatResponse {
         input: full_response,
@@ -1442,6 +1480,12 @@ fn save_agent_session(
     };
     let chat = save_chat(&db_conn.chat, current_user, chat_response)?;
     repl_session.last_chat_id = Some(chat.id);
+    repl_session.session_snapshot.turns.push(turn);
+    update_snapshot(
+        &db_conn.chat,
+        &repl_session.session_id,
+        serde_json::to_string(&repl_session.session_snapshot)?,
+    )?;
     Ok(())
 }
 
@@ -1457,8 +1501,7 @@ fn get_pi_msg_content(msgs: Vec<PiMsgContent>) -> String {
         {
             content.push("\n**[ToolCall]**\n".to_string());
             content.push(format!("Tool: {}", msg.name.unwrap_or("None".to_string())));
-            let arguments = serde_json::to_string(&args).unwrap_or("{}".to_string());
-            content.push(format!("Arguments: {}", arguments));
+            content.push(format!("Arguments: {}", &args));
         }
     }
     content.join("\n")
@@ -1608,6 +1651,8 @@ mod tests {
                         name: None
                     }],
                     stop_reason: None,
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
                 PiMsgEvent {
                     role: Role::Assistant,
@@ -1636,6 +1681,8 @@ mod tests {
                     },
                  ],
                  stop_reason: None,
+                 timestamp: 1783321582953,
+                 tool_name: None
                 },
                 PiMsgEvent {
                     role: Role::ToolResult,
@@ -1647,6 +1694,8 @@ mod tests {
                         name: None
                     }],
                     stop_reason: None,
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
                 PiMsgEvent {
                     role: Role::Assistant,
@@ -1658,6 +1707,8 @@ mod tests {
                         name: None
                     }],
                     stop_reason: Some("stop".to_string()),
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
             ],
         };
@@ -1710,6 +1761,8 @@ mod tests {
                         name: None
                     }],
                     stop_reason: None,
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
                 PiMsgEvent {
                     role: Role::Assistant,
@@ -1726,7 +1779,7 @@ mod tests {
                         r#type: String::from("toolCall"),
                         text: None,
                         thinking: None,
-                        arguments: Some(json!({"command": "bash"})),
+                        arguments: Some(serde_json::to_string(&json!({"command": "bash"})).unwrap()),
                         name: Some(String::from("bash"))
                      },
                     PiMsgContent {
@@ -1738,6 +1791,8 @@ mod tests {
                     },
                  ],
                  stop_reason: None,
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
                 PiMsgEvent {
                     role: Role::ToolResult,
@@ -1745,10 +1800,12 @@ mod tests {
                         r#type: String::from("text"),
                         text: None,
                         thinking: None,
-                        arguments: Some(json!({"command": "bash"})),
+                        arguments: Some(serde_json::to_string(&json!({"command": "bash"})).unwrap()),
                         name: Some(String::from("bash"))
                     }],
                     stop_reason: None,
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
                 PiMsgEvent {
                     role: Role::Assistant,
@@ -1760,6 +1817,8 @@ mod tests {
                         name: None
                     }],
                     stop_reason: Some("stop".to_string()),
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
             ],
         };
@@ -1807,6 +1866,8 @@ mod tests {
                         name: None
                     }],
                     stop_reason: None,
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
                 PiMsgEvent {
                     role: Role::Assistant,
@@ -1818,6 +1879,8 @@ mod tests {
                         name: None
                     }],
                     stop_reason: Some("stop".to_string()),
+                    timestamp: 1783321582953,
+                    tool_name: None
                 },
             ],
         };
@@ -1847,7 +1910,8 @@ mod tests {
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 creator_id TEXT NOT NULL,
-                created_at INTEGER NOT NULL
+                created_at INTEGER NOT NULL,
+                snapshot TEXT
             )",
             [],
         )

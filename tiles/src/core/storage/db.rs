@@ -107,6 +107,7 @@ const CHATS_MIGRATION_ARRAY: &[M] = &[
     ),
     M::up("CREATE INDEX idx_chats_session_id ON chats(session_id);"),
     M::up("ALTER TABLE CHATS ADD COLUMN model_name TEXT;"),
+    M::up("ALTER TABLE sessions ADD COLUMN snapshot TEXT;"),
 ];
 
 const CHATS_MIGRATIONS: Migrations = Migrations::from_slice(CHATS_MIGRATION_ARRAY);

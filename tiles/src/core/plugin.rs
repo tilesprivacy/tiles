@@ -84,7 +84,7 @@ fn install_from_local_source(local_path: PathBuf) -> Result<String> {
         std::fs::create_dir_all(&tmp_path)
             .context("Failed to create temporary plugins directory")?;
 
-        let output = if local_path.ends_with(".zip") {
+        let output = if local_path.extension().is_some_and(|ext| ext == "zip") {
             Command::new("unzip")
                 .arg(&local_path)
                 .arg("-d")
