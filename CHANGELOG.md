@@ -5,6 +5,19 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.15] - 2026-07-07
+
+### Added
+
+- Added `tiles uninstall` command to uninstall tiles from the system [#173](https://github.com/tilesprivacy/tiles/pull/173)
+  - By default it will keep the user data folder and config.toml. If pass `-all` will do a complete cleanup.
+
+- Added ATproto lexicon support for the shared sessions. The lexicon for that can be found [here](https://lexicon.garden/lexicon/did:plc:mqmcsjuerbjhu65mpmvkcuw2/run.tiles.chat.sessionSnapshot) [#175](https://github.com/tilesprivacy/tiles/pull/175)
+
+### Fixed
+- Optimizations in ToolCalling by adding timeouts and removing non-recursive syscalls + preventing 422 errors in /v1/responses api [#174](https://github.com/tilesprivacy/tiles/pull/174).
+- Set Pi's compaction setting to false by default to prevent it interfering with prompt/response cycle [#174](https://github.com/tilesprivacy/tiles/pull/174).
+
 ## [0.4.14] - 2026-06-28
 
 ### Added
