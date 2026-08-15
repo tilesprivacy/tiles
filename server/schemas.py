@@ -182,7 +182,7 @@ class CFunctionCallOutputItemParam(BaseModel):
 
 
 class ResponsesRequest(BaseModel):
-    model: str = "mlx-community/gpt-oss-20b-MXFP4-Q4"
+    model: str = "unsloth/gemma-4-12b-it-GGUF"
     input: (
         str
         | list[

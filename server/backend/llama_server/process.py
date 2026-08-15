@@ -109,24 +109,29 @@ def build_llama_server_command(gguf_path: Path, llama_config: dict[str, Any]) ->
     if no_mmap is True:
         cmd.append("--no-mmap")
 
-    if llama_config.get("mtp") is True:
-        mtp_path = find_mtp_gguf_file(gguf_path)
-        if mtp_path is None:
-            logger.warning(
-                "MTP enabled but no MTP GGUF found next to %s. "
-                "Re-run model download or set mtp = false in config.",
-                gguf_path,
-            )
-        else:
-            cmd.extend(
-                [
-                    "--spec-type",
-                    "draft-mtp",
-                    "--spec-draft-model",
-                    str(mtp_path),
-                ]
-            )
-            logger.info("MTP speculative decoding enabled with %s", mtp_path)
+    # MTP speculative decoding: auto-enabled when the model ships an MTP
+    # head, unless explicitly disabled. An explicit `mtp = true` with no
+    # file on disk warns and runs without it.
+    mtp_config = llama_config.get("mtp")
+    mtp_path = find_mtp_gguf_file(gguf_path)
+    if mtp_config is False:
+        pass
+    elif mtp_path is not None:
+        cmd.extend(
+            [
+                "--spec-type",
+                "draft-mtp",
+                "--spec-draft-model",
+                str(mtp_path),
+            ]
+        )
+        logger.info("MTP speculative decoding enabled with %s", mtp_path)
+    elif mtp_config is True:
+        logger.warning(
+            "MTP enabled but no MTP GGUF found next to %s. "
+            "Re-run model download or set mtp = false in config.",
+            gguf_path,
+        )
 
     return cmd
 

@@ -28,8 +28,9 @@ def test_is_server_ready_requires_health_ok():
         assert is_server_ready() is True
 
 
-def test_build_llama_server_command_omits_unset_flags():
-    gguf = Path("/tmp/model.gguf")
+def test_build_llama_server_command_omits_unset_flags(tmp_path: Path):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
 
     with patch(
         "server.backend.llama_server.process.resolve_llama_server_binary",
@@ -49,8 +50,9 @@ def test_build_llama_server_command_omits_unset_flags():
     ]
 
 
-def test_build_llama_server_command_includes_optional_flags():
-    gguf = Path("/tmp/model.gguf")
+def test_build_llama_server_command_includes_optional_flags(tmp_path: Path):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
     config = {
         "context_length": 32768,
         "gpu_layers": 12,
@@ -77,6 +79,69 @@ def test_build_llama_server_command_includes_optional_flags():
     assert "--flash-attn" in cmd and "on" in cmd
     assert "--no-mmap" in cmd
     assert "--jinja" in cmd
+    assert "--spec-type" not in cmd
+
+
+def test_mtp_auto_enables_when_head_present(tmp_path: Path):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+    (tmp_path / "mtp-gemma-4-12b-it.gguf").write_bytes(b"x")
+
+    with patch(
+        "server.backend.llama_server.process.resolve_llama_server_binary",
+        return_value="/usr/bin/llama-server",
+    ):
+        cmd = build_llama_server_command(gguf, {})
+
+    assert "--spec-type" in cmd and "draft-mtp" in cmd
+    draft_idx = cmd.index("--spec-draft-model")
+    assert cmd[draft_idx + 1] == str(tmp_path / "mtp-gemma-4-12b-it.gguf")
+
+
+def test_mtp_stays_off_without_head(tmp_path: Path):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+
+    with patch(
+        "server.backend.llama_server.process.resolve_llama_server_binary",
+        return_value="/usr/bin/llama-server",
+    ):
+        cmd = build_llama_server_command(gguf, {})
+
+    assert "--spec-type" not in cmd
+    assert "--spec-draft-model" not in cmd
+
+
+def test_mtp_explicit_true_without_head_warns(tmp_path: Path):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+
+    with (
+        patch(
+            "server.backend.llama_server.process.resolve_llama_server_binary",
+            return_value="/usr/bin/llama-server",
+        ),
+        patch("server.backend.llama_server.process.logger") as logger,
+    ):
+        cmd = build_llama_server_command(gguf, {"mtp": True})
+
+    assert "--spec-type" not in cmd
+    assert logger.warning.called
+
+
+def test_mtp_explicit_false_overrides_head(tmp_path: Path):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+    (tmp_path / "mtp-gemma-4-12b-it.gguf").write_bytes(b"x")
+
+    with patch(
+        "server.backend.llama_server.process.resolve_llama_server_binary",
+        return_value="/usr/bin/llama-server",
+    ):
+        cmd = build_llama_server_command(gguf, {"mtp": False})
+
+    assert "--spec-type" not in cmd
+    assert "--spec-draft-model" not in cmd
 
 
 def test_ensure_running_reuses_running_server(tmp_path: Path):

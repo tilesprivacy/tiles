@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::{
     core::agent::pi::{self},
     daemon::{ApiResponse, AppError, AppState},
-    repl::get_default_modelfile,
+    repl::{get_default_modelfile, model_spec},
     utils::config::PY_PORT,
 };
 
@@ -22,14 +22,11 @@ pub fn agent_router() -> Router<Arc<AppState>> {
 
 async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let modelfile_path =
-        get_default_modelfile(false).map_err(|e| AppError::ModelFileNotFound(e.to_string()))?;
+        get_default_modelfile().map_err(|e| AppError::ModelFileNotFound(e.to_string()))?;
     let default_modelfile = tilekit::modelfile::parse_from_file(&modelfile_path.to_string_lossy())
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    let modelname = default_modelfile
-        .from
-        .clone()
-        .expect("failed to take modelfile from Option");
+    let modelname = model_spec(&default_modelfile);
 
     let system_prompt = default_modelfile.system.clone().unwrap_or("".to_owned());
 

@@ -418,10 +418,13 @@ fn save_root_config(config: &RootConfig) -> Result<()> {
     fs::remove_file(tmp_path)?;
     Ok(())
 }
-/// Get the apt path where the model in the system
+/// Get the apt path where the model in the system.
+/// `model_name` may carry a `:quant` tag (e.g. `unsloth/gemma-4-12b-it-GGUF:Q8_0`),
+/// which is stripped before resolving the HF cache dir.
 pub fn get_model_cache(model_name: &str) -> Result<PathBuf> {
-    let hf_model_dir = if model_name.contains("/") {
-        let model_spec_parts = model_name.split("/").collect::<Vec<&str>>();
+    let (repo, _quant) = tilekit::modelfile::split_model_spec(model_name);
+    let hf_model_dir = if repo.contains("/") {
+        let model_spec_parts = repo.split("/").collect::<Vec<&str>>();
         format!("models--{}--{}", model_spec_parts[0], model_spec_parts[1])
     } else {
         return Err(anyhow!("Modelfile not found"));

@@ -200,9 +200,6 @@ struct RunFlags {
     #[arg(short = 'r', long, default_value_t = 10, hide = true)]
     relay_count: u32,
 
-    /// Switches the mode to memory, used for interacting with memory models.
-    #[arg(short = 'm', long, hide = true)]
-    memory: bool,
     // Future flags go here:
     // #[arg(long, default_value_t = 6969)]
     // port: u16,
@@ -432,7 +429,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             let run_args = RunArgs {
                 modelfile_path: None,
                 relay_count: cli.flags.relay_count,
-                memory: cli.flags.memory,
                 llama_config: llama_config_from_flags(&cli.flags),
                 remote: cli.flags.remote,
             };
@@ -464,7 +460,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             let run_args = RunArgs {
                 modelfile_path,
                 relay_count: flags.relay_count,
-                memory: flags.memory,
                 llama_config: llama_config_from_flags(&flags),
                 remote: flags.remote,
             };

@@ -64,6 +64,17 @@ codesign --force \
   --strict \
   "${PKG_LIBS_PATH}/pi/pi"
 
+echo "Signing Pi native modules..."
+
+find "${PKG_LIBS_PATH}/pi" -name '*.node' -type f | while read -r node_bin; do
+  codesign --force \
+    --sign "$DEVELOPER_ID_APPLICATION" \
+    --options runtime \
+    --timestamp \
+    --strict \
+    "$node_bin"
+done
+
   
 # Build venvstack and move to /usr/local/share/tiles
 # 

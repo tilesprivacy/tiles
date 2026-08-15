@@ -26,8 +26,6 @@ TARBALL="pi-${PLATFORM}.tar.gz"
 
 TAR_URL="https://github.com/badlogic/pi-mono/releases/download/${VERSION}/${TARBALL}"
 
-# TAR_URL="https://github.com/tilesprivacy/tiles-pi/releases/download/${VERSION}/${TARBALL}"
-
 echo "Downloading Pi ${VERSION} for ${PLATFORM}..."
 curl -fL -o "$TARBALL" "$TAR_URL"
 

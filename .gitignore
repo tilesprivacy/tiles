@@ -7,6 +7,8 @@ tilekit/target
 tiles/target
 .DS_Store
 pkgroot/
+pkgroot_gguf/
+downloads/
 *.pkg
 models/
 pkgroot_models/

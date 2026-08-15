@@ -71,7 +71,6 @@ impl BenchmarkMetrics {
 pub struct RunArgs {
     pub modelfile_path: Option<String>,
     pub relay_count: u32,
-    pub memory: bool,
     pub llama_config: Option<LlamaConfig>,
     pub remote: Option<String>,
 }
@@ -121,13 +120,13 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
                 return Ok(());
             }
         };
-        let default_modelfile = get_default_modelfile(run_args.memory)
+        let default_modelfile = get_default_modelfile()
             .ok()
             .and_then(|path| tilekit::modelfile::parse_from_file(path.to_str()?).ok())
             .unwrap_or_else(|| modelfile.clone());
         (modelfile, default_modelfile)
     } else {
-        let default_modelfile_path = get_default_modelfile(run_args.memory)?;
+        let default_modelfile_path = get_default_modelfile()?;
         let default_modelfile = match tilekit::modelfile::parse_from_file(
             default_modelfile_path
                 .to_str()
@@ -440,10 +439,7 @@ async fn run_model_with_server(
 
 #[allow(unused_assignments)]
 async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn) -> Result<()> {
-    let modelname = modelfile
-        .from
-        .clone()
-        .ok_or_else(|| anyhow!("Error getting FROM from modelfile due to"))?;
+    let modelname = model_spec(modelfile);
 
     update_current_model(&modelname).context("Failed to update current model in config.toml")?;
     let system_prompt = modelfile.system.clone().unwrap_or("".to_owned());
@@ -603,6 +599,47 @@ pub async fn ping() -> Result<()> {
     }
 }
 
+/// Full `repo:quant` spec used as the model identity across config, Pi and the py server
+pub fn model_spec(modelfile: &Modelfile) -> String {
+    match &modelfile.quant {
+        Some(quant) => format!("{}:{}", modelfile.from.clone().expect("no FROM"), quant),
+        None => modelfile.from.clone().expect("no FROM"),
+    }
+}
+
+fn resolve_gguf_path(model_cache_path: &PathBuf, quant: Option<&str>) -> Result<PathBuf> {
+    let Some(quant) = quant else {
+        return Ok(model_cache_path.clone());
+    };
+    let suffix = format!("{}.gguf", quant.to_lowercase());
+    let matches: Vec<PathBuf> = fs::read_dir(model_cache_path)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().is_some_and(|ext| ext == "gguf")
+                && p.file_name().is_some_and(|n| {
+                    let name = n.to_string_lossy().to_lowercase();
+                    name.ends_with(&suffix) && !name.contains("mmproj") && !name.contains("mtp")
+                })
+        })
+        .collect();
+    match matches.len() {
+        0 => Err(anyhow!(
+            "No gguf matching quant '{}' found in {}",
+            quant,
+            model_cache_path.display()
+        )),
+        1 => Ok(matches[0].clone()),
+        _ => Err(anyhow!(
+            "Multiple gguf files matching quant '{}' in {}: {:?}",
+            quant,
+            model_cache_path.display(),
+            matches
+        )),
+    }
+}
+
 async fn load_model(
     modelfile: &Modelfile,
     default_modelfile: &Modelfile,
@@ -616,26 +653,24 @@ async fn load_model(
         ));
     }
     let model_name = modelfile.from.clone().unwrap();
+    let quant = modelfile.quant.as_deref();
     let model_cache_res = get_model_cache(&model_name);
 
     if model_cache_res.is_err() {
-        download_model(&model_name).await?;
+        download_model(&model_name, quant).await?;
         return Box::pin(load_model(modelfile, default_modelfile, memory_path, 0)).await;
     }
 
     // If loading fails it most probably a partial downloaded
     // model present, so we try to resume the download
-    if load_model_in_py(
-        modelfile,
-        default_modelfile,
-        memory_path,
-        &model_cache_res.unwrap(),
-    )
-    .await
-    .is_err()
+    let model_cache_path = model_cache_res.unwrap();
+    let gguf_path = resolve_gguf_path(&model_cache_path, quant)?;
+    if load_model_in_py(modelfile, default_modelfile, memory_path, &gguf_path)
+        .await
+        .is_err()
     {
         log::warn!("Load model failed, resuming the partial download");
-        download_model(&model_name).await?;
+        download_model(&model_name, quant).await?;
         Box::pin(load_model(
             modelfile,
             default_modelfile,
@@ -662,17 +697,11 @@ async fn wait_until_server_is_up() {
     }
 }
 
-//TODO: maybe move to config.rs, as it is used in daemon
-pub fn get_default_modelfile(memory_mode: bool) -> Result<PathBuf> {
-    if memory_mode {
-        let path = DefaultProvider.get_lib_dir()?.join("modelfiles/mem-agent");
-        Ok(path)
-    } else {
-        let path = DefaultProvider
-            .get_lib_dir()?
-            .join("modelfiles/gpt-oss-gguf");
-        Ok(path)
-    }
+pub fn get_default_modelfile() -> Result<PathBuf> {
+    let path = DefaultProvider
+        .get_lib_dir()?
+        .join("modelfiles/gemma-4-12b-gguf");
+    Ok(path)
 }
 
 async fn load_model_in_py(
@@ -682,10 +711,7 @@ async fn load_model_in_py(
     model_cache_path: &PathBuf,
 ) -> Result<()> {
     let client = Client::new();
-    let model_name = modelfile
-        .from
-        .clone()
-        .expect("Failed to get `FROM` of modelfile");
+    let model_name = model_spec(modelfile);
     let body = json!({
         "model": model_name,
         "memory_path": memory_path,
@@ -706,8 +732,8 @@ async fn load_model_in_py(
     }
 }
 
-async fn download_model(model_name: &str) -> Result<()> {
-    match pull_model(model_name).await {
+async fn download_model(model_name: &str, quant: Option<&str>) -> Result<()> {
+    match pull_model(model_name, quant).await {
         Ok(_) => {
             println!("\nDownloading completed \n");
             Ok(())
@@ -1345,8 +1371,8 @@ mod tests {
 
     #[test]
     fn default_modelfile_uses_platform_default() {
-        let path = get_default_modelfile(false).expect("default modelfile should resolve");
-        assert!(path.ends_with("modelfiles/gpt-oss-gguf"));
+        let path = get_default_modelfile().expect("default modelfile should resolve");
+        assert!(path.ends_with("modelfiles/gemma-4-12b-gguf"));
     }
 
     #[test]

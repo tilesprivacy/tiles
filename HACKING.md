@@ -68,7 +68,7 @@ This guide will help you set up a reproducible development environment for Tiles
    ./scripts/setup_dev_layout.sh
    ```
 
-   The default model (`unsloth/gpt-oss-20b-GGUF`) is downloaded automatically on the first `cargo run`.
+   The default model (`unsloth/gemma-4-12b-it-GGUF`, Q4_K_M) is downloaded automatically on the first `cargo run`. A different quantization can be selected in the modelfile with `FROM unsloth/gemma-4-12b-it-GGUF:Q8_0` (ollama-style tag). MTP speculative decoding auto-enables when the model ships an MTP head (`mtp-*.gguf` next to the main model); disable with `[llama] mtp = false` in config.toml.
 
 ### Embedding Pi
 

@@ -127,6 +127,8 @@ impl Parameter {
 #[derive(Debug, Clone)]
 pub struct Modelfile {
     pub from: Option<String>,
+    /// Quantization tag from `FROM repo:QUANT` (e.g. Q8_0), if any
+    pub quant: Option<String>,
     pub parameters: Vec<Parameter>,
     pub template: Option<String>,
     pub adapter: Option<String>,
@@ -137,10 +139,22 @@ pub struct Modelfile {
     pub errors: Vec<String>,
 }
 
+/// Split a `FROM` value into (repo, quant).
+/// `unsloth/gemma-4-12b-it-GGUF:Q8_0` -> ("unsloth/gemma-4-12b-it-GGUF", Some("Q8_0"))
+/// `unsloth/gemma-4-12b-it-GGUF` -> ("unsloth/gemma-4-12b-it-GGUF", None)
+/// HF repo names cannot contain ':', so the last ':' is always the tag separator.
+pub fn split_model_spec(spec: &str) -> (&str, Option<&str>) {
+    match spec.rsplit_once(':') {
+        Some((repo, quant)) if !repo.is_empty() && !quant.is_empty() => (repo, Some(quant)),
+        _ => (spec, None),
+    }
+}
+
 impl Modelfile {
     pub fn new() -> Self {
         Self {
             from: None,
+            quant: None,
             data: vec![],
             parameters: vec![],
             template: None,
@@ -158,7 +172,9 @@ impl Modelfile {
             self.errors.push(error.clone());
             Err(error)
         } else {
-            self.from = Some(value.to_owned());
+            let (repo, quant) = split_model_spec(value.trim());
+            self.from = Some(repo.to_owned());
+            self.quant = quant.map(|q| q.to_owned());
             self.data.push(format!("FROM {}", value));
             Ok(())
         }
@@ -555,7 +571,8 @@ mod tests {
     #[test]
     fn test_parse_modelfile_from_file() {
         let modelfile = parse_from_file("fixtures/a.modelfile").unwrap();
-        assert_eq!(modelfile.from, Some("llama3.2:latest".to_owned()))
+        assert_eq!(modelfile.from, Some("llama3.2".to_owned()));
+        assert_eq!(modelfile.quant, Some("latest".to_owned()));
     }
 
     #[test]
@@ -594,6 +611,64 @@ mod tests {
         ";
         let modelfile = parse(modelfile_content)?;
         assert_eq!(modelfile.from.unwrap(), String::from("llama3.2"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_from_with_quant_tag() {
+        let modelfile = parse("FROM unsloth/gemma-4-12b-it-GGUF:Q8_0").unwrap();
+        assert_eq!(
+            modelfile.from.unwrap(),
+            "unsloth/gemma-4-12b-it-GGUF".to_owned()
+        );
+        assert_eq!(modelfile.quant.unwrap(), "Q8_0".to_owned());
+    }
+
+    #[test]
+    fn test_from_without_quant_tag() {
+        let modelfile = parse("FROM unsloth/gemma-4-12b-it-GGUF").unwrap();
+        assert_eq!(
+            modelfile.from.unwrap(),
+            "unsloth/gemma-4-12b-it-GGUF".to_owned()
+        );
+        assert_eq!(modelfile.quant, None);
+    }
+
+    #[test]
+    fn test_from_with_empty_quant_tag() {
+        // trailing ':' is not treated as a quant tag
+        let modelfile = parse("FROM unsloth/gemma-4-12b-it-GGUF:").unwrap();
+        assert_eq!(
+            modelfile.from.unwrap(),
+            "unsloth/gemma-4-12b-it-GGUF:".to_owned()
+        );
+        assert_eq!(modelfile.quant, None);
+    }
+
+    #[test]
+    fn test_split_model_spec() {
+        assert_eq!(
+            split_model_spec("unsloth/gemma-4-12b-it-GGUF:Q8_0"),
+            ("unsloth/gemma-4-12b-it-GGUF", Some("Q8_0"))
+        );
+        assert_eq!(
+            split_model_spec("unsloth/gemma-4-12b-it-GGUF"),
+            ("unsloth/gemma-4-12b-it-GGUF", None)
+        );
+        assert_eq!(split_model_spec(":Q8_0"), (":Q8_0", None));
+        assert_eq!(split_model_spec("repo:"), ("repo:", None));
+    }
+
+    #[test]
+    fn test_modelfile_builder_with_quant() -> Result<(), Box<dyn Error>> {
+        let mut modelfile = Modelfile::new();
+        modelfile.add_from("unsloth/gemma-4-12b-it-GGUF:Q8_0")?;
+        assert!(modelfile.build().is_ok());
+        assert_eq!(
+            modelfile.from.as_deref(),
+            Some("unsloth/gemma-4-12b-it-GGUF")
+        );
+        assert_eq!(modelfile.quant.as_deref(), Some("Q8_0"));
         Ok(())
     }
 }
