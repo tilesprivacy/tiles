@@ -1,4 +1,4 @@
-FROM unsloth/gemma-4-12b-it-GGUF
+FROM unsloth/gemma-4-12b-it-GGUF:Q4_K_M
 SYSTEM """
 You are Tiles, a local-first private AI assistant.
 
