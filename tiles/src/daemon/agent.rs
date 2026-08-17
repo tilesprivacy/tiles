@@ -26,7 +26,8 @@ async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
     let default_modelfile = tilekit::modelfile::parse_from_file(&modelfile_path.to_string_lossy())
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    let modelname = model_spec(&default_modelfile);
+    let modelname =
+        model_spec(&default_modelfile).map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     let system_prompt = default_modelfile.system.clone().unwrap_or("".to_owned());
 

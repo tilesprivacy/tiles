@@ -18,14 +18,7 @@ pub async fn pull_model(model_name: &str, quant: Option<&str>) -> Result<()> {
 
 pub async fn snapshot_download(modelname: &str, quant: Option<&str>) -> Result<()> {
     let quant = quant.unwrap_or(DEFAULT_QUANT);
-    let metadata_patterns = [
-        ".json",
-        ".txt",
-        ".safetensors",
-        ".md",
-        ".gitattributes",
-        "LICENSE",
-    ];
+    let metadata_patterns = [".json", ".txt", ".md", ".gitattributes", "LICENSE"];
     let quant_gguf = format!("{}.gguf", quant.to_lowercase());
     let allow_patterns: Vec<String> = metadata_patterns
         .iter()

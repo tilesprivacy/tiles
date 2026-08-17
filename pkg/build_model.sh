@@ -32,7 +32,11 @@ download() {
         echo "${file} already downloaded, skipping"
     else
         echo "Downloading ${url}"
-        curl -fL --retry 3 -C - -o "downloads/${file}" "${url}"
+        # Download to a .part temp and rename only on success, so an
+        # interrupted download can never satisfy the cached-file check.
+        # The .part file persists for -C - to resume on the next run.
+        curl -fL --retry 3 -C - -o "downloads/${file}.part" "${url}"
+        mv "downloads/${file}.part" "downloads/${file}"
     fi
 }
 

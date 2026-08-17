@@ -439,7 +439,7 @@ async fn run_model_with_server(
 
 #[allow(unused_assignments)]
 async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn) -> Result<()> {
-    let modelname = model_spec(modelfile);
+    let modelname = model_spec(modelfile)?;
 
     update_current_model(&modelname).context("Failed to update current model in config.toml")?;
     let system_prompt = modelfile.system.clone().unwrap_or("".to_owned());
@@ -600,11 +600,15 @@ pub async fn ping() -> Result<()> {
 }
 
 /// Full `repo:quant` spec used as the model identity across config, Pi and the py server
-pub fn model_spec(modelfile: &Modelfile) -> String {
-    match &modelfile.quant {
-        Some(quant) => format!("{}:{}", modelfile.from.clone().expect("no FROM"), quant),
-        None => modelfile.from.clone().expect("no FROM"),
-    }
+pub fn model_spec(modelfile: &Modelfile) -> Result<String> {
+    let from = modelfile
+        .from
+        .clone()
+        .ok_or_else(|| anyhow!("Modelfile missing FROM instruction"))?;
+    Ok(match &modelfile.quant {
+        Some(quant) => format!("{}:{}", from, quant),
+        None => from,
+    })
 }
 
 fn resolve_gguf_path(model_cache_path: &PathBuf, quant: Option<&str>) -> Result<PathBuf> {
@@ -664,11 +668,16 @@ async fn load_model(
     // If loading fails it most probably a partial downloaded
     // model present, so we try to resume the download
     let model_cache_path = model_cache_res.unwrap();
-    let gguf_path = resolve_gguf_path(&model_cache_path, quant)?;
-    if load_model_in_py(modelfile, default_modelfile, memory_path, &gguf_path)
-        .await
-        .is_err()
-    {
+    let load_res = match resolve_gguf_path(&model_cache_path, quant) {
+        Ok(gguf_path) => {
+            load_model_in_py(modelfile, default_modelfile, memory_path, &gguf_path).await
+        }
+        Err(err) => {
+            log::warn!("Failed to resolve GGUF for the model: {}", err);
+            Err(anyhow!(err))
+        }
+    };
+    if load_res.is_err() {
         log::warn!("Load model failed, resuming the partial download");
         download_model(&model_name, quant).await?;
         Box::pin(load_model(
@@ -711,7 +720,7 @@ async fn load_model_in_py(
     model_cache_path: &PathBuf,
 ) -> Result<()> {
     let client = Client::new();
-    let model_name = model_spec(modelfile);
+    let model_name = model_spec(modelfile)?;
     let body = json!({
         "model": model_name,
         "memory_path": memory_path,
