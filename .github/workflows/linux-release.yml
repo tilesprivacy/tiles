@@ -1,0 +1,76 @@
+name: Linux Release
+
+# Builds the Linux (x86_64) tarball whenever any tag is pushed
+# (stable, rc, nightly) and attaches it to the tag's GitHub Release.
+# install.sh resolves assets by pattern tiles-v*-{arch}-linux.tar.gz.
+
+on:
+  push:
+    tags: ["*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No dtolnay/rust-toolchain here: its toolchain input is required and
+      # hardcoding it drifts from the repo pin. Runners ship rustup, which
+      # auto-installs the exact toolchain from rust-toolchain.toml on first use.
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install native dependencies and tools
+        run: |
+          sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config jq
+          # venvstacks 0.8.0 final was never uploaded to PyPI; install from the git tag
+          pipx install "venvstacks @ git+https://github.com/lmstudio-ai/venvstacks.git@0.8.0"
+
+      - name: Install just
+        run: command -v just || cargo install just
+
+      - name: Fetch Pi linux tarball
+        run: |
+          VERSION=$(grep '^pi' toolchain.toml | head -1 | awk -F'"' '{print $2}')
+          echo "Using Pi ${VERSION} from toolchain.toml"
+          curl -fL -o pi-linux-x64.tar.gz \
+            "https://github.com/badlogic/pi-mono/releases/download/${VERSION}/pi-linux-x64.tar.gz"
+
+      - name: Fetch llama-server (latest ai-dock CUDA prebuilt)
+        run: ./scripts/fetch_llama_server.sh
+
+      - name: Build bundle
+        run: just bundle
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          sha256sum tiles-v*-x86_64-linux.tar.gz > checksums.txt
+          cat checksums.txt
+
+      # Creates the release if missing, or uploads into the tag's existing
+      # release (same-named assets are overwritten on re-runs; existing
+      # release title/notes are preserved).
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/tiles-v*-x86_64-linux.tar.gz
+            dist/checksums.txt
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
