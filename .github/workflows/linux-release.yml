@@ -18,7 +18,12 @@ jobs:
   build-linux:
     runs-on: ubuntu-latest
     steps:
+      # persist-credentials: false — nothing here pushes git changes, so the
+      # write-capable token has no business sitting in .git/config for the
+      # rest of the job. The release upload uses the GITHUB_TOKEN env below.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # No dtolnay/rust-toolchain here: its toolchain input is required and
       # hardcoding it drifts from the repo pin. Runners ship rustup, which
