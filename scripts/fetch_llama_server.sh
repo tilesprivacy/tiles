@@ -54,8 +54,10 @@ if [[ "${OS}" == "Darwin" ]]; then
   fi
   BIN_DIR="$(dirname "${SERVER_BIN}")"
   cp "${SERVER_BIN}" "${OUT_DIR}/llama-server"
-  cp "${BIN_DIR}/"*.dylib "${OUT_DIR}/" 2>/dev/null || true
-  cp "${BIN_DIR}/"*.metal* "${OUT_DIR}/" 2>/dev/null || true
+  # cp -a preserves the .dylib -> .dylib.N -> .dylib.N.M.K symlink chain;
+  # a plain cp dereferences it into 3 real copies of every library.
+  cp -a "${BIN_DIR}/"*.dylib "${OUT_DIR}/" 2>/dev/null || true
+  cp -a "${BIN_DIR}/"*.metal* "${OUT_DIR}/" 2>/dev/null || true
   chmod +x "${OUT_DIR}/llama-server"
   rm -rf "${TMP}"
   echo "Installed ${OUT_DIR}/llama-server (macOS Metal, ${LLAMA_CPP_TAG})"
@@ -122,10 +124,13 @@ if [[ -z "${SERVER_BIN}" ]]; then
   echo "llama-server not found inside ${ASSET}" >&2
   exit 1
 fi
-BIN_DIR="$(dirname "${SERVER_BIN}")"
-cp "${SERVER_BIN}" "${OUT_DIR}/llama-server"
-# Bring along bundled shared libs (libggml*.so etc.) if shipped next to it.
-cp "${BIN_DIR}/"*.so* "${OUT_DIR}/" 2>/dev/null || true
+  BIN_DIR="$(dirname "${SERVER_BIN}")"
+  cp "${SERVER_BIN}" "${OUT_DIR}/llama-server"
+  # Bring along bundled shared libs (libggml*.so etc.) if shipped next to it.
+  # cp -a preserves the .so -> .so.N -> .so.N.M.K symlink chain; a plain cp
+  # dereferences it into 3 real copies of every library (3x 162 MB for
+  # libggml-cuda.so with the ai-dock universal CUDA build).
+  cp -a "${BIN_DIR}/"*.so* "${OUT_DIR}/" 2>/dev/null || true
 chmod +x "${OUT_DIR}/llama-server"
 echo "Installed ${OUT_DIR}/llama-server (Linux CUDA prebuilt, ${TAG})"
 echo "Note: requires CUDA ${CUDA_VERSION} runtime libraries on the host to run."

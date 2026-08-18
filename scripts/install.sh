@@ -26,7 +26,7 @@ set -euo pipefail
 
 REPO="tilesprivacy/tiles"
 
-VERSION="0.4.16"
+VERSION="0.14.7"
 DEV="false"
 NIGHTLY="false"
 
@@ -42,12 +42,12 @@ usage() {
   echo ""
   echo "  --dev       Install from a local dist/*.tar.gz instead of GitHub"
   echo "  --nightly   Install the latest nightly GitHub release"
-  echo "              (e.g. tiles-v0.4.16-nightly.1-x86_64-linux.tar.gz)"
+  echo "              (e.g. tiles-v0.14.7-x86_64-linux.tar.gz)"
 }
 
 # Resolve the newest GitHub nightly release that has a tarball for this platform.
 # Accepts any tiles-v*-${ARCH}-${OS}.tar.gz on that release (asset version may
-# differ from the tag, e.g. tag 0.4.16-nightly.2 shipping a nightly.1 linux tarball).
+# differ from the tag, e.g. tag 0.14.7-nightly.2 shipping a nightly.1 linux tarball).
 # Sets RELEASE_TAG, VERSION (for logs), and RELEASE_ASSET (exact filename).
 resolve_nightly_version() {
   local api_url="https://api.github.com/repos/${REPO}/releases?per_page=30"

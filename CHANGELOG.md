@@ -5,6 +5,25 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.14.7] - 2026-08-18
+
+### Added
+
+- Quantization selection in modelfiles via ollama-style tag: `FROM unsloth/gemma-4-12b-it-GGUF:Q8_0` (defaults to `Q4_K_M` when no tag is given).
+- MTP speculative decoding now auto-enables when the model ships an MTP head; disable with `[llama] mtp = false` in config.toml.
+- Linux release CI: any pushed tag (stable/rc/nightly) builds the x86_64 tarball and attaches it (plus sha256 checksums) to the tag's GitHub Release.
+- Offline (full) installer build is now fully scripted: `pkg/build_model.sh` bundles the default Gemma GGUF + MTP head.
+
+### Changed
+
+- Default model switched to `unsloth/gemma-4-12b-it-GGUF` (Q4_K_M).
+- Upgraded Pi to v0.84.2 (upstream `badlogic/pi-mono`), dropping the stale tiles-pi fork pin.
+
+### Fixed
+
+- macOS notarization: Pi's bundled `.node` native modules are now signed (unsigned modules shipped with Pi v0.84.x broke notarization).
+- Treat a missing GGUF inside a cached model snapshot as a partial download and re-download instead of failing.
+
 ## [0.4.16] - 2026-07-11
 
 ### Added

@@ -44,8 +44,9 @@ if [[ "${OS}" == "Darwin" ]]; then
   fi
   BIN_DIR="$(dirname "${SERVER_BIN}")"
   cp "${SERVER_BIN}" "${OUT_DIR}/llama-server"
-  cp "${BIN_DIR}/"*.dylib "${OUT_DIR}/" 2>/dev/null || true
-  cp "${BIN_DIR}/"*.metal* "${OUT_DIR}/" 2>/dev/null || true
+  # cp -a preserves the .dylib symlink chain (see fetch_llama_server.sh)
+  cp -a "${BIN_DIR}/"*.dylib "${OUT_DIR}/" 2>/dev/null || true
+  cp -a "${BIN_DIR}/"*.metal* "${OUT_DIR}/" 2>/dev/null || true
   chmod +x "${OUT_DIR}/llama-server"
   rm -rf "${TMP}"
   echo "Installed ${OUT_DIR}/llama-server (macOS Metal, ${LLAMA_CPP_TAG})"
@@ -78,6 +79,7 @@ cmake -S "${REPO_DIR}" "${CMAKE_ARGS[@]}"
 cmake --build "${BUILD_DIR}" --target llama-server -j"$(nproc 2>/dev/null || echo 4)"
 
 cp "${BUILD_DIR}/bin/llama-server" "${OUT_DIR}/llama-server"
-cp "${BUILD_DIR}/bin/"lib*.so* "${OUT_DIR}/" 2>/dev/null || true
+# cp -a preserves the .so symlink chain (see fetch_llama_server.sh)
+cp -a "${BUILD_DIR}/bin/"lib*.so* "${OUT_DIR}/" 2>/dev/null || true
 chmod +x "${OUT_DIR}/llama-server"
 echo "Installed ${OUT_DIR}/llama-server (Linux, ${LLAMA_CPP_TAG})"
