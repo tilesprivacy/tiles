@@ -16,10 +16,14 @@ VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "${OS}" in
-  darwin) STACK_SPEC="server/stack/macos/venvstacks.toml" ;;
-  linux) STACK_SPEC="server/stack/linux/venvstacks.toml" ;;
+  darwin) STACK_SPEC="server/stack/macos/venvstacks.toml"; LLAMA_BACKEND="${TILES_LLAMA_BACKEND:-metal}" ;;
+  linux) STACK_SPEC="server/stack/linux/venvstacks.toml"; LLAMA_BACKEND="${TILES_LLAMA_BACKEND:-cuda}" ;;
   *) echo "Unsupported OS for venvstack bundle: ${OS}" >&2; exit 1 ;;
 esac
+[[ "${OS}:${LLAMA_BACKEND}" == "darwin:metal" \
+  || "${OS}:${LLAMA_BACKEND}" == "linux:cuda" \
+  || "${OS}:${LLAMA_BACKEND}" == "linux:vulkan" ]] \
+  || { echo "Unsupported llama backend ${LLAMA_BACKEND} on ${OS}" >&2; exit 1; }
 case "${ARCH}" in
   x86_64) PI_ARCH="x64" ;;
   aarch64|arm64) PI_ARCH="arm64" ;;
@@ -29,7 +33,12 @@ PI_TARBALL="pi-${OS}-${PI_ARCH}.tar.gz"
 
 # Name for final tar.gz 
 
+# Linux ships one tarball per inference backend, so the backend is part of the
+# name. macOS stays unsuffixed: metal is the only backend there.
 OUT_NAME="${BINARY_NAME}-v${VERSION}-${ARCH}-${OS}"
+if [[ "${OS}" == "linux" ]]; then
+  OUT_NAME="${OUT_NAME}-${LLAMA_BACKEND}"
+fi
 
 echo "🚀 Building ${BINARY_NAME} (${TARGET} mode)..."
 

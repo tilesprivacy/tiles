@@ -1,8 +1,8 @@
 name: Linux Release
 
-# Builds the Linux (x86_64) tarball whenever any tag is pushed
-# (stable, rc, nightly) and attaches it to the tag's GitHub Release.
-# install.sh resolves assets by pattern tiles-v*-{arch}-linux.tar.gz.
+# Builds the Linux (x86_64) CUDA and Vulkan tarballs whenever any tag is pushed
+# (stable, rc, nightly) and attaches them to the tag's GitHub Release.
+# Vulkan assets add a -vulkan suffix to the existing Linux filename.
 # Can also be run manually (Actions tab -> Run workflow) from a branch
 # (artifacts land on the run page) or from a tag ref (uploads into the
 # release for that tag, e.g. re-publishing into an existing 0.4.17).
@@ -21,6 +21,11 @@ env:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        backend: [cuda, vulkan]
+    env:
+      TILES_LLAMA_BACKEND: ${{ matrix.backend }}
     steps:
       # persist-credentials: false — nothing here pushes git changes, so the
       # write-capable token has no business sitting in .git/config for the
@@ -59,28 +64,44 @@ jobs:
           curl -fL -o pi-linux-x64.tar.gz \
             "https://github.com/badlogic/pi-mono/releases/download/${VERSION}/pi-linux-x64.tar.gz"
 
-      - name: Fetch llama-server (latest ai-dock CUDA prebuilt)
+      - name: Fetch llama-server
         run: ./scripts/fetch_llama_server.sh
 
       - name: Build bundle
         run: just bundle
 
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.backend }}-tarball
+          path: dist/tiles-v*.tar.gz
+          if-no-files-found: error
+
+  publish-linux:
+    runs-on: ubuntu-latest
+    needs: build-linux
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linux-*-tarball
+          path: dist
+          merge-multiple: true
+
       - name: Generate checksums
         run: |
           cd dist
-          sha256sum tiles-v*-x86_64-linux.tar.gz > checksums.txt
+          sha256sum tiles-v*.tar.gz > checksums.txt
           cat checksums.txt
 
-      # Manual (non-tag) runs: attach the bundle to the workflow run page
-      # instead of touching any release.
-      - name: Upload build artifacts
+      # Manual (non-tag) runs: the per-backend tarballs already land on the run
+      # page from build-linux; only the checksums are unique to this job.
+      - name: Upload checksums
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
         with:
-          name: linux-tarball
-          path: |
-            dist/tiles-v*-x86_64-linux.tar.gz
-            dist/checksums.txt
+          name: linux-checksums
+          path: dist/checksums.txt
           if-no-files-found: error
 
       # Creates the release if missing, or uploads into the tag's existing
@@ -91,7 +112,7 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/tiles-v*-x86_64-linux.tar.gz
+            dist/tiles-v*.tar.gz
             dist/checksums.txt
           fail_on_unmatched_files: true
         env:

@@ -29,6 +29,7 @@ REPO="tilesprivacy/tiles"
 VERSION="0.4.17"
 DEV="false"
 NIGHTLY="false"
+BACKEND="auto"
 
 log() { echo -e "\033[1;36m$*\033[0m"; }
 err() { echo -e "\033[1;31m$*\033[0m" >&2; exit 1; }
@@ -37,22 +38,23 @@ warn() {
 }
 
 usage() {
-  echo "Usage: curl -LsSf https://www.tiles.run/install.sh | sh -s -- [--nightly]"
-  echo "   or: scripts/install.sh [--dev] [--nightly]"
+  echo "Usage: curl -LsSf https://www.tiles.run/install.sh | sh -s -- [--nightly] [--backend BACKEND]"
+  echo "   or: scripts/install.sh [--dev] [--nightly] [--backend BACKEND]"
   echo ""
   echo "  --dev       Install from a local dist/*.tar.gz instead of GitHub"
   echo "  --nightly   Install the latest nightly GitHub release"
-  echo "              (e.g. tiles-v0.4.17-x86_64-linux.tar.gz)"
+  echo "              (e.g. tiles-v0.4.17-x86_64-linux-cuda.tar.gz)"
+  echo "  --backend   Linux inference backend: auto (default), cuda, or vulkan"
 }
 
 # Resolve the newest GitHub nightly release that has a tarball for this platform.
-# Accepts any tiles-v*-${ARCH}-${OS}.tar.gz on that release (asset version may
-# differ from the tag, e.g. tag 0.4.17-nightly.2 shipping a nightly.1 linux tarball).
+# The asset version may differ from the tag, e.g. tag 0.4.17-nightly.2 shipping
+# a nightly.1 Linux tarball.
 # Sets RELEASE_TAG, VERSION (for logs), and RELEASE_ASSET (exact filename).
 resolve_nightly_version() {
   local api_url="https://api.github.com/repos/${REPO}/releases?per_page=30"
   local releases_json tag tags release_json asset
-  local platform="${ARCH}-${OS}"
+  local platform="${ARCH}-${OS}${ASSET_SUFFIX}"
 
   releases_json="$(curl -fsSL "${api_url}")" || err "Failed to query GitHub releases for ${REPO}."
 
@@ -92,24 +94,30 @@ EOF
   err "No nightly found for ${platform} (no matching tiles-v*-${platform}.tar.gz on GitHub)."
 }
 
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --dev|-dev)
       DEV="true"
       ;;
     --nightly|-nightly)
       NIGHTLY="true"
       ;;
+    --backend)
+      [[ $# -ge 2 ]] || err "--backend requires a value."
+      BACKEND="$2"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
       ;;
     *)
-      echo "Unknown argument: $arg" >&2
+      echo "Unknown argument: $1" >&2
       usage >&2
       exit 1
       ;;
   esac
+  shift
 done
 
 if [[ "${DEV}" == "true" && "${NIGHTLY}" == "true" ]]; then
@@ -118,6 +126,56 @@ fi
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
+
+if [[ "${OS}" == "linux" ]]; then
+  [[ "${BACKEND}" == "auto" || "${BACKEND}" == "cuda" || "${BACKEND}" == "vulkan" ]] \
+    || err "Unsupported Linux backend: ${BACKEND}."
+
+  # checks for NVIDIA userspace drivers and enumerates GPU availability
+  # then checks if CUDA runtime is availabile
+  if [[ "${BACKEND}" == "auto" ]]; then
+    CUDA_RUNTIME="false"
+    if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+      if command -v ldconfig >/dev/null 2>&1 \
+        && ldconfig -p 2>/dev/null | grep -E 'libcudart\.so\.12([[:space:]]|$)' >/dev/null; then
+        CUDA_RUNTIME="true"
+      # ldconfig covers only the system cache, not pip/conda/tarball installs.
+      # manually check paths
+      elif [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+        IFS=':' read -r -a LIBRARY_PATHS <<< "${LD_LIBRARY_PATH}"
+        for LIBRARY_PATH in "${LIBRARY_PATHS[@]}"; do
+          [[ -n "${LIBRARY_PATH}" ]] || LIBRARY_PATH="."
+          if [[ -e "${LIBRARY_PATH}/libcudart.so.12" ]]; then
+            CUDA_RUNTIME="true"
+            break
+          fi
+        done
+      fi
+    fi
+
+    if [[ "${CUDA_RUNTIME}" == "true" ]]; then
+      BACKEND="cuda"
+    else
+      BACKEND="vulkan"
+    fi
+    log "Auto-selected ${BACKEND} inference backend."
+  fi
+elif [[ "${BACKEND}" != "auto" ]]; then
+  err "Backend ${BACKEND} is not supported on ${OS}."
+else
+  BACKEND="metal"
+fi
+
+if [[ "${BACKEND}" == "vulkan" ]] \
+  && ! ldconfig -p 2>/dev/null | grep 'libvulkan\.so\.1' >/dev/null; then
+  warn "⚠️  No Vulkan loader found (libvulkan.so.1)."
+  warn "    Install your distro's vulkan-loader package."
+fi
+
+# Linux assets carry the backend in their name; macOS assets do not (metal is
+# the only backend there). BACKEND is already resolved from "auto" by here.
+ASSET_SUFFIX=""
+[[ "${OS}" == "linux" ]] && ASSET_SUFFIX="-${BACKEND}"
 
 if [[ "${OS}" == "linux" && "$(id -u)" != "0" ]]; then
   INSTALL_DIR="${HOME}/.local/bin"
@@ -133,7 +191,7 @@ PI_DIR="${LIB_DIR}/pi"
 
 TMPDIR="$(mktemp -d)"
 RELEASE_TAG="${VERSION}"
-RELEASE_ASSET="tiles-v${VERSION}-${ARCH}-${OS}.tar.gz"
+RELEASE_ASSET="tiles-v${VERSION}-${ARCH}-${OS}${ASSET_SUFFIX}.tar.gz"
 
 if [[ "${NIGHTLY}" == "true" ]]; then
   resolve_nightly_version
@@ -156,7 +214,7 @@ else
   else
     LOCAL_TARBALL=""
     shopt -s nullglob
-    LOCAL_TARBALLS=(dist/tiles-v*-"${ARCH}"-"${OS}".tar.gz)
+    LOCAL_TARBALLS=(dist/tiles-v*-"${ARCH}"-"${OS}${ASSET_SUFFIX}".tar.gz)
     shopt -u nullglob
     for candidate in "${LOCAL_TARBALLS[@]}"; do
       if [[ -z "${LOCAL_TARBALL}" || "${candidate}" -nt "${LOCAL_TARBALL}" ]]; then
