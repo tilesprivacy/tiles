@@ -11,19 +11,35 @@ SERVER_DIR="server"
 # cargo build mode for production
 TARGET="release"
 
-# Fetching the tiles binary version from its cargo.toml version 
+# Backend precedence: --backend flag, then TILES_LLAMA_BACKEND, then the OS default.
+BACKEND_FLAG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --backend)
+      [[ $# -ge 2 ]] || { echo "--backend requires a value" >&2; exit 1; }
+      BACKEND_FLAG="$2"
+      shift 2
+      ;;
+    *) echo "Usage: $0 [--backend cuda|vulkan]" >&2; exit 1 ;;
+  esac
+done
+
+# Fetching the tiles binary version from its cargo.toml version
 VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 case "${OS}" in
-  darwin) STACK_SPEC="server/stack/macos/venvstacks.toml"; LLAMA_BACKEND="${TILES_LLAMA_BACKEND:-metal}" ;;
-  linux) STACK_SPEC="server/stack/linux/venvstacks.toml"; LLAMA_BACKEND="${TILES_LLAMA_BACKEND:-cuda}" ;;
+  darwin) STACK_SPEC="server/stack/macos/venvstacks.toml"; LLAMA_BACKEND="${BACKEND_FLAG:-${TILES_LLAMA_BACKEND:-metal}}" ;;
+  linux) STACK_SPEC="server/stack/linux/venvstacks.toml"; LLAMA_BACKEND="${BACKEND_FLAG:-${TILES_LLAMA_BACKEND:-cuda}}" ;;
   *) echo "Unsupported OS for venvstack bundle: ${OS}" >&2; exit 1 ;;
 esac
 [[ "${OS}:${LLAMA_BACKEND}" == "darwin:metal" \
   || "${OS}:${LLAMA_BACKEND}" == "linux:cuda" \
   || "${OS}:${LLAMA_BACKEND}" == "linux:vulkan" ]] \
   || { echo "Unsupported llama backend ${LLAMA_BACKEND} on ${OS}" >&2; exit 1; }
+
+# fetch_llama_server.sh reads the backend from the environment.
+export TILES_LLAMA_BACKEND="${LLAMA_BACKEND}"
 case "${ARCH}" in
   x86_64) PI_ARCH="x64" ;;
   aarch64|arm64) PI_ARCH="arm64" ;;
@@ -40,7 +56,7 @@ if [[ "${OS}" == "linux" ]]; then
   OUT_NAME="${OUT_NAME}-${LLAMA_BACKEND}"
 fi
 
-echo "🚀 Building ${BINARY_NAME} (${TARGET} mode)..."
+echo "🚀 Building ${BINARY_NAME} (${TARGET} mode, ${LLAMA_BACKEND} backend)..."
 
 cargo build -p tiles --${TARGET}
 

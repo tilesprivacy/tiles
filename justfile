@@ -16,11 +16,11 @@ serve:
     server/.venv/bin/python3 -m server.main
     # uv run --project server python -m server.main
 
-bundle:
-    ./scripts/bundler.sh
+bundle *ARGS:
+    ./scripts/bundler.sh {{ARGS}}
 
-install:
-    ./scripts/install.sh
+install *ARGS:
+    ./scripts/install.sh {{ARGS}}
 
 bundle_pkg:
     ./pkg/build.sh

@@ -160,10 +160,11 @@ if [[ "${OS}" == "linux" ]]; then
     fi
     log "Auto-selected ${BACKEND} inference backend."
   fi
-elif [[ "${BACKEND}" != "auto" ]]; then
-  err "Backend ${BACKEND} is not supported on ${OS}."
-else
+elif [[ "${OS}" == "darwin" ]]; then
+  [[ "${BACKEND}" == "auto" ]] || err "Backend ${BACKEND} is not supported on ${OS}."
   BACKEND="metal"
+else
+  err "Unsupported OS: ${OS}."
 fi
 
 if [[ "${BACKEND}" == "vulkan" ]] \
