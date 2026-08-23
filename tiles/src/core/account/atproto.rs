@@ -160,8 +160,7 @@ pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
     if !program_name.is_empty()
         && let Ok(mut child) = Command::new(program_name).arg(&url).spawn()
     {
-        #[allow(clippy::let_underscore_future)]
-        let _ = tokio::spawn(async move {
+        tokio::spawn(async move {
             let _ = child.wait().await;
         });
     }
@@ -199,7 +198,7 @@ pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
         };
 
         upsert_auth_data(&conn.common, &auth_data)?;
-        println!("LoggedIn successfully as {}\n", handle);
+        println!("Logged in successfully as @{}\n", handle);
         Ok(())
     } else {
         Err(anyhow!(
@@ -219,7 +218,7 @@ pub fn logout(conn: &Dbconn) -> Result<()> {
             ..auth_user
         };
         upsert_auth_data(&conn.common, &logout_user)?;
-        println!("Loggedout successfully as {}", key);
+        println!("Logged out successfully as @{}", key);
     } else {
         println!("No user logged in. Please log in using tiles at login <handle>.")
     }
