@@ -57,7 +57,9 @@ def _config_key(llama_config: dict[str, Any]) -> str:
     return json.dumps(llama_config, sort_keys=True, default=str)
 
 
-def build_llama_server_command(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
+def build_llama_server_command(
+    gguf_path: Path, llama_config: dict[str, Any]
+) -> list[str]:
     """Build the llama-server argv from Tiles config.
 
     Only flags explicitly set in ``llama_config`` are forwarded; unset values
@@ -112,9 +114,10 @@ def build_llama_server_command(gguf_path: Path, llama_config: dict[str, Any]) ->
     # MTP speculative decoding: auto-enabled when the model ships an MTP
     # head, unless explicitly disabled. An explicit `mtp = true` with no
     # file on disk warns and runs without it.
+
     mtp_config = llama_config.get("mtp")
     mtp_path = find_mtp_gguf_file(gguf_path)
-    if mtp_config is False:
+    if not mtp_config:
         pass
     elif mtp_path is not None:
         cmd.extend(
