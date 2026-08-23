@@ -5,6 +5,23 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.18] - 2026-08-23
+
+### Added
+
+- Vulkan backend for llama.cpp. Now Tiles can leverage GPUs other than nvidia [#189](https://github.com/tilesprivacy/tiles/pull/189)
+
+
+### Fixed
+
+- MTP was disabled due to hardcode symlink [#187](https://github.com/tilesprivacy/tiles/pull/187)
+
+- (linux) - Tool calls were returning 422s due to wrong types caused due to a version difference in openresponses-types [#188](https://github.com/tilesprivacy/tiles/pull/188)
+
+- OAuth callback was not working sometimes during ATproto login due to child process for opening browser doesn't resolve immediately [#190](https://github.com/tilesprivacy/tiles/pull/190)
+
+@bruhfr29 FTW
+
 ## [0.4.17] - 2026-08-18
 
 ### Added
