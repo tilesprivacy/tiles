@@ -6,11 +6,20 @@ name: Linux Release
 # Can also be run manually (Actions tab -> Run workflow) from a branch
 # (artifacts land on the run page) or from a tag ref (uploads into the
 # release for that tag, e.g. re-publishing into an existing 0.4.17).
+# A branch dispatch can additionally set `release_tag` to publish that
+# branch's build into an existing tag's release (hotfix re-publish; the
+# branch's Cargo.toml version should match the tag so asset names collide
+# and overwrite cleanly).
 
 on:
   push:
     tags: ["*"]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing tag whose release receives the assets (e.g. 0.4.18). Empty = run-page artifacts only."
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -106,11 +115,14 @@ jobs:
 
       # Creates the release if missing, or uploads into the tag's existing
       # release (same-named assets are overwritten on re-runs; existing
-      # release title/notes are preserved). Tag runs only.
+      # release title/notes are preserved). Runs on tag pushes, or on a
+      # branch dispatch with `release_tag` set — that publishes the
+      # dispatched branch's build into the named tag's release.
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: |
             dist/tiles-v*.tar.gz
             dist/checksums.txt
