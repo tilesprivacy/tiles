@@ -29,6 +29,10 @@ _TEXT_DELTA_EVENTS = frozenset(
 _DONE = object()  # upstream finished
 _TICK = object()  # ticker heartbeat
 
+# queued chunk cap: the pump blocks once full, which pushes backpressure
+# to the upstream stream instead of buffering a whole response in memory
+_MAX_QUEUED = 128
+
 
 def _tick_from_env() -> float | None:
     # tick in seconds, or None when pacing is off
@@ -165,7 +169,7 @@ async def pace(upstream: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]
         return
 
     pacer = _Pacer()
-    queue: asyncio.Queue[Any] = asyncio.Queue()
+    queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_MAX_QUEUED)
 
     async def pump() -> None:
         # read upstream at full speed so the stream is never slowed
@@ -218,4 +222,8 @@ async def pace(upstream: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]
         # don't leak tasks on client disconnect or error
         for task in tasks:
             task.cancel()
+        # empty the queue so a pump blocked on a full queue can deliver
+        # its error and exit, instead of hanging the gather below
+        while not queue.empty():
+            queue.get_nowait()
         await asyncio.gather(*tasks, return_exceptions=True)

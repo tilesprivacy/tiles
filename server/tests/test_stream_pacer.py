@@ -344,3 +344,164 @@ def test_buffered_items_drain_in_order(monkeypatch):
     a_idx = [i for i, n in enumerate(names) if n == "response.output_text.delta"]
     assert r_idx and a_idx
     assert max(r_idx) < min(a_idx)
+
+
+def test_bounded_queue_applies_backpressure(monkeypatch):
+    # a paused consumer must stall the pump at the queue cap instead of
+    # letting it buffer the whole upstream response in memory
+    from server.backend.stream_pacer import _MAX_QUEUED
+
+    monkeypatch.setenv("TILES_STREAM_PACING", "1")
+    produced = {"count": 0}
+
+    async def upstream():
+        for i in range(200):
+            produced["count"] += 1
+            yield _sse(
+                "response.output_text.delta",
+                {"output_index": 0, "item_id": "msg_1", "delta": "x", "content_index": i},
+                i + 1,
+            )
+            await asyncio.sleep(0.001)  # slower than the tick
+        yield "data: [DONE]\n\n"
+
+    async def run():
+        out = []
+        gen = pace(upstream())
+        # first slice comes on the first tick; the consumer then pauses
+        # with upstream still flowing
+        out.append(await gen.__anext__())
+        await asyncio.sleep(0.3)
+        stalled = produced["count"]
+        async for chunk in gen:
+            out.append(chunk)
+        return out, stalled
+
+    out, stalled = asyncio.run(run())
+
+    # pump blocked on the full queue: chunks handed over are capped at
+    # the queue size (+ the one stuck inside pump's put). An unbounded
+    # queue would have drained all 200 by now.
+    assert stalled <= _MAX_QUEUED + 2, f"pump ran ahead: {stalled}"
+    assert stalled < 200, "pump did not stall at all"
+
+    # nothing lost by the backpressure
+    deltas = [d for n, d in _parse_sse(out) if n == "response.output_text.delta"]
+    assert "".join(d["delta"] for d in deltas) == "x" * 200
+
+
+def test_closing_consumer_with_full_queue_does_not_hang(monkeypatch):
+    # aclose() while the pump is blocked on a full queue must drain and
+    # return promptly instead of deadlocking in the cleanup gather
+    monkeypatch.setenv("TILES_STREAM_PACING", "1")
+    pulled = {"count": 0}
+
+    async def upstream():
+        while True:
+            pulled["count"] += 1
+            yield _sse(
+                "response.output_text.delta",
+                {"output_index": 0, "item_id": "msg_1", "delta": "x", "content_index": 0},
+                pulled["count"],
+            )
+            await asyncio.sleep(0.001)
+
+    async def run():
+        gen = pace(upstream())
+        await gen.__anext__()
+        # let the queue fill so the pump is blocked on put
+        await asyncio.sleep(0.3)
+        await asyncio.wait_for(gen.aclose(), timeout=2.0)
+        before = pulled["count"]
+        await asyncio.sleep(0.1)
+        assert pulled["count"] == before, "pump kept pulling after close"
+
+    asyncio.run(run())
+
+
+def _fake_backend(chunks: list[str], quiet_s: float = 0.0):
+    # a stand-in runtime.backend whose stream yields the given chunks
+    from unittest.mock import Mock
+
+    async def fake_stream(request):
+        for chunk in chunks:
+            yield chunk
+            if quiet_s:
+                await asyncio.sleep(quiet_s)
+
+    backend = Mock()
+    backend.generate_response_chat_stream = fake_stream
+    return backend
+
+
+def test_route_streams_unpaced_when_mtp_disabled(monkeypatch):
+    # even with pacing env on, mtp off must pass the stream through
+    # untouched: same chunks, same bytes, no re-timing
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from server import runtime
+    from server.api import app
+
+    monkeypatch.setenv("TILES_STREAM_PACING", "1")
+    chunks = [
+        _sse(
+            "response.output_text.delta",
+            {"output_index": 0, "item_id": "msg_1", "delta": "Hello ", "content_index": 0},
+            1,
+        ),
+        _sse(
+            "response.output_text.delta",
+            {"output_index": 0, "item_id": "msg_1", "delta": "world!", "content_index": 1},
+            2,
+        ),
+        "data: [DONE]\n\n",
+    ]
+
+    with (
+        patch.object(runtime, "backend", _fake_backend(chunks)),
+        patch("server.api.get_llama_config", return_value={}),
+    ):
+        client = TestClient(app)
+        with client.stream(
+            "POST", "/v1/responses", json={"model": "m", "input": "hi", "stream": True}
+        ) as resp:
+            body = "".join(resp.iter_text())
+
+    assert body == "".join(chunks)
+
+
+def test_route_streams_paced_when_mtp_enabled(monkeypatch):
+    # mtp on: the route must smooth bursts into sliced deltas
+    from unittest.mock import patch
+
+    from fastapi.testclient import TestClient
+
+    from server import runtime
+    from server.api import app
+
+    monkeypatch.setenv("TILES_STREAM_PACING", "1")
+    chunks = [
+        _sse(
+            "response.output_text.delta",
+            {"output_index": 0, "item_id": "msg_1", "delta": piece, "content_index": i},
+            i + 1,
+        )
+        for i, piece in enumerate(["Hel", "lo ", "wor", "ld"])
+    ] + ["data: [DONE]\n\n"]
+
+    with (
+        patch.object(runtime, "backend", _fake_backend(chunks, quiet_s=0.05)),
+        patch("server.api.get_llama_config", return_value={"mtp": True}),
+    ):
+        client = TestClient(app)
+        with client.stream(
+            "POST", "/v1/responses", json={"model": "m", "input": "hi", "stream": True}
+        ) as resp:
+            body = "".join(resp.iter_text())
+
+    deltas = [d for n, d in _parse_sse([body]) if n == "response.output_text.delta"]
+    assert "".join(d["delta"] for d in deltas) == "Hello world"
+    # 4 burst chunks merged and sliced into more, smaller deltas
+    assert len(deltas) > len([c for c in chunks if "delta" in c])

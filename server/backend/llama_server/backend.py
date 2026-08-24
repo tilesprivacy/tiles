@@ -77,10 +77,12 @@ def get_or_load_model(
 
     logger.info("Loading model via llama-server: %s (%s)", model_spec, gguf_path)
     # ensure_running is the single source of truth for "what's loaded"
-    #and restarts only when they change.
-    process.ensure_running(gguf_path, llama_config)
+    # and restarts only when they change. It returns this call's startup
+    # warnings (drained under its lock) so concurrent requests can't
+    # read or wipe each other's warnings.
+    warnings = process.ensure_running(gguf_path, llama_config)
 
-    return LlamaServerRunner(str(model_dir), llama_config, process.take_warnings())
+    return LlamaServerRunner(str(model_dir), llama_config, warnings)
 
 
 async def generate_response_chat_stream(

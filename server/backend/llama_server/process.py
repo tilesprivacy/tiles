@@ -27,8 +27,9 @@ _loaded_config_key: str | None = None
 # Serializes ensure_running so concurrent requests can't double-start the server.
 _ensure_lock = threading.Lock()
 # Warnings recorded while starting/restarting llama-server (e.g. MTP
-# requested but no head GGUF on disk). Drained by the /start endpoint so
-# the CLI can surface them to the user.
+# requested but no MTP GGUF on disk). ensure_running drains them inside
+# _ensure_lock and returns them to its caller so the CLI can surface
+# them to the user.
 _startup_warnings: list[str] = []
 
 
@@ -38,7 +39,11 @@ def _record_warning(message: str, *args: Any) -> None:
 
 
 def take_warnings() -> list[str]:
-    """Return and clear the warnings collected during the last spawn."""
+    """Return and clear the collected startup warnings.
+
+    Only safe to call while holding _ensure_lock (ensure_running does);
+    a bare call could race a concurrent spawn's recording.
+    """
     warnings = list(_startup_warnings)
     _startup_warnings.clear()
     return warnings
@@ -270,8 +275,11 @@ def stop() -> None:
         proc.wait(timeout=5)
 
 
-def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> None:
-    """Start or restart llama-server for the given GGUF and config."""
+def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
+    """Start or restart llama-server for the given GGUF and config.
+    Returns the warnings recorded during this call's spawn (e.g. MTP
+    requested but no head GGUF found).
+    """
     global _process, _loaded_gguf, _loaded_config_key
 
     gguf_path = Path(os.path.abspath(gguf_path))
@@ -288,9 +296,9 @@ def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> None:
             and _loaded_config_key == key
         ):
             if is_server_ready():
-                return
+                return []
             wait_until_ready(_process)
-            return
+            return []
 
         stop()
 
@@ -333,3 +341,4 @@ def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> None:
         _loaded_gguf = resolved_gguf
         _loaded_config_key = key
         wait_until_ready(_process)
+        return take_warnings()

@@ -219,9 +219,9 @@ def test_mtp_explicit_true_enables_through_hf_cache_symlinks(tmp_path: Path):
 
 
 def test_missing_mtp_head_warns_and_is_collectable(tmp_path: Path):
-    """`mtp = true` with no head on disk must leave a warning that the
-    /start endpoint can drain via take_warnings() — this is what the CLI
-    surfaces as a yellow WARNING line after model load.
+    """`mtp = true` with no head on disk must return a warning from
+    ensure_running — this is what the CLI surfaces as a yellow WARNING
+    line after model load.
     """
     _reset_process_state()
     gguf = tmp_path / "model.gguf"
@@ -235,13 +235,10 @@ def test_missing_mtp_head_warns_and_is_collectable(tmp_path: Path):
         patch("server.backend.llama_server.process.is_server_ready", return_value=True),
         patch("server.backend.llama_server.process.resolve_llama_server_binary", return_value="llama-server"),
     ):
-        ensure_running(gguf, {"mtp": True})
+        warnings = ensure_running(gguf, {"mtp": True})
 
-    warnings = process.take_warnings()
     assert len(warnings) == 1
     assert "no MTP GGUF found" in warnings[0]
-    # Draining is destructive: a second take returns nothing new.
-    assert process.take_warnings() == []
 
 
 def test_reused_server_reports_no_stale_warnings(tmp_path: Path):
@@ -260,12 +257,52 @@ def test_reused_server_reports_no_stale_warnings(tmp_path: Path):
         patch("server.backend.llama_server.process.is_server_ready", return_value=True),
         patch("server.backend.llama_server.process.resolve_llama_server_binary", return_value="llama-server"),
     ):
-        ensure_running(gguf, {"mtp": True})
-        assert process.take_warnings() != []
+        first = ensure_running(gguf, {"mtp": True})
+        assert first != []
 
         # Same config: server is reused, no fresh warnings expected.
-        ensure_running(gguf, {"mtp": True})
-        assert process.take_warnings() == []
+        second = ensure_running(gguf, {"mtp": True})
+        assert second == []
+
+
+def test_concurrent_loads_each_get_own_warnings(tmp_path: Path):
+    """Two threads load the same model at once (both /start and /v1/responses
+    can race in production): one spawns the server and must receive the MTP
+    warning, the other reuses the server and must receive none. Warnings
+    must never leak across requests or get lost.
+    """
+    import threading
+
+    _reset_process_state()
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+
+    fake_proc = Mock()
+    fake_proc.poll.return_value = None
+    barrier = threading.Barrier(2)
+    results: dict[int, list[str]] = {}
+
+    def load(index: int) -> None:
+        barrier.wait()
+        results[index] = ensure_running(gguf, {"mtp": True})
+
+    with (
+        patch("server.backend.llama_server.process.subprocess.Popen", return_value=fake_proc) as popen,
+        patch("server.backend.llama_server.process.is_server_ready", return_value=True),
+        patch("server.backend.llama_server.process.resolve_llama_server_binary", return_value="llama-server"),
+    ):
+        threads = [threading.Thread(target=load, args=(i,)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+    # exactly one spawn; the spawner got the warning, the reuser got none
+    assert popen.call_count == 1
+    all_warnings = [w for ws in results.values() for w in ws]
+    assert len(all_warnings) == 1
+    assert "no MTP GGUF found" in all_warnings[0]
+    assert sorted(len(ws) for ws in results.values()) == [0, 1]
 
 
 def test_ensure_running_dedupes_unresolved_and_resolved_paths(tmp_path: Path):
