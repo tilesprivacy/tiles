@@ -19,3 +19,4 @@ pi-linux-x64.tar.gz
 .cache
 server/bin
 server/stack/linux/requirements/
+server/stack/macos/requirements/

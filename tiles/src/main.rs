@@ -236,6 +236,10 @@ struct RunFlags {
     #[arg(long)]
     no_mmap: Option<bool>,
 
+    /// Enable MTP speculative decoding (requires an MTP head GGUF next to the model)
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    mtp: Option<bool>,
+
     /// Connect to remote inference with the ticket
     #[arg(long)]
     remote: Option<String>,
@@ -247,7 +251,7 @@ fn llama_config_from_flags(flags: &RunFlags) -> Option<LlamaConfig> {
         gpu_layers: flags.gpu_layers,
         offload_kqv: flags.offload_kqv,
         batch_size: flags.batch_size,
-        mtp: None,
+        mtp: flags.mtp,
         n_cpu_moe: flags.n_cpu_moe,
         flash_attn: flags.flash_attn,
         no_mmap: flags.no_mmap,

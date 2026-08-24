@@ -733,12 +733,33 @@ async fn load_model_in_py(
         .send()
         .await?;
     match res.status() {
-        StatusCode::OK => Ok(()),
+        StatusCode::OK => {
+            let payload: serde_json::Value = res.json().await?;
+            for warning in model_load_warnings(&payload) {
+                println!("{} {}", "WARNING:".yellow(), warning);
+            }
+            Ok(())
+        }
         _ => Err(anyhow::anyhow!(format!(
             "Failed to load model {} due to {:?}",
             model_name, res
         ))),
     }
+}
+
+/// Extract the human-readable warnings reported by the inference server
+/// while loading the model (e.g. MTP requested but no MTP head found).
+fn model_load_warnings(payload: &serde_json::Value) -> Vec<String> {
+    payload
+        .get("warnings")
+        .and_then(|w| w.as_array())
+        .map(|warnings| {
+            warnings
+                .iter()
+                .filter_map(|w| w.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn download_model(model_name: &str, quant: Option<&str>) -> Result<()> {
@@ -1382,6 +1403,27 @@ mod tests {
     fn default_modelfile_uses_platform_default() {
         let path = get_default_modelfile().expect("default modelfile should resolve");
         assert!(path.ends_with("modelfiles/gemma-4-12b-gguf"));
+    }
+
+    #[test]
+    fn model_load_warnings_extracts_string_list() {
+        let payload = serde_json::json!({
+            "message": "Model loaded",
+            "warnings": ["MTP enabled but no MTP GGUF found next to /x/model.gguf."]
+        });
+        assert_eq!(
+            model_load_warnings(&payload),
+            vec!["MTP enabled but no MTP GGUF found next to /x/model.gguf.".to_owned()]
+        );
+    }
+
+    #[test]
+    fn model_load_warnings_handles_missing_or_malformed() {
+        assert!(model_load_warnings(&serde_json::json!({})).is_empty());
+        assert!(model_load_warnings(&serde_json::json!({"warnings": null})).is_empty());
+        // Non-string entries are skipped, strings are kept.
+        let payload = serde_json::json!({"warnings": [42, "valid", null]});
+        assert_eq!(model_load_warnings(&payload), vec!["valid".to_owned()]);
     }
 
     #[test]

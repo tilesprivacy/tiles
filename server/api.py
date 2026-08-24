@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from . import runtime
+from .backend.stream_pacer import pace
 from .schemas import (
     ChatMessage,
     ResponsesRequest,
@@ -39,11 +40,10 @@ async def start_model(request: StartRequest):
     logger.info(f"{runtime.backend}")
     # get_or_load_model can block for minutes while the model loads; run it in a
     # worker thread so the FastAPI event loop stays responsive to other requests.
-    await asyncio.to_thread(
+    runner = await asyncio.to_thread(
         runtime.backend.get_or_load_model, request.model, request.model_cache_path
     )
-    return {"message": "Model loaded"}
-
+    return {"message": "Model loaded", "warnings": getattr(runner, "warnings", [])}
 
 @app.exception_handler(HTTPException)
 async def validation_exception_handler(request: Request, exc: HTTPException):
@@ -79,7 +79,7 @@ async def create_chat_response(request: ResponsesRequest):
 
     if request.stream:
         return StreamingResponse(
-            runtime.backend.generate_response_chat_stream(request),
+            pace(runtime.backend.generate_response_chat_stream(request)),
             headers={"Cache-Control": "no-cache", "Content-Type": "text/event-stream"},
         )
     return await runtime.backend.generate_response_chat(request)

@@ -25,9 +25,15 @@ logger = logging.getLogger("app")
 class LlamaServerRunner:
     """Placeholder runner kept for API compatibility with older backends."""
 
-    def __init__(self, model_path: str, llama_config: dict[str, Any]):
+    def __init__(
+        self,
+        model_path: str,
+        llama_config: dict[str, Any],
+        warnings: list[str] | None = None,
+    ):
         self.model_path = model_path
         self.llama_config = llama_config
+        self.warnings = warnings or []
 
 
 def _resolve_model_path(model_spec: str, model_cache_path: str | None) -> Path:
@@ -74,7 +80,7 @@ def get_or_load_model(
     #and restarts only when they change.
     process.ensure_running(gguf_path, llama_config)
 
-    return LlamaServerRunner(str(model_dir), llama_config)
+    return LlamaServerRunner(str(model_dir), llama_config, process.take_warnings())
 
 
 async def generate_response_chat_stream(

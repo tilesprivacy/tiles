@@ -5,6 +5,16 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+### Added
+
+- `--mtp` flag for `tiles run` to enable/disable MTP speculative decoding (persists to `config.toml` like the other llama flags).
+
+- Smooth stream pacing for MTP speculative-decoding bursts: when MTP is enabled, text deltas are re-timed into a steady drip without slowing generation.
+
+### Changed
+
+- MTP speculative decoding is now opt-in: it no longer auto-enables when an MTP head GGUF is detected next to the model. Enable it with `mtp = true` under `[llama]` in `config.toml` or per-run with `tiles run --mtp`.
+
 ## [0.4.18] - 2026-08-23
 
 ### Added
