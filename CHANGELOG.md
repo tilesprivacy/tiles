@@ -9,7 +9,7 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 - `--mtp` flag for `tiles run` to enable/disable MTP speculative decoding (persists to `config.toml` like the other llama flags).
 
-- Smooth stream pacing for MTP speculative-decoding bursts: when MTP is enabled, text deltas are re-timed into a steady drip without slowing generation.
+- Model-load warnings from the inference server (e.g. MTP requested but no MTP head GGUF found) are now surfaced in the CLI as yellow `WARNING:` lines before the input prompt.
 
 ### Changed
 

@@ -6,8 +6,6 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from . import runtime
-from .backend.stream_pacer import pace
-from .config import get_llama_config
 from .schemas import (
     ChatMessage,
     ResponsesRequest,
@@ -79,13 +77,8 @@ async def create_chat_response(request: ResponsesRequest):
     """
 
     if request.stream:
-        stream = runtime.backend.generate_response_chat_stream(request)
-        # pace only when MTP is on: spec-decode bursts need smoothing, a
-        # plain stream is already steady and pacing would only add latency
-        if get_llama_config().get("mtp"):
-            stream = pace(stream)
         return StreamingResponse(
-            stream,
+            runtime.backend.generate_response_chat_stream(request),
             headers={"Cache-Control": "no-cache", "Content-Type": "text/event-stream"},
         )
     return await runtime.backend.generate_response_chat(request)
