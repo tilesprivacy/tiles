@@ -5,6 +5,8 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-08-30
+
 ### Added
 
 - `--mtp` flag for `tiles run` to enable/disable MTP speculative decoding (persists to `config.toml` like the other llama flags).
@@ -14,6 +16,11 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 ### Changed
 
 - MTP speculative decoding is now opt-in: it no longer auto-enables when an MTP head GGUF is detected next to the model. Enable it with `mtp = true` under `[llama]` in `config.toml` or per-run with `tiles run --mtp`.
+
+### Fixed
+
+- Chances of installing multiple version of Tiles during `tiles update` #[194](https://github.com/tilesprivacy/tiles/pull/194)
+
 
 ## [0.4.18] - 2026-08-23
 
