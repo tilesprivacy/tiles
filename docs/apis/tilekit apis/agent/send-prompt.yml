@@ -1,0 +1,22 @@
+info:
+  name: send-prompt
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/agent/prompt"
+  body:
+    type: json
+    data: |-
+      {
+        "message": "How many states are there in India?"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

@@ -553,9 +553,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::Sync(SyncCommands::Sync { did })) => sync(did).await?,
         Some(Commands::Sync(SyncCommands::Remote(remote_args))) => match remote_args.command {
             RemoteCommands::Share => {
-                //open py inference proxy
-                // share(&db_conn).await?;
-                //
                 println!("{}", share_remote_link().await?);
             }
             RemoteCommands::Unshare => {

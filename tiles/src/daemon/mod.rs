@@ -8,7 +8,13 @@ use std::{
     time::Duration,
 };
 
-use crate::{core::agent::pi::PiAgent, daemon::agent::agent_router};
+use crate::{
+    core::agent::pi::PiAgent,
+    daemon::{
+        account::account_router, agent::agent_router, server::server_router,
+        session::session_router,
+    },
+};
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
@@ -29,7 +35,12 @@ use std::fs::OpenOptions;
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
+
+pub mod account;
 pub mod agent;
+pub mod server;
+pub mod session;
+
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
@@ -49,15 +60,24 @@ pub struct AppState {
     pub agent: AsyncMutex<Option<PiAgent>>,
 }
 
+#[derive(Debug)]
 pub enum AppError {
-    ModelFileNotFound(String),
+    NotFound(String),
     InternalServerError(String),
+    RequestTimeout,
+    BadRequest(String),
+    AlreadyExists(String),
+    CannotProcess(String),
 }
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         let (status, reason) = match self {
-            Self::ModelFileNotFound(e) => (StatusCode::NOT_FOUND, e),
+            Self::NotFound(e) => (StatusCode::NOT_FOUND, e),
             Self::InternalServerError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+            Self::RequestTimeout => (StatusCode::REQUEST_TIMEOUT, "request timedout".to_string()),
+            Self::BadRequest(e) => (StatusCode::BAD_REQUEST, e),
+            Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
+            Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
         };
 
         let body = Json(json!({
@@ -69,7 +89,7 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ApiResponse<T> {
     status: String,
     data: T,
@@ -81,6 +101,14 @@ impl<T: Serialize> ApiResponse<T> {
             status: "success".to_string(),
             data,
         })
+    }
+}
+
+pub struct ApiCleanupGuard;
+
+impl Drop for ApiCleanupGuard {
+    fn drop(&mut self) {
+        log::info!("Dropping the request")
     }
 }
 
@@ -199,6 +227,11 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
     };
 
     let shared_state = Arc::new(state);
+
+    // let service = ServiceBuilder::new()
+    //     .layer(HandleErrorLayer::new(handle_timeout_error))
+    //     .layer(TimeoutLayer::new(Duration::from_secs(30)));
+
     let app = Router::new()
         .route("/", get(root))
         .route("/config", get(get_config))
@@ -209,6 +242,10 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
         .route("/remote-status", get(show_remote_status))
         .route("/connect-remote", get(connect_remote_inference))
         .merge(agent_router())
+        .merge(server_router())
+        .merge(account_router())
+        .merge(session_router())
+        // .layer(service)
         .with_state(shared_state);
 
     let addr = format!("127.0.0.1:{}", dyn_port);
@@ -255,7 +292,7 @@ async fn shutdown_signal(rx: Receiver<bool>) {
 }
 
 async fn shutdown(State(state): State<Arc<AppState>>) {
-    println!("Daemon server shutting down");
+    log::info!("Daemon server shutting down");
     let mut sender = state.shutdown_sender.lock().unwrap();
     let sender_real = sender.take().unwrap();
     let _ = sender_real.send(true);
@@ -284,7 +321,7 @@ async fn get_model_cache_path(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<SendParams>,
 ) -> Result<String, StatusCode> {
-    println!("getting model cache path");
+    log::info!("getting model cache path");
     if let Ok(model_path) = get_model_cache(&params.model_name) {
         Ok(model_path
             .to_str()
@@ -330,9 +367,7 @@ async fn wait_until_server_is_up(port: Option<u32>) -> Result<()> {
     let mut error: String = String::new();
     loop {
         if retry_count < 1 {
-            if !cfg!(debug_assertions) {
-                println!("{:?}", error);
-            }
+            log::error!("{:?}", error);
             return Err(anyhow!(error));
         }
         match ping(port).await {
@@ -515,6 +550,14 @@ pub async fn connect_remote(ticket: &str) -> Result<()> {
         Ok(_response) => Ok(()),
     }
 }
+
+// async fn handle_timeout_error(err: BoxError) -> AppError {
+//     if err.is::<timeout::error::Elapsed>() {
+//         AppError::RequestTimeout
+//     } else {
+//         AppError::InternalServerError("Something unexpected happened".to_string())
+//     }
+// }
 
 #[cfg(test)]
 mod tests {

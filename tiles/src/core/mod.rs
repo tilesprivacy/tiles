@@ -19,6 +19,7 @@ pub mod chats;
 pub mod health;
 pub mod network;
 pub mod plugin;
+pub mod server;
 pub mod storage;
 // Entrypoint of the core
 pub fn init() -> Result<Dbconn> {

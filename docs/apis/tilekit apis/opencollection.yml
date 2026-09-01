@@ -1,0 +1,34 @@
+opencollection: 1.0.0
+
+info:
+  name: tilekit apis
+config:
+  proxy:
+    inherit: true
+    config:
+      protocol: http
+      hostname: ""
+      port: ""
+      auth:
+        username: ""
+        password: ""
+      bypassProxy: ""
+
+docs:
+  content: |-
+    ## Tilekit apis
+
+    Tilekit apis are developed to be used by other developers also, if they want to integrate tiles or use any features of Tiles. These are different from "Internal apis" which is kind of tailor made for Tiles official webUI for the plumbing purposes, which might come under tilekit later.
+
+    - These apis are standard REST apis under scope `/v1/tilekit/`
+    - There are mainly 3 groups of apis
+      - server apis (/v1/tilekit/server) - For communication with the inference server (thus managing the llama server too)
+      - Agent apis (/v1/tilekit/agent\`) - For communication with the agent harness (Pi). Amore primitive api, much of it will be asbtracted by session apis.
+      - session apis (/v1/tilekit/session) - The primary apis developers use to power the UIs with tiles.
+  type: text/markdown
+bundled: false
+extensions:
+  bruno:
+    ignore:
+      - node_modules
+      - .git

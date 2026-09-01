@@ -1,0 +1,16 @@
+info:
+  name: start-server
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{tilekit_base_url}}/server/start"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

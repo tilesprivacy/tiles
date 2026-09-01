@@ -19,10 +19,73 @@ pub enum PiResponse {
     AgentEnd(PiAgentEndEvent),
     #[serde(rename = "turn_end")]
     TurnEnd(PiTurnEndEvent),
+    #[serde(rename = "agent_settled")]
+    AgentSettled,
+    #[serde(rename = "turn_start")]
+    TurnStart,
+    #[serde(rename = "message_start")]
+    MessageStart,
+    #[serde(rename = "message_end")]
+    MessageEnd,
+    #[serde(rename = "bash_execution_update")]
+    BashExecutionUpdate,
+    #[serde(rename = "tool_execution_start")]
+    ToolExecutionStart,
+    #[serde(rename = "tool_execution_end")]
+    ToolExecutionEnd,
+    #[serde(rename = "tool_execution_update")]
+    ToolExecutionUpdate,
+    #[serde(rename = "queue_update")]
+    QueueUpdate,
+    #[serde(rename = "compaction_start")]
+    CompactionStart,
+    #[serde(rename = "compaction_end")]
+    CompactionEnd,
+    #[serde(rename = "auto_retry_start")]
+    AutoRetryStart,
+    #[serde(rename = "auto_retry_end")]
+    AutoRetryEnd,
+    #[serde(rename = "summarization_retry_scheduled")]
+    SummarizationRetryScheduled,
+    #[serde(rename = "summarization_retry_attempt_start")]
+    SummarizationRetryStart,
+    #[serde(rename = "summarization_retry_finished")]
+    SummarizationRetryFinished,
+    #[serde(rename = "extension_error")]
+    ExtensionError,
     #[serde[other]]
     Unknown,
 }
 
+impl PiResponse {
+    pub fn get_type(&self) -> &'static str {
+        match self {
+            PiResponse::Response(_) => "response",
+            PiResponse::AgentStart => "agent_start",
+            PiResponse::MessageUpdate(_) => "message_update",
+            PiResponse::AgentEnd(_) => "agent_end",
+            PiResponse::TurnEnd(_) => "turn_end",
+            PiResponse::AgentSettled => "agent_settled",
+            PiResponse::Unknown => "unknown",
+            PiResponse::TurnStart => "turn_start",
+            PiResponse::MessageStart => "message_start",
+            PiResponse::MessageEnd => "message_end",
+            PiResponse::BashExecutionUpdate => "bash_execution_update",
+            PiResponse::ToolExecutionStart => "tool_execution_start",
+            PiResponse::ToolExecutionEnd => "tool_execution_end",
+            PiResponse::ToolExecutionUpdate => "tool_execution_update",
+            PiResponse::QueueUpdate => "queue_update",
+            PiResponse::CompactionStart => "compaction_start",
+            PiResponse::CompactionEnd => "compaction_end",
+            PiResponse::AutoRetryStart => "auto_retry_start",
+            PiResponse::AutoRetryEnd => "auto_retry_end",
+            PiResponse::SummarizationRetryScheduled => "summarization_retry_scheduled",
+            PiResponse::SummarizationRetryStart => "summarization_retry_attempt_start",
+            PiResponse::SummarizationRetryFinished => "summarization_retry_finished",
+            PiResponse::ExtensionError => "extension_error",
+        }
+    }
+}
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PiAgentEndEvent {
     pub messages: Vec<PiMsgEvent>,

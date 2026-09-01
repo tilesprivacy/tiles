@@ -116,10 +116,7 @@ pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
     let (client, mem_session_store) = create_oauth_client()?;
 
     println!("Processing, will be redirected to auth page");
-    //TODO: This resolve function is hack to convert handle to DID
-    // cuz for some reason the authorize fn not working for customd domains
-    // it does work for bluesky hosted handles and DIDs.
-    // Probably smthng to do w DNS resolver. Will dig more latta
+
     let did = resolve_handle_to_did(handle)
         .await
         .inspect_err(|_| eprintln!("Failed to resolve handle"))?;

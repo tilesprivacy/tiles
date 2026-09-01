@@ -1,0 +1,16 @@
+info:
+  name: get-version
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{tiles_base_url}}"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

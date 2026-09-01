@@ -47,6 +47,10 @@ cid = "0.11.3"
 keyring-core = "1.0.0"
 iroh-mdns-address-lookup = "0.4.0"
 tempfile = "3"
+tower = {version = "0.5.3", features = ["timeout"]}
+tokio-stream = "0.1.19"
+tokio-util = "0.7.19"
+async-stream = "0.3.6"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs", "user", "process"] }
@@ -62,3 +66,4 @@ keyring-core = { version = "1.0.0", features = ["sample"] }
 wiremock = "0.6.5"
 async-std = { version = "1.12", features = ["attributes"] }
 serial_test = "3.4.0"
+http-body-util = "0.1" 

@@ -1,0 +1,14 @@
+info:
+  name: agent
+  type: folder
+  seq: 2
+
+request:
+  auth: inherit
+
+docs:
+  content: |-
+    Agent apis are primitive apis to directly communicate with the underlying harness.
+
+    Although Sessions api abstracts much of the agent api functionalities, we can use agent apis whenever needed
+  type: text/markdown

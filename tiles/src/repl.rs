@@ -11,6 +11,7 @@ use crate::core::chats::{
     update_snapshot,
 };
 use crate::core::network;
+use crate::core::server::{ping, start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::Dbconn;
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_inference_config,
@@ -20,7 +21,6 @@ use crate::utils::hf_model_downloader::*;
 use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
-use nix::unistd::setsid;
 use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
 use rustyline::completion::Completer;
@@ -32,17 +32,15 @@ use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self};
 use std::io::{self};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
-use tokio::process::Command;
 use tokio::time::sleep;
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
@@ -120,13 +118,13 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
                 return Ok(());
             }
         };
-        let default_modelfile = get_default_modelfile()
+        let default_modelfile = get_default_modelfile(DefaultProvider)
             .ok()
             .and_then(|path| tilekit::modelfile::parse_from_file(path.to_str()?).ok())
             .unwrap_or_else(|| modelfile.clone());
         (modelfile, default_modelfile)
     } else {
-        let default_modelfile_path = get_default_modelfile()?;
+        let default_modelfile_path = get_default_modelfile(DefaultProvider)?;
         let default_modelfile = match tilekit::modelfile::parse_from_file(
             default_modelfile_path
                 .to_str()
@@ -142,82 +140,6 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
     };
 
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
-}
-
-#[allow(clippy::zombie_processes)]
-pub async fn start_server_daemon() -> Result<()> {
-    // check if the server is running
-    // start server as a child process
-    // save the pid in a file under ~/.config/tiles/server_pid
-
-    if (ping().await).is_ok() {
-        println!("server is already up");
-        return Ok(());
-    }
-
-    let config_dir = DefaultProvider.get_config_dir()?;
-    let data_dir = DefaultProvider.get_data_dir()?;
-    let mut server_dir = DefaultProvider.get_lib_dir()?;
-    let pid_file = config_dir.join("server.pid");
-    server_dir = server_dir.join("server");
-    let stdout_log = OpenOptions::new()
-        .append(true)
-        .open(data_dir.join("logs/server.out.log"))?;
-    let stderr_log = OpenOptions::new()
-        .append(true)
-        .open(data_dir.join("logs/server.err.log"))?;
-    let server_path = server_dir.join("stack_export_prod/app-server/bin/python");
-    server_dir.pop();
-    let child = unsafe {
-        Command::new(server_path)
-            .args(["-m", "server.main"])
-            .current_dir(server_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout_log))
-            .stderr(Stdio::from(stderr_log))
-            .pre_exec(|| {
-                if let Err(err) = setsid() {
-                    Err(Into::into(err))
-                } else {
-                    Ok(())
-                }
-            })
-            .spawn()
-            .expect("failed to start server")
-    };
-
-    std::fs::write(pid_file, child.id().expect("Not child Id").to_string())
-        .expect("Failed to write to pid file");
-    println!(
-        "Server started with PID {}",
-        child.id().expect("No child Id")
-    );
-    Ok(())
-}
-
-pub async fn stop_server_daemon() -> Result<()> {
-    if (ping().await).is_err() {
-        println!("Server is not running");
-        return Ok(());
-    }
-
-    let pid_file = DefaultProvider.get_config_dir()?.join("server.pid");
-
-    if !pid_file.exists() {
-        eprintln!("server pid doesnt exist");
-        return Ok(());
-    }
-
-    let pid = std::fs::read_to_string(&pid_file).context("Failed to read the string")?;
-    Command::new("kill")
-        .arg(pid.trim())
-        .status()
-        .await
-        .context("Failed to initiate kill commad")?;
-
-    std::fs::remove_file(pid_file).context("Failed to removed pid file")?;
-    println!("Server stopped.");
-    Ok(())
 }
 
 struct TilesHinter;
@@ -411,6 +333,8 @@ async fn run_model_with_server(
     if let Some(llama_config) = &run_args.llama_config {
         update_llama_config(llama_config).context("Failed to update llama config")?;
     }
+    //TODO: Remove this remote infy code, refactor it
+    // If remote inference mode then no need to load or leverage local server
     if let Some(ticket) = run_args.remote.clone() {
         tokio::spawn(async move {
             let _ = network::connect(&ticket)
@@ -552,6 +476,9 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                     .await?;
                     break;
                 }
+                PiResponse::AgentSettled => {
+                    info!("agent settled")
+                }
                 PiResponse::TurnEnd(_turn_event) => {
                     println!("\n");
                 }
@@ -582,21 +509,11 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                     info!("Unsupported response {}", &line);
                     continue;
                 }
+                _ => (),
             }
         }
     }
     Ok(())
-}
-
-pub async fn ping() -> Result<()> {
-    let client = Client::new();
-    let url = format!("http://127.0.0.1:{}/ping", PY_PORT);
-    let res = client.get(url).send().await;
-
-    match res {
-        Err(err) => Err(anyhow!("Server down due to {:?}", err)),
-        _ => Ok(()),
-    }
 }
 
 /// Full `repo:quant` spec used as the model identity across config, Pi and the py server
@@ -656,7 +573,12 @@ async fn load_model(
             retries
         ));
     }
-    let model_name = modelfile.from.clone().unwrap();
+    // TODO: why `from` is even an Option, gotta check latta
+    let model_name = modelfile
+        .from
+        .clone()
+        .expect("Modelfile not found, this is impossible to occur");
+
     let quant = modelfile.quant.as_deref();
     let model_cache_res = get_model_cache(&model_name);
 
@@ -695,7 +617,7 @@ async fn load_model(
 async fn wait_until_server_is_up() {
     loop {
         match ping().await {
-            Ok(()) => {
+            Ok(_) => {
                 break;
             }
             Err(_err) => {
@@ -706,10 +628,8 @@ async fn wait_until_server_is_up() {
     }
 }
 
-pub fn get_default_modelfile() -> Result<PathBuf> {
-    let path = DefaultProvider
-        .get_lib_dir()?
-        .join("modelfiles/gemma-4-12b-gguf");
+pub fn get_default_modelfile(provider: impl ConfigProvider) -> Result<PathBuf> {
+    let path = provider.get_lib_dir()?.join("modelfiles/gemma-4-12b-gguf");
     Ok(path)
 }
 
@@ -907,7 +827,7 @@ async fn process_share_session(
 }
 
 fn show_session_info(db_conn: &Dbconn) -> Result<()> {
-    let sessions = fetch_sessions(&db_conn.chat)?;
+    let sessions = fetch_sessions(&db_conn.chat, None)?;
 
     let mut count = 0;
     for session in sessions {
@@ -1401,7 +1321,8 @@ mod tests {
 
     #[test]
     fn default_modelfile_uses_platform_default() {
-        let path = get_default_modelfile().expect("default modelfile should resolve");
+        let path =
+            get_default_modelfile(DefaultProvider).expect("default modelfile should resolve");
         assert!(path.ends_with("modelfiles/gemma-4-12b-gguf"));
     }
 

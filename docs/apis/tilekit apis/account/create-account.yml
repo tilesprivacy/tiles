@@ -1,0 +1,22 @@
+info:
+  name: create-account
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/account/create"
+  body:
+    type: json
+    data: |-
+      {
+        "nickname": "yo"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

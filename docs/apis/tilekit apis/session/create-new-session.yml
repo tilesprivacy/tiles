@@ -1,0 +1,16 @@
+info:
+  name: create-new-session
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/session/new"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
