@@ -75,6 +75,12 @@ impl LlamaConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct UiConfig {
+    /// Whether the daemon launches the menu bar app alongside itself
+    pub menubar: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct RootConfig {
     #[serde(rename = "root-user")]
@@ -83,6 +89,7 @@ struct RootConfig {
     pub model: Option<ModelConfig>,
     pub inference: Option<InferenceConfig>,
     pub llama: Option<LlamaConfig>,
+    pub ui: Option<UiConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -602,6 +609,11 @@ pub fn update_inference_config(config: InferenceConfig) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     root_config.inference = Some(config);
     save_root_config(&root_config)
+}
+
+pub fn get_ui_config() -> Result<UiConfig> {
+    let root_config = get_or_create_root_config()?;
+    Ok(root_config.ui.unwrap_or_default())
 }
 
 pub fn get_llama_config() -> Result<LlamaConfig> {

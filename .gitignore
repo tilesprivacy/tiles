@@ -21,3 +21,7 @@ server/bin
 server/stack/linux/requirements/
 downloads
 server/stack/macos/requirements/
+
+# menu bar app
+node_modules/
+apps/menubar/src-tauri/gen/

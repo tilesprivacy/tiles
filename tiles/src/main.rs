@@ -9,6 +9,7 @@ use tiles::{
         account::atproto::{login, logout},
         network::sync,
         plugin::{self, install, uninstall},
+        service,
     },
     daemon::{
         remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
@@ -175,6 +176,9 @@ enum SystemCommands {
 
     /// Configure daemon behavior
     Daemon(DaemonArgs),
+
+    /// Run Tiles in the background from login
+    Service(ServiceArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -316,6 +320,10 @@ enum AccountCommands {
 struct DaemonArgs {
     #[command(subcommand)]
     command: Option<DaemonCommands>,
+
+    /// Serve without launching the menu bar app
+    #[arg(long)]
+    no_ui: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -324,6 +332,32 @@ enum DaemonCommands {
     Start { port: Option<u32> },
 
     /// Stops the daemon
+    Stop,
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct ServiceArgs {
+    #[command(subcommand)]
+    command: ServiceCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommands {
+    /// Start Tiles automatically at login
+    Install,
+
+    /// Stop starting Tiles at login
+    Uninstall,
+
+    /// Show whether the service is installed and running
+    Status,
+
+    /// Start the service now
+    Start,
+
+    /// Stop the service now
     Stop,
 }
 
@@ -515,8 +549,23 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("{:?}", e))
                 .inspect(|_| println!("Daemon stopped successfully"))?,
-            _ => start_server(None).await?,
+            _ => start_server(None, !daemon_args.no_ui).await?,
         },
+        Some(Commands::System(SystemCommands::Service(service_args))) => {
+            match service_args.command {
+                ServiceCommands::Install => service::install()?,
+                ServiceCommands::Uninstall => service::uninstall()?,
+                ServiceCommands::Status => service::status().await?,
+                ServiceCommands::Start => {
+                    service::start()?;
+                    println!("Service started");
+                }
+                ServiceCommands::Stop => {
+                    service::stop()?;
+                    println!("Service stopped");
+                }
+            }
+        }
         Some(Commands::Tools(ToolsCommandsGroup::Plugin(plugin_args))) => {
             match plugin_args.command {
                 PluginCommands::List => {

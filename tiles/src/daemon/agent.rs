@@ -210,7 +210,6 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
 }
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
 
     use crate::core::agent::pi::from_test_command;
     use crate::daemon::{AppState, agent::agent_router};
@@ -222,14 +221,7 @@ mod tests {
     use tower::ServiceExt;
     #[tokio::test]
     async fn test_process_chat_prompt_success_ok() {
-        let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
-            agent: None.into(),
-        };
+        let state = AppState::for_tests();
         let body = json!({
             "message": "hello"
         })
@@ -268,12 +260,8 @@ mod tests {
         .unwrap();
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(Some(pi_agent)),
+            ..AppState::for_tests()
         };
 
         let body = json!({
@@ -316,12 +304,8 @@ mod tests {
         .unwrap();
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(Some(pi_agent)),
+            ..AppState::for_tests()
         };
 
         let body = json!({

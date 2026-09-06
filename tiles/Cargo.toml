@@ -10,7 +10,7 @@ reqwest = { version = "0.12", features = ["json", "blocking", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-tokio = { version = "1" , features = ["macros", "process", "rt-multi-thread", "io-util"]}
+tokio = { version = "1" , features = ["macros", "process", "rt-multi-thread", "io-util", "signal", "sync", "time"]}
 owo-colors = "4"
 futures-util = "0.3"
 hf-hub = {version = "0.4", features = ["tokio"]}

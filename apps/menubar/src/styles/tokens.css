@@ -1,0 +1,64 @@
+/* colours are the site's cyberpunk theme, tiles-next/app/globals.css:125
+   component metrics land with their components, not here */
+
+:root {
+  color-scheme: dark;
+
+  /* ── Geometry ─────────────────────────────────────────── */
+  --panel-width: 380px;
+  /* must equal CORNER_RADIUS in panel.rs, a mismatch shows as a doubled corner */
+  --radius-panel: 10px;
+
+  --pad-x: 14px;
+  /* the rail lives here, so rows start clear of it */
+  --rail-w: 2px;
+
+  --hairline: 1px;
+
+  --h-row: 26px;
+  --h-row-lg: 38px;
+  /* the same bar the nav is, the flood is what makes it the masthead */
+  --h-masthead: 36px;
+  --h-nav: 36px;
+
+  /* the chamfer, one cut on every chip */
+  --cut: 4px;
+
+  --dur-push: 180ms;
+  --dur-state: 140ms;
+  --ease-push: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* ── Type ─────────────────────────────────────────────── */
+  --font-ui: "Geist", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --fs-title: 13px;
+  --fs-body: 12px;
+  --fs-label: 11px;
+  --fs-chip: 10px;
+  --fs-mono: 11px;
+
+  /* the site tracks its badges wide, but it only ever sets acronyms in them */
+  --tracking-chip: 0.03em;
+  --tracking-display: -0.02em;
+
+  /* ── Colour ───────────────────────────────────────────── */
+  --signal: #f7ff61;
+  /* the ground and the ink on the accent are the same colour */
+  --void: #111111;
+  --bone: #ffffff;
+  --ash: #d4d4d8;
+  --slate: #8f8f9a;
+  --steel: #1d1d1d;
+  --rule: rgba(255, 255, 255, 0.1);
+  /* the daemon being down, and nothing else. yellow already means live */
+  --alert: #ff5f52;
+}
+
+/* turns every push and every state flip into a swap without a second code path */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-push: 0ms;
+    --dur-state: 0ms;
+  }
+}

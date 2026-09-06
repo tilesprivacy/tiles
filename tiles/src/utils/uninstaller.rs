@@ -32,6 +32,8 @@ pub fn uninstall(all: bool) -> Result<()> {
     let needs_elevation = plan.needs_elevation();
     print_plan(&plan, needs_elevation);
     confirm_uninstall(all)?;
+    #[cfg(target_os = "macos")]
+    crate::core::service::unload().context("Failed to unload Tiles service")?;
     plan.apply()?;
 
     println!("Tiles uninstalled successfully.");
@@ -54,6 +56,8 @@ impl UninstallPlanner {
         let mut plan = Self::default();
 
         plan.remove_files.insert(layout.bin);
+        #[cfg(target_os = "macos")]
+        add_service_file_to_plan(&mut plan, crate::core::service::plist_path()?);
 
         if all {
             let user_data_dir = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
@@ -121,6 +125,10 @@ impl UninstallPlanner {
 
         Ok(())
     }
+}
+
+fn add_service_file_to_plan(plan: &mut UninstallPlanner, path: PathBuf) {
+    plan.remove_files.insert(path);
 }
 
 fn print_plan(plan: &UninstallPlanner, needs_elevation: bool) {
@@ -709,6 +717,21 @@ mod tests {
 
         assert!(dir.path().join("config.toml").exists());
         assert!(!dir.path().join("server.pid").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn service_plist_is_an_uninstall_artifact() -> Result<()> {
+        let dir = tempdir()?;
+        let plist = dir.path().join("com.tilesprivacy.tiles.daemon.plist");
+        fs::write(&plist, "plist")?;
+
+        let mut plan = UninstallPlanner::default();
+        super::add_service_file_to_plan(&mut plan, plist.clone());
+        assert!(plan.remove_files.contains(&plist));
+
+        plan.apply()?;
+        assert!(!plist.exists());
         Ok(())
     }
 }

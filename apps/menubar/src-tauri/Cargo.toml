@@ -1,0 +1,22 @@
+[package]
+name = "tiles-menubar"
+version = "0.1.0"
+description = "The Tiles menu bar control panel"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = [] }
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "c9ec2130422200f0863b23dfdad02b133a529b07" }
+tauri-plugin-single-instance = "2"
+
+# the daemon is plain http on loopback, a TLS backend would be dead weight
+reqwest = { version = "0.12", default-features = false }
+tokio = { version = "1", features = ["time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+

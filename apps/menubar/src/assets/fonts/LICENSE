@@ -1,0 +1,5 @@
+Geist and Geist Mono are licensed under the SIL Open Font License 1.1.
+Copyright (c) 2023 Vercel, Inc. https://github.com/vercel/geist-font
+
+These are the latin-subset woff2 builds served by Google Fonts, vendored so the
+panel never requests a font at runtime.
