@@ -4,12 +4,16 @@ use std::io;
 
 use anyhow::{Context, Result, anyhow};
 use owo_colors::OwoColorize;
+
 use tiles::core::account::local::{
     RootUser, add_token, create_root_account, create_token, get_peer_list, get_root_user_details,
     is_valid_delegation, save_root_account, set_nickname, unlink,
 };
+use tiles::core::license::{
+    activate_license, deactivate_license, fetch_licenses, validate_license,
+};
 use tiles::core::network::link;
-use tiles::core::storage::db::Dbconn;
+use tiles::core::storage::db::{Dbconn, get_db_conn};
 use tiles::daemon::{ping as ping_daemon, stop_cmd};
 use tiles::repl::{start_server_daemon, stop_server_daemon};
 use tiles::utils::config::{
@@ -394,6 +398,62 @@ pub async fn add_link(token: String, db_conn: &Dbconn) -> Result<()> {
     }
     Ok(())
 }
+
+pub async fn run_validate(license_key: &str) {
+    if let Err(err) = validate_license(license_key, None).await {
+        eprintln!(
+            "License validation check for {} failed due to {}",
+            license_key, err
+        );
+    } else {
+        println!("{} is a valid license", license_key);
+    }
+}
+
+// TODO: maybe we can also if its PRO or PLUS based on prefix
+pub async fn run_activate(license_key: &str) -> Result<()> {
+    let mut conn = get_db_conn(&tiles::core::storage::db::DBTYPE::COMMON)?;
+
+    if let Err(err) = activate_license(license_key, &mut conn, None).await {
+        eprintln!(
+            "License activation for {} failed due to {}",
+            license_key, err
+        );
+    } else {
+        println!("License {} activated successfully", license_key);
+    }
+    Ok(())
+}
+
+pub async fn run_deactivate(license_key: &str, conn: &Dbconn) -> Result<()> {
+    if let Err(err) = deactivate_license(license_key, &conn.common, None).await {
+        eprintln!(
+            "License deactivation for {} failed due to {}",
+            license_key, err
+        );
+    } else {
+        println!("License {} deactivated successfully", license_key);
+    }
+    Ok(())
+}
+
+pub fn run_license_status(db_conn: &Dbconn) {
+    match fetch_licenses(&db_conn.common) {
+        Ok(licenses) => {
+            println!("Key\tActive\tStatus\n");
+            for license in &licenses {
+                println!(
+                    "{}\t{}\t{}\n",
+                    license.key, license.active, license.polar_status
+                );
+            }
+        }
+        Err(err) => {
+            eprintln!("Failed to show status of license due to {}", err)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
