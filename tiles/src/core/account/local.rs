@@ -997,6 +997,19 @@ pub mod tests {
         )
         .unwrap();
 
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS licenses(
+                key TEXT PRIMARY KEY,
+                polar_status TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                activation_id TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+        )",
+            [],
+        )
+        .unwrap();
+
         conn
     }
 

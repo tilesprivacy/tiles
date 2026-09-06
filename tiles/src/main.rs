@@ -18,7 +18,8 @@ use tiles::{
 };
 
 use crate::commands::{
-    add_link, create_link, set_inference_config_to_daemon, show_peers, unlink_peer,
+    add_link, create_link, run_activate, run_deactivate, run_license_status, run_validate,
+    set_inference_config_to_daemon, show_peers, unlink_peer,
 };
 
 mod commands;
@@ -60,6 +61,11 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    link      Link devices via peer-to-peer\n",
     "    sync      Sync chats with peers\n",
     "    remote    Remote inference commands\n\n",
+    "  License\n",
+    "    activate   Activate the given license key\n",
+    "    validate   Validate the given license key\n",
+    "    deactivate Deactivate the given license key\n",
+    "    Status     Shows all the license details used\n\n",
     "  System\n",
     "    update    Update Tiles to the latest version\n",
     "    uninstall Uninstall Tiles from this machine\n",
@@ -145,8 +151,18 @@ enum AccountCommandsGroup {
 
     /// Configure your data and storage
     Data(DataArgs),
+
+    /// Manage Tiles License
+    License(LicenseArgs),
 }
 
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct LicenseArgs {
+    #[command(subcommand)]
+    command: LicenseCommands,
+}
 #[derive(Debug, Subcommand)]
 enum SyncCommands {
     /// Link devices via peer-to-peer
@@ -194,6 +210,20 @@ enum TilekitCommands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum LicenseCommands {
+    /// Activate a given license key
+    Activate { license_key: String },
+
+    /// Validate a given license key
+    Validate { license_key: String },
+
+    /// Deactivate a given license key
+    Deactivate { license_key: String },
+
+    /// Current license status
+    Status,
+}
 #[derive(Debug, Args)]
 struct RunFlags {
     /// Max times cli communicates with the model until it gets a proper reply for a user prompt
@@ -499,6 +529,18 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::Account(account_args))) => {
             commands::run_account_commands(account_args).await?;
+        }
+        Some(Commands::Accounts(AccountCommandsGroup::License(license_args))) => {
+            match license_args.command {
+                LicenseCommands::Activate { license_key } => run_activate(&license_key).await?,
+                LicenseCommands::Validate { license_key } => {
+                    run_validate(&license_key).await;
+                }
+                LicenseCommands::Deactivate { license_key } => {
+                    run_deactivate(&license_key, &db_conn).await?;
+                }
+                LicenseCommands::Status => run_license_status(&db_conn),
+            }
         }
         Some(Commands::System(SystemCommands::Update)) => {
             println!("Checking for updates...");

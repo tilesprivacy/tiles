@@ -17,6 +17,7 @@ pub mod account;
 pub mod agent;
 pub mod chats;
 pub mod health;
+pub mod license;
 pub mod network;
 pub mod plugin;
 pub mod storage;
