@@ -11,8 +11,8 @@ use std::{
 use crate::{
     core::agent::pi::PiAgent,
     daemon::{
-        account::account_router, agent::agent_router, server::server_router,
-        session::session_router,
+        account::account_router, agent::agent_router, atproto::atproto_router,
+        server::server_router, session::session_router,
     },
 };
 use anyhow::{Result, anyhow};
@@ -38,9 +38,9 @@ use tokio::sync::oneshot::{self, Receiver, Sender};
 
 pub mod account;
 pub mod agent;
+pub mod atproto;
 pub mod server;
 pub mod session;
-
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
@@ -245,6 +245,7 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
         .merge(server_router())
         .merge(account_router())
         .merge(session_router())
+        .merge(atproto_router())
         // .layer(service)
         .with_state(shared_state);
 

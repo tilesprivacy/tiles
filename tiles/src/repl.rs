@@ -812,7 +812,7 @@ async fn process_share_session(
                 input.clear();
                 println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
                 stdin.read_line(&mut input)?;
-                login(conn, input.trim()).await?;
+                login(input.trim()).await?;
                 share_session(&conn.common, &shared_session, is_private).await?;
             }
         }

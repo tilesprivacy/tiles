@@ -1,0 +1,22 @@
+info:
+  name: logout
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/atproto/logout"
+  body:
+    type: json
+    data: |-
+      {
+        "user_handle": "madcla.ws"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

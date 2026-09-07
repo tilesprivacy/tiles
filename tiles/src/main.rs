@@ -564,9 +564,11 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
-                login(&db_conn, &handle).await?;
+                login(&handle).await?;
             }
-            AtCommands::Logout => logout(&db_conn)?,
+            AtCommands::Logout => {
+                logout(&db_conn)?;
+            }
         },
         Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,
     }
