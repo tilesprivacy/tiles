@@ -20,6 +20,10 @@ use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
+    http::{
+        HeaderValue, Method,
+        header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
+    },
     response::IntoResponse,
     routing::get,
 };
@@ -37,6 +41,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
+use tower_http::cors::CorsLayer;
 
 pub mod account;
 pub mod agent;
@@ -248,6 +253,31 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
     wait_until_server_is_up(port).await
 }
 
+/// Browsers refuse a cross-origin request unless the daemon says who may make
+/// one, and the UI is cross-origin from the moment it stops being served by the
+/// Vite proxy: a Tauri webview runs on `tauri://localhost`.
+///
+/// The list is explicit on purpose. Allowing any origin would let any page the
+/// user happens to visit read their sessions and chats off the loopback port,
+/// since nothing here asks for credentials.
+fn cors_layer() -> CorsLayer {
+    let origins = [
+        // Tauri webviews
+        "tauri://localhost",
+        // `npm run dev`
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    .iter()
+    .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+    .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
+        .allow_headers([CONTENT_TYPE, ACCEPT, AUTHORIZATION])
+}
+
 pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     let dyn_port: u32 = get_port(port);
 
@@ -285,6 +315,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         .merge(session_router())
         .merge(atproto_router())
         // .layer(service)
+        .layer(cors_layer())
         .with_state(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);
