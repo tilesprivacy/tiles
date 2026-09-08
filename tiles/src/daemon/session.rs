@@ -215,7 +215,6 @@ mod tests {
     use std::{
         fs::{self, File},
         io::Write,
-        sync::Mutex,
     };
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
@@ -239,12 +238,8 @@ mod tests {
         .unwrap();
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(Some(pi_agent)),
+            ..AppState::for_tests()
         };
 
         let body = json!({}).to_string();
@@ -290,12 +285,8 @@ mod tests {
         .unwrap();
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(None),
+            ..AppState::for_tests()
         };
 
         fs::create_dir(mock_provider.tmp_path.join("modelfiles")).unwrap();
@@ -347,12 +338,8 @@ mod tests {
             sessionChats::create_session(&db_conn.chat, "id-3", "sesh-3", &user.user_id).unwrap();
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(None),
+            ..AppState::for_tests()
         };
 
         let resp = do_fetch_sessions(state.into(), db_conn.chat)
@@ -373,12 +360,8 @@ mod tests {
         let user = create_dummy_user(&db_conn.common, Some("did:key:xyz".to_owned()));
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(None),
+            ..AppState::for_tests()
         };
 
         // Test saving chat with new session
@@ -409,12 +392,8 @@ mod tests {
         let user = create_dummy_user(&db_conn.common, Some("did:key:xyz".to_owned()));
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(None),
+            ..AppState::for_tests()
         };
 
         // Test saving chat with new session
@@ -440,12 +419,8 @@ mod tests {
             sessionChats::create_session(&db_conn.chat, "id-1", "sesh-1", &user.user_id).unwrap();
 
         let state = AppState {
-            shutdown_sender: Mutex::new(None),
-            vsn: env!("CARGO_PKG_VERSION").to_owned(),
-            remote_ticket: Mutex::new(None),
-            remote_shutdown_sender: Mutex::new(None),
-            remote_running: Mutex::new(false),
             agent: AsyncMutex::new(None),
+            ..AppState::for_tests()
         };
 
         let save_req = SaveChatRequest {

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/macOS-schema.json",
+  "identifier": "default",
+  "description": "The ACL only gates plugin commands, so hide_panel and panel_ready need no entry here.",
+  "windows": ["panel"],
+  "permissions": ["core:default"]
+}
