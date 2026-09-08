@@ -65,6 +65,7 @@ fn plist(program: &Path, out_log: &Path, err_log: &Path) -> String {
   <array>
     <string>{program}</string>
     <string>daemon</string>
+    <string>--at-login</string>
   </array>
   <key>RunAtLoad</key>
   <true/>

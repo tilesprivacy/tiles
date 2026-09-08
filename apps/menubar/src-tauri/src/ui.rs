@@ -10,6 +10,10 @@ use crate::panel;
 
 pub const LABEL: &str = "ui";
 
+/// set by the daemon when a person started it. launchd starting it at login is
+/// not an ask for a window
+const SHOW_UI: &str = "TILES_SHOW_UI";
+
 const WIDTH: f64 = 1100.0;
 const HEIGHT: f64 = 760.0;
 const MIN_WIDTH: f64 = 640.0;
@@ -55,9 +59,6 @@ fn build(app: &AppHandle, path: &str) -> Result<WebviewWindow, String> {
 /// a window belongs to the space it was made on, so without this the user gets
 /// dragged to it instead of it coming to them.
 ///
-/// no FullScreenPrimary on purpose: we are LSUIElement, so a native fullscreen
-/// space would hand the menu bar to an app that has no menus, and it comes up
-/// black with nothing to pull down. the green button zooms instead
 fn follow_active_space(window: &WebviewWindow) {
     let Ok(ns_window) = window.ns_window() else {
         return;
@@ -65,7 +66,8 @@ fn follow_active_space(window: &WebviewWindow) {
 
     unsafe {
         let ns_window = ns_window as *mut AnyObject;
-        let behavior = NSWindowCollectionBehavior::MoveToActiveSpace;
+        let behavior = NSWindowCollectionBehavior::MoveToActiveSpace
+            | NSWindowCollectionBehavior::FullScreenPrimary;
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
     }
 }
@@ -91,6 +93,17 @@ pub fn open(app: &AppHandle, path: &str) -> Result<(), String> {
     panel::dismiss(app, panel::Dismiss::Instant);
 
     Ok(())
+}
+
+/// the daemon decides whether the window belongs on screen at startup
+pub fn init(app: &AppHandle) {
+    if std::env::var_os(SHOW_UI).is_none() {
+        return;
+    }
+
+    if let Err(err) = open(app, "/") {
+        eprintln!("[ui] could not open the chat window: {err}");
+    }
 }
 
 #[tauri::command]

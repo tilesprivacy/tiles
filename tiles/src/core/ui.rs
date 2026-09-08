@@ -27,6 +27,10 @@ const BUNDLE_EXEC: &str = "Tiles.app/Contents/MacOS/tiles-menubar";
 const SUPERVISED: &str = "TILES_MENUBAR_SUPERVISED";
 const SUPERVISED_ARG: &str = "--tiles-daemon-supervised";
 
+/// set when a person started the daemon, so the app knows to show its window.
+/// launchd starting it at login is not an ask for a window
+const SHOW_UI: &str = "TILES_SHOW_UI";
+
 const MIN_BACKOFF: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 /// Past this the child counts as healthy and the next crash starts over
@@ -89,7 +93,7 @@ fn enabled_by_config() -> bool {
         .unwrap_or(!cfg!(debug_assertions))
 }
 
-fn spawn(bin: &PathBuf) -> Result<tokio::process::Child> {
+fn spawn(bin: &PathBuf, show_ui: bool) -> Result<tokio::process::Child> {
     let data_dir = DefaultProvider.get_or_create_data_dir()?;
     let out = std::fs::OpenOptions::new()
         .create(true)
@@ -102,9 +106,14 @@ fn spawn(bin: &PathBuf) -> Result<tokio::process::Child> {
 
     // deliberately no setsid, unlike the inference server and the agent. this
     // child is meant to be reachable, not detached
-    Command::new(bin)
-        .arg(SUPERVISED_ARG)
-        .env(SUPERVISED, "1")
+    let mut command = Command::new(bin);
+    command.arg(SUPERVISED_ARG).env(SUPERVISED, "1");
+
+    if show_ui {
+        command.env(SHOW_UI, "1");
+    }
+
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err))
@@ -114,7 +123,7 @@ fn spawn(bin: &PathBuf) -> Result<tokio::process::Child> {
 }
 
 /// Nothing here is fatal to the daemon, a headless daemon is a working daemon
-pub fn start(ui: Arc<Ui>) {
+pub fn start(ui: Arc<Ui>, show_ui: bool) {
     if !cfg!(target_os = "macos") {
         return;
     }
@@ -136,7 +145,7 @@ pub fn start(ui: Arc<Ui>) {
                 break;
             }
 
-            let mut child = match spawn(&bin) {
+            let mut child = match spawn(&bin, show_ui) {
                 Ok(child) => child,
                 Err(err) => {
                     log::error!("Menu bar app failed to start: {err:?}");

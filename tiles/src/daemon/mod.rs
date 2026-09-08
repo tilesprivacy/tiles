@@ -278,7 +278,7 @@ fn cors_layer() -> CorsLayer {
         .allow_headers([CONTENT_TYPE, ACCEPT, AUTHORIZATION])
 }
 
-pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
+pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Result<()> {
     let dyn_port: u32 = get_port(port);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -324,7 +324,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     info!("Daemon server started at {}", dyn_port);
 
     if with_ui {
-        ui::start(ui);
+        ui::start(ui, show_ui);
     }
     listen_for_signals(shared_state.clone());
 
@@ -719,7 +719,7 @@ mod tests {
     #[serial]
     async fn test_sever_process_and_server_started() -> Result<()> {
         tokio::spawn(async move {
-            let _ = start_server(None, false).await;
+            let _ = start_server(None, false, false).await;
         });
         wait_until_server_is_up(None).await?;
         assert!(ping(None).await.is_ok());
