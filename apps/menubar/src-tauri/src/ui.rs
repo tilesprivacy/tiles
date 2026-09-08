@@ -53,7 +53,11 @@ fn build(app: &AppHandle, path: &str) -> Result<WebviewWindow, String> {
 }
 
 /// a window belongs to the space it was made on, so without this the user gets
-/// dragged to it instead of it coming to them
+/// dragged to it instead of it coming to them.
+///
+/// no FullScreenPrimary on purpose: we are LSUIElement, so a native fullscreen
+/// space would hand the menu bar to an app that has no menus, and it comes up
+/// black with nothing to pull down. the green button zooms instead
 fn follow_active_space(window: &WebviewWindow) {
     let Ok(ns_window) = window.ns_window() else {
         return;
@@ -61,8 +65,7 @@ fn follow_active_space(window: &WebviewWindow) {
 
     unsafe {
         let ns_window = ns_window as *mut AnyObject;
-        let behavior = NSWindowCollectionBehavior::MoveToActiveSpace
-            | NSWindowCollectionBehavior::FullScreenPrimary;
+        let behavior = NSWindowCollectionBehavior::MoveToActiveSpace;
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
     }
 }
