@@ -72,10 +72,6 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if matches!(event, WindowEvent::Destroyed) && window.label() == ui::LABEL {
-                ui::on_closed(window.app_handle());
-            }
-
             // has to stay a WindowEvent, nspanel's set_event_handler replaces
             // Tauri's NSWindowDelegate instead of chaining and kills this
             if matches!(event, WindowEvent::Focused(false)) && window.label() == panel::LABEL {
