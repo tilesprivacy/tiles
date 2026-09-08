@@ -118,7 +118,7 @@ fn launchctl_checked(args: &[&str]) -> Result<()> {
     ))
 }
 
-pub fn install() -> Result<()> {
+pub fn add() -> Result<()> {
     require_macos()?;
 
     // a debug daemon resolves .tiles_dev off its working directory and launchd
@@ -154,11 +154,11 @@ pub fn install() -> Result<()> {
     // a user who disabled it once stays disabled across reinstalls otherwise
     let _ = launchctl(&["enable", &target()]);
 
-    println!("Service installed at {}", path.display());
+    println!("Service added at {}", path.display());
     Ok(())
 }
 
-pub fn uninstall() -> Result<()> {
+pub fn remove() -> Result<()> {
     require_macos()?;
 
     let path = plist_path()?;
@@ -170,7 +170,7 @@ pub fn uninstall() -> Result<()> {
 
     std::fs::remove_file(&path).with_context(|| format!("Failed to remove {}", path.display()))?;
 
-    println!("Service uninstalled");
+    println!("Service removed");
     Ok(())
 }
 
@@ -189,7 +189,7 @@ pub fn start() -> Result<()> {
     require_macos()?;
     if !is_installed() {
         return Err(anyhow!(
-            "Service is not installed, run `tiles service install`"
+            "Service is not installed, run `tiles service add`"
         ));
     }
     launchctl_checked(&["kickstart", "-k", &target()])
@@ -200,7 +200,7 @@ pub fn stop() -> Result<()> {
     require_macos()?;
     if !is_installed() {
         return Err(anyhow!(
-            "Service is not installed, run `tiles service install`"
+            "Service is not installed, run `tiles service add`"
         ));
     }
     launchctl_checked(&["bootout", &target()])
@@ -212,7 +212,7 @@ pub async fn status() -> Result<()> {
     let path = plist_path()?;
     if !path.exists() {
         println!("Service:  not installed");
-        println!("Run `tiles service install` to start Tiles at login");
+        println!("Run `tiles service add` to start Tiles at login");
         return Ok(());
     }
     println!("Service:  installed at {}", path.display());

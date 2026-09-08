@@ -127,6 +127,7 @@ impl UninstallPlanner {
     }
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn add_service_file_to_plan(plan: &mut UninstallPlanner, path: PathBuf) {
     plan.remove_files.insert(path);
 }

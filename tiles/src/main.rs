@@ -66,7 +66,8 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    uninstall Uninstall Tiles from this machine\n",
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
-    "    daemon    Configure daemon behavior\n\n",
+    "    daemon    Configure daemon behavior\n",
+    "    service   Run Tiles in the background from login\n\n",
     "  Tools\n",
     "    plugin    Manage plugins such as skills, extensions etc\n\n",
     "Options:\n",
@@ -346,10 +347,10 @@ struct ServiceArgs {
 #[derive(Debug, Subcommand)]
 enum ServiceCommands {
     /// Start Tiles automatically at login
-    Install,
+    Add,
 
     /// Stop starting Tiles at login
-    Uninstall,
+    Remove,
 
     /// Show whether the service is installed and running
     Status,
@@ -553,8 +554,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::System(SystemCommands::Service(service_args))) => {
             match service_args.command {
-                ServiceCommands::Install => service::install()?,
-                ServiceCommands::Uninstall => service::uninstall()?,
+                ServiceCommands::Add => service::add()?,
+                ServiceCommands::Remove => service::remove()?,
                 ServiceCommands::Status => service::status().await?,
                 ServiceCommands::Start => {
                     service::start()?;
