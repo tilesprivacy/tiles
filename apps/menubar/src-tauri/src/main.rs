@@ -10,6 +10,7 @@ mod paths;
 mod remote;
 mod sessions;
 mod tray;
+mod ui;
 
 use tauri::{ActivationPolicy, Manager, WindowEvent};
 
@@ -44,7 +45,9 @@ fn main() {
             awake::awake_start,
             awake::awake_stop,
             awake::awake_pause,
-            awake::awake_resume
+            awake::awake_resume,
+            ui::open_session,
+            ui::open_ui
         ])
         .setup(|app| {
             // LSUIElement covers the launch window before this runs
@@ -69,6 +72,10 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if matches!(event, WindowEvent::Destroyed) && window.label() == ui::LABEL {
+                ui::on_closed(window.app_handle());
+            }
+
             // has to stay a WindowEvent, nspanel's set_event_handler replaces
             // Tauri's NSWindowDelegate instead of chaining and kills this
             if matches!(event, WindowEvent::Focused(false)) && window.label() == panel::LABEL {
