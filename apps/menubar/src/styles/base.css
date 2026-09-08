@@ -13,6 +13,16 @@
   outline: none;
 }
 
+/* the reset above kills every text behaviour, and a field is the one place
+   that needs them back */
+input {
+  font: inherit;
+  color: inherit;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+
 html,
 body,
 #app {

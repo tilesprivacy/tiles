@@ -1,4 +1,5 @@
 mod account;
+mod atproto;
 mod clipboard;
 mod daemon;
 mod inference;
@@ -33,6 +34,8 @@ fn main() {
             inference::inference_state,
             inference::inference_set,
             account::account_state,
+            atproto::atproto_state,
+            atproto::atproto_login,
             sessions::sessions_state,
             remote::remote_state,
             remote::remote_set
@@ -48,6 +51,7 @@ fn main() {
             // before the watcher, its first tick already reports all three
             inference::init(app.handle());
             account::init(app.handle());
+            atproto::init(app.handle());
             sessions::init(app.handle());
             remote::init(app.handle());
             daemon::init(app.handle());

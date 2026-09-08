@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::{account, inference, remote, sessions};
+use crate::{account, atproto, inference, remote, sessions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -95,6 +95,7 @@ async fn watch(app: AppHandle) {
                 set(&app, Health::Up { version });
                 inference::poll(&app, &client).await;
                 account::poll(&app, &client).await;
+                atproto::poll(&app, &client).await;
                 remote::poll(&app, &client).await;
             }
             None => {
@@ -106,6 +107,7 @@ async fn watch(app: AppHandle) {
                 );
                 inference::unknown(&app);
                 account::unknown(&app);
+                atproto::unknown(&app);
                 sessions::unknown(&app);
                 remote::unknown(&app);
             }
