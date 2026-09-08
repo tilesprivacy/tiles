@@ -16,6 +16,7 @@ use rusqlite::{
     Connection, Row, ToSql, params,
     types::{FromSql, FromSqlError},
 };
+use serde::Serialize;
 use std::{
     collections::HashMap,
     fmt::Display,
@@ -32,14 +33,15 @@ use crate::{
         storage::db::{DBTYPE, Dbconn, get_db_conn},
     },
     utils::{
-        config::{get_app_name, get_or_create_config, save_config},
+        config::{DefaultProvider, get_app_name, get_or_create_config, save_config},
         get_unix_time_now,
     },
 };
 const ROOT_USER_CONFIG_KEY: &str = "root-user";
 
 const ROOT_PARSE_ERROR: &str = "Failed to parse root user config";
-#[allow(dead_code)]
+
+#[derive(Serialize, Debug)]
 pub struct RootUser {
     pub id: String,
     pub nickname: String,
@@ -326,7 +328,7 @@ pub fn get_user(conn: &Connection, did: &str) -> Result<User> {
 }
 
 pub fn save_root_account_db(db_conn: &Dbconn) -> Result<()> {
-    let config = get_or_create_config()?;
+    let config = get_or_create_config(DefaultProvider)?;
     let root_user = get_root_user_details(&config)?;
     let user = User {
         id: Uuid::now_v7().to_string(),

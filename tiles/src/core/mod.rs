@@ -19,7 +19,10 @@ pub mod chats;
 pub mod health;
 pub mod network;
 pub mod plugin;
+pub mod server;
+pub mod service;
 pub mod storage;
+pub mod ui;
 // Entrypoint of the core
 pub fn init() -> Result<Dbconn> {
     let config_provider = DefaultProvider;

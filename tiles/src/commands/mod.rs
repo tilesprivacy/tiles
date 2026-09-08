@@ -9,9 +9,9 @@ use tiles::core::account::local::{
     is_valid_delegation, save_root_account, set_nickname, unlink,
 };
 use tiles::core::network::link;
+use tiles::core::server::{ping, start_server_daemon, stop_server_daemon};
 use tiles::core::storage::db::Dbconn;
 use tiles::daemon::{ping as ping_daemon, stop_cmd};
-use tiles::repl::{start_server_daemon, stop_server_daemon};
 use tiles::utils::config::{
     ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
     set_user_data_path, update_inference_config,
@@ -68,7 +68,7 @@ pub async fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
     config_provider.get_or_create_config_dir()?;
     config_provider.get_or_create_data_dir()?;
 
-    let root_config = get_or_create_config()?;
+    let root_config = get_or_create_config(DefaultProvider)?;
     let root_user_details = get_root_user_details(&root_config)?;
     println!("{}", FTUE_ASCII_ART.blue());
     println!("{} {}", FTUE_VERSION_TITLE, env!("CARGO_PKG_VERSION"));
@@ -262,7 +262,7 @@ pub async fn stop_server() {
 }
 
 pub async fn uninstall_tiles(all: bool) -> Result<()> {
-    if tiles::repl::ping().await.is_ok() {
+    if ping().await.is_ok() {
         return Err(anyhow!(
             "Inference server is still running. Stop it with `tiles server stop` and try again."
         ));
@@ -292,7 +292,7 @@ pub fn set_inference_config_to_daemon(is_background: bool) -> Result<()> {
 }
 /// Runs the account command with the args being passed.
 pub async fn run_account_commands(account_args: AccountArgs) -> Result<()> {
-    let config = get_or_create_config()?;
+    let config = get_or_create_config(DefaultProvider)?;
     let root_user_details = get_root_user_details(&config)?;
     match account_args.command {
         Some(AccountCommands::Create { nickname }) => {

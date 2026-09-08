@@ -3,4 +3,10 @@ resolver = "3"
 members = [
     "tilekit",
     "tiles",
+    "apps/menubar/src-tauri",
+]
+
+default-members = [
+    "tilekit",
+    "tiles",
 ]

@@ -391,12 +391,11 @@ pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
     Ok(sesh)
 }
 
-pub fn fetch_sessions(conn: &Connection) -> Result<Vec<Session>> {
-    let query =
-        "select id, name, creator_id, created_at, snapshot from sessions order by created_at desc";
+pub fn fetch_sessions(conn: &Connection, limit: Option<u32>) -> Result<Vec<Session>> {
+    let query = "select id, name, creator_id, created_at, snapshot from sessions order by created_at desc limit ?1";
 
     let mut stmt = conn.prepare(query)?;
-    let session_rows = stmt.query_map([], |row| {
+    let session_rows = stmt.query_map([limit.map_or(25, |v| v)], |row| {
         Ok(Session {
             id: row.get(0)?,
             name: row.get(1)?,

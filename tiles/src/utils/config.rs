@@ -75,6 +75,12 @@ impl LlamaConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct UiConfig {
+    /// Whether the daemon launches the menu bar app alongside itself
+    pub menubar: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct RootConfig {
     #[serde(rename = "root-user")]
@@ -83,6 +89,7 @@ struct RootConfig {
     pub model: Option<ModelConfig>,
     pub inference: Option<InferenceConfig>,
     pub llama: Option<LlamaConfig>,
+    pub ui: Option<UiConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -199,7 +206,7 @@ impl ConfigProvider for DefaultProvider {
     }
 
     fn get_user_data_dir(&self) -> Result<PathBuf> {
-        let root_config = get_or_create_config()?;
+        let root_config = get_or_create_config(DefaultProvider)?;
         let data_config = root_config
             .get("data")
             .expect("Failed to get data")
@@ -273,7 +280,7 @@ pub fn set_user_data_path(path: &str) -> Result<String> {
 }
 
 pub fn get_memory_path() -> Result<String> {
-    let root_config = get_or_create_config()?;
+    let root_config = get_or_create_config(DefaultProvider)?;
     let memory_config = root_config
         .get("data")
         .ok_or_else(|| anyhow!("memory section doesnt exist"))?
@@ -321,7 +328,7 @@ fn set_user_data_path_with_provider<P: ConfigProvider>(
 ) -> Result<String> {
     let path_buf = PathBuf::from_str(path)?;
     if path_buf.try_exists()? {
-        let mut root_config = get_or_create_config()?;
+        let mut root_config = get_or_create_config(DefaultProvider)?;
         let mut memory_config = root_config
             .get("data")
             .ok_or_else(|| anyhow!("data section doesnt exist"))?
@@ -345,8 +352,8 @@ fn set_user_data_path_with_provider<P: ConfigProvider>(
 
 // TODO: This fn is very rigid and should be eventually replaced by
 // `get_or_create_root_config`
-pub fn get_or_create_config() -> Result<Table> {
-    let tiles_config_dir = DefaultProvider.get_config_dir()?;
+pub fn get_or_create_config(provider: impl ConfigProvider) -> Result<Table> {
+    let tiles_config_dir = provider.get_config_dir()?;
     let config_toml_path = tiles_config_dir.join("config.toml");
 
     if config_toml_path
@@ -602,6 +609,11 @@ pub fn update_inference_config(config: InferenceConfig) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     root_config.inference = Some(config);
     save_root_config(&root_config)
+}
+
+pub fn get_ui_config() -> Result<UiConfig> {
+    let root_config = get_or_create_root_config()?;
+    Ok(root_config.ui.unwrap_or_default())
 }
 
 pub fn get_llama_config() -> Result<LlamaConfig> {

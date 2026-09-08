@@ -8,7 +8,13 @@ use std::{
     time::Duration,
 };
 
-use crate::{core::agent::pi::PiAgent, daemon::agent::agent_router};
+use crate::{
+    core::agent::pi::PiAgent,
+    daemon::{
+        account::account_router, agent::agent_router, atproto::atproto_router,
+        server::server_router, session::session_router,
+    },
+};
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
@@ -27,37 +33,74 @@ use serde::Serialize;
 use serde_json::json;
 use std::fs::OpenOptions;
 use std::sync::Mutex;
+use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
+use tokio::sync::watch;
+
+pub mod account;
 pub mod agent;
+pub mod atproto;
+pub mod server;
+pub mod session;
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
         network::{self, create_endpoint, share},
+        service,
         storage::db::get_db_conn,
+        ui::{self, Ui},
     },
     utils::config::{ConfigProvider, DefaultProvider, get_config_json, get_model_cache},
 };
 
 pub struct AppState {
-    pub shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
+    /// A watch rather than a one-shot: quit, `tiles daemon stop` and a SIGTERM
+    /// from launchd all land here, and a one-shot panics on the second of them
+    pub shutdown_sender: watch::Sender<bool>,
     pub vsn: String,
     //TODO: refactor the remote infy related fields
     pub remote_ticket: Mutex<Option<String>>,
     pub remote_running: Mutex<bool>,
     pub remote_shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
     pub agent: AsyncMutex<Option<PiAgent>>,
+    pub ui: Arc<Ui>,
 }
 
+#[cfg(test)]
+impl AppState {
+    /// the routes under test never shut anything down, so the handles are inert
+    pub fn for_tests() -> Self {
+        Self {
+            shutdown_sender: watch::channel(false).0,
+            vsn: env!("CARGO_PKG_VERSION").to_owned(),
+            remote_ticket: Mutex::new(None),
+            remote_shutdown_sender: Mutex::new(None),
+            remote_running: Mutex::new(false),
+            agent: None.into(),
+            ui: Ui::new(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum AppError {
-    ModelFileNotFound(String),
+    NotFound(String),
     InternalServerError(String),
+    RequestTimeout,
+    BadRequest(String),
+    AlreadyExists(String),
+    CannotProcess(String),
 }
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         let (status, reason) = match self {
-            Self::ModelFileNotFound(e) => (StatusCode::NOT_FOUND, e),
+            Self::NotFound(e) => (StatusCode::NOT_FOUND, e),
             Self::InternalServerError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+            Self::RequestTimeout => (StatusCode::REQUEST_TIMEOUT, "request timedout".to_string()),
+            Self::BadRequest(e) => (StatusCode::BAD_REQUEST, e),
+            Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
+            Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
         };
 
         let body = Json(json!({
@@ -69,7 +112,7 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub struct ApiResponse<T> {
     status: String,
     data: T,
@@ -81,6 +124,14 @@ impl<T: Serialize> ApiResponse<T> {
             status: "success".to_string(),
             data,
         })
+    }
+}
+
+pub struct ApiCleanupGuard;
+
+impl Drop for ApiCleanupGuard {
+    fn drop(&mut self) {
+        log::info!("Dropping the request")
     }
 }
 
@@ -109,6 +160,12 @@ const ALPN: &[u8] = b"remote-link/v1";
 //TODO: Add a different PORT for development
 // We should update that in py server too for the daemon api calls
 const DEFAULT_PORT: u32 = 1729;
+
+/// the inference server is the slowest thing in a shutdown, and the only one
+/// that can hang it
+const INFERENCE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(20);
+const DAEMON_STOP_POLL: Duration = Duration::from_millis(250);
 pub async fn start_cmd(port: Option<u32>) -> Result<()> {
     start_daemon(port).await
 }
@@ -149,6 +206,13 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
         }
     }
 
+    // a launchd-managed daemon has to come back through launchd, or the service
+    // is left pointing at a process that is gone
+    if service::is_installed() {
+        service::start()?;
+        return wait_until_server_is_up(port).await;
+    }
+
     let data_dir = DefaultProvider.get_data_dir()?;
     let stdout_log = OpenOptions::new()
         .create(true)
@@ -184,21 +248,28 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
     wait_until_server_is_up(port).await
 }
 
-pub async fn start_server(port: Option<u32>) -> Result<()> {
+pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     let dyn_port: u32 = get_port(port);
 
-    let (shutdown_tx, shutdown_rx) = oneshot::channel::<bool>();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let ui = Ui::new();
 
     let state = AppState {
-        shutdown_sender: Mutex::new(Some(shutdown_tx)),
+        shutdown_sender: shutdown_tx,
         vsn: env!("CARGO_PKG_VERSION").to_owned(),
         remote_ticket: Mutex::new(None),
         remote_shutdown_sender: Mutex::new(None),
         remote_running: Mutex::new(false),
         agent: None.into(),
+        ui: ui.clone(),
     };
 
     let shared_state = Arc::new(state);
+
+    // let service = ServiceBuilder::new()
+    //     .layer(HandleErrorLayer::new(handle_timeout_error))
+    //     .layer(TimeoutLayer::new(Duration::from_secs(30)));
+
     let app = Router::new()
         .route("/", get(root))
         .route("/config", get(get_config))
@@ -209,17 +280,71 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
         .route("/remote-status", get(show_remote_status))
         .route("/connect-remote", get(connect_remote_inference))
         .merge(agent_router())
-        .with_state(shared_state);
+        .merge(server_router())
+        .merge(account_router())
+        .merge(session_router())
+        .merge(atproto_router())
+        // .layer(service)
+        .with_state(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     info!("Daemon server started at {}", dyn_port);
+
+    if with_ui {
+        ui::start(ui);
+    }
+    listen_for_signals(shared_state.clone());
+
     let _ = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(shutdown_rx))
+        .with_graceful_shutdown(watch_shutdown(shutdown_rx))
         .await;
 
     Ok(())
+}
+
+/// launchd's bootout and a logout both arrive as SIGTERM, which nothing here
+/// used to listen for, so every managed stop was an abrupt kill
+fn listen_for_signals(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let (mut term, mut int) = match (
+            signal(SignalKind::terminate()),
+            signal(SignalKind::interrupt()),
+        ) {
+            (Ok(term), Ok(int)) => (term, int),
+            _ => {
+                log::error!("Failed to listen for shutdown signals");
+                return;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => info!("SIGTERM received"),
+            _ = int.recv() => info!("SIGINT received"),
+        }
+        shutdown_all(state).await;
+    });
+}
+
+/// The one teardown every stop goes through. The inference server is first
+/// because it is setsid'd and outlives the rest otherwise
+pub async fn shutdown_all(state: Arc<AppState>) {
+    info!("Daemon server shutting down");
+    ui::begin_stop(&state.ui);
+    // its ping has no timeout of its own, and a wedged server must not hold the
+    // shutdown open forever
+    match tokio::time::timeout(
+        INFERENCE_STOP_TIMEOUT,
+        crate::core::server::stop_server_daemon(),
+    )
+    .await
+    {
+        Ok(Err(err)) => log::warn!("Inference server did not stop cleanly: {err:?}"),
+        Err(_) => log::warn!("Inference server did not answer the stop in time"),
+        Ok(Ok(_)) => {}
+    }
+    ui::stop(&state.ui).await;
+    let _ = state.shutdown_sender.send(true);
 }
 
 pub async fn start_internal_server(
@@ -237,7 +362,7 @@ pub async fn start_internal_server(
     let shared_state = Arc::new(state);
     let app = Router::new()
         .route("/callback", get(callback))
-        .with_state(shared_state);
+        .with_state(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -254,11 +379,17 @@ async fn shutdown_signal(rx: Receiver<bool>) {
     rx.await.expect("shutdown receiver paniced");
 }
 
+async fn watch_shutdown(mut rx: watch::Receiver<bool>) {
+    while rx.changed().await.is_ok() {
+        if *rx.borrow() {
+            return;
+        }
+    }
+}
+
+/// Teardown runs detached so the caller gets its response before we stop serving
 async fn shutdown(State(state): State<Arc<AppState>>) {
-    println!("Daemon server shutting down");
-    let mut sender = state.shutdown_sender.lock().unwrap();
-    let sender_real = sender.take().unwrap();
-    let _ = sender_real.send(true);
+    tokio::spawn(shutdown_all(state));
 }
 
 #[debug_handler]
@@ -284,7 +415,7 @@ async fn get_model_cache_path(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<SendParams>,
 ) -> Result<String, StatusCode> {
-    println!("getting model cache path");
+    log::info!("getting model cache path");
     if let Ok(model_path) = get_model_cache(&params.model_name) {
         Ok(model_path
             .to_str()
@@ -303,14 +434,33 @@ async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, Statu
 }
 
 async fn stop_server(port: Option<u32>) -> Result<()> {
+    stop_server_with_timeout(port, DAEMON_STOP_TIMEOUT).await
+}
+
+async fn stop_server_with_timeout(port: Option<u32>, timeout: Duration) -> Result<()> {
+    tokio::time::timeout(timeout, stop_server_and_wait(port))
+        .await
+        .map_err(|_| anyhow!("Timed out waiting for Tiles daemon to stop"))?
+}
+
+async fn stop_server_and_wait(port: Option<u32>) -> Result<()> {
     let dyn_port = get_port(port);
     let client = Client::new();
     let addr = format!("http://127.0.0.1:{}/shutdown", dyn_port);
-    let res = client.get(addr).send().await;
+    client
+        .get(addr)
+        .send()
+        .await
+        .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?
+        .error_for_status()
+        .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?;
 
-    match res {
-        Err(err) => Err(anyhow!("Daemon shutdown failed due to {:?}", err)),
-        _ => Ok(()),
+    let addr = format!("http://127.0.0.1:{dyn_port}");
+    loop {
+        if client.get(&addr).send().await.is_err() {
+            return Ok(());
+        }
+        tokio::time::sleep(DAEMON_STOP_POLL).await;
     }
 }
 pub async fn ping(port: Option<u32>) -> anyhow::Result<String> {
@@ -330,9 +480,7 @@ async fn wait_until_server_is_up(port: Option<u32>) -> Result<()> {
     let mut error: String = String::new();
     loop {
         if retry_count < 1 {
-            if !cfg!(debug_assertions) {
-                println!("{:?}", error);
-            }
+            log::error!("{:?}", error);
             return Err(anyhow!(error));
         }
         match ping(port).await {
@@ -516,22 +664,76 @@ pub async fn connect_remote(ticket: &str) -> Result<()> {
     }
 }
 
+// async fn handle_timeout_error(err: BoxError) -> AppError {
+//     if err.is::<timeout::error::Elapsed>() {
+//         AppError::RequestTimeout
+//     } else {
+//         AppError::InternalServerError("Something unexpected happened".to_string())
+//     }
+// }
+
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use anyhow::Result;
+    use axum::{Router, http::StatusCode, routing::get};
     use serial_test::serial;
 
-    use crate::daemon::{ping, start_server, stop_server, wait_until_server_is_up};
+    use crate::daemon::{
+        ping, start_server, stop_server, stop_server_with_timeout, wait_until_server_is_up,
+    };
 
     #[tokio::test]
     #[serial]
     async fn test_sever_process_and_server_started() -> Result<()> {
         tokio::spawn(async move {
-            let _ = start_server(None).await;
+            let _ = start_server(None, false).await;
         });
         wait_until_server_is_up(None).await?;
         assert!(ping(None).await.is_ok());
 
-        stop_server(None).await
+        stop_server(None).await?;
+        assert!(ping(None).await.is_err());
+        Ok(())
+    }
+
+    async fn serve(app: Router) -> Result<(u32, tokio::task::JoinHandle<()>)> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port() as u32;
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        Ok((port, task))
+    }
+
+    #[tokio::test]
+    async fn stop_rejects_an_unsuccessful_response() -> Result<()> {
+        let app = Router::new().route(
+            "/shutdown",
+            get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+        );
+        let (port, task) = serve(app).await?;
+
+        let result = stop_server_with_timeout(Some(port), Duration::from_secs(1)).await;
+        task.abort();
+
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stop_times_out_while_the_server_remains_reachable() -> Result<()> {
+        let app = Router::new()
+            .route("/", get(|| async { "up" }))
+            .route("/shutdown", get(|| async {}));
+        let (port, task) = serve(app).await?;
+
+        let result = stop_server_with_timeout(Some(port), Duration::from_millis(100)).await;
+        task.abort();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Timed out"));
+        Ok(())
     }
 }

@@ -1,0 +1,5 @@
+<!-- regenerate: rsvg-convert -f pdf menubar.svg -o menubar-template.pdf -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="97 76 192 176" width="192" height="176">
+  <path d="M103,82 L103,98 L169.5,99 L169.5,212 L185.5,227 L185.5,99 L253,98 L253,82 Z" fill="#000"/>
+  <path d="M201.5,116 L202.5,247 L284,203 L275,192 L217.5,222 L217.5,130 Z" fill="#000"/>
+</svg>

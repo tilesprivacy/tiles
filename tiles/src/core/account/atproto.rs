@@ -30,7 +30,7 @@ use std::error::Error;
 use hickory_resolver::TokioResolver;
 
 use crate::{
-    core::storage::db::Dbconn,
+    core::storage::db::{Dbconn, get_db_conn},
     daemon::start_internal_server,
     utils::{crypto::encrypt_to_base64, get_unix_time_now, lexicons::SessionSnapshotRecord},
 };
@@ -112,14 +112,18 @@ impl DnsTxtResolver for HickoryDnsTxtResolver {
     }
 }
 
-pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
+pub async fn login(handle: &str) -> Result<String> {
+    let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
+    let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)?;
+    let conn = Dbconn {
+        chat: chat_db_conn,
+        common: user_db_conn,
+    };
+
     let (client, mem_session_store) = create_oauth_client()?;
 
     println!("Processing, will be redirected to auth page");
-    //TODO: This resolve function is hack to convert handle to DID
-    // cuz for some reason the authorize fn not working for customd domains
-    // it does work for bluesky hosted handles and DIDs.
-    // Probably smthng to do w DNS resolver. Will dig more latta
+
     let did = resolve_handle_to_did(handle)
         .await
         .inspect_err(|_| eprintln!("Failed to resolve handle"))?;
@@ -198,8 +202,9 @@ pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
         };
 
         upsert_auth_data(&conn.common, &auth_data)?;
-        println!("Logged in successfully as @{}\n", handle);
-        Ok(())
+        let success_str = format!("Logged in successfully as @{}\n", handle);
+        info!("Logged in successfully as @{}\n", handle);
+        Ok(success_str)
     } else {
         Err(anyhow!(
             "Error authorizing due to {}",
@@ -210,19 +215,21 @@ pub async fn login(conn: &Dbconn, handle: &str) -> Result<()> {
     }
 }
 
-pub fn logout(conn: &Dbconn) -> Result<()> {
+pub fn logout(conn: &Dbconn) -> Result<String> {
     if let Some(auth_user) = fetch_logged_in_data(&conn.common)? {
-        let key = auth_user.key.clone();
+        let succes_str = format!("Logged out successfully as @{}", auth_user.handle);
         let logout_user = AtprotoAuthData {
             is_logged_in: false,
             ..auth_user
         };
         upsert_auth_data(&conn.common, &logout_user)?;
-        println!("Logged out successfully as @{}", key);
+        info!("{}", succes_str);
+        Ok(succes_str)
     } else {
-        println!("No user logged in. Please log in using tiles at login <handle>.")
+        let err_str = "No user logged in. Please log in using tiles at login <handle>";
+        info!("No user logged in. Please log in using tiles at login <handle>.");
+        Err(anyhow!(err_str))
     }
-    Ok(())
 }
 
 async fn resolve_handle_to_did(handle: &str) -> Result<String> {

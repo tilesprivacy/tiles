@@ -99,14 +99,27 @@ impl PiAgent {
 }
 
 impl PiWriter {
-    /// Send requests to Pi in `json!` format
+    /// Send requests to Pi in json
     pub async fn send_to_pi(&mut self, payload_json: Value) -> Result<()> {
-        let payload_str = format!("{}\n", serde_json::to_string(&payload_json)?);
+        let payload_str = format!(
+            "{}\n",
+            serde_json::to_string(&payload_json).map_err(|e| {
+                log::error!("{}", e);
+                anyhow!("Error sending command to Pi due to {}", e)
+            })?
+        );
         self.stdin
             .write_all(payload_str.as_bytes())
             .await
-            .context("Failed to send to Pi's stdin")?;
-        self.stdin.flush().await.context("Failed to flush Pi stdin")
+            .context("Failed to send to Pi's stdin")
+            .map_err(|e| {
+                log::error!("{}", e);
+                anyhow!("Error sending command to Pi due to {}", e)
+            })?;
+        self.stdin.flush().await.map_err(|e| {
+            log::error!("{}", e);
+            anyhow!("Error sending command to Pi due to {}", e)
+        })
     }
 }
 
@@ -117,14 +130,13 @@ impl PiReader {
             "type": "get_state",
         });
 
-        writer
-            .send_to_pi(init_cmd_payload)
-            .await
-            .inspect_err(|_e| eprintln!("sending command to  pi failed"))?;
+        writer.send_to_pi(init_cmd_payload).await?;
 
         if let Some(line) = self.lines.next_line().await? {
             let response: PiResponse = serde_json::from_str(&line)?;
-            if let PiResponse::Response(msg) = response {
+            if let PiResponse::Response(msg) = response
+                && msg.success
+            {
                 let state: GetStateData =
                     serde_json::from_value(msg.data.expect("get state parsing failed"))?;
                 Ok(state)
@@ -140,4 +152,47 @@ impl PiReader {
     pub async fn next_line(&mut self) -> std::result::Result<Option<String>, std::io::Error> {
         self.lines.next_line().await
     }
+
+    /// Creates a new Pi session
+    pub async fn create_new_session(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
+        let cmd_payload = json!({
+            "type": "new_session",
+        });
+
+        writer.send_to_pi(cmd_payload).await?;
+
+        if let Some(line) = self.lines.next_line().await? {
+            let response: PiResponse = serde_json::from_str(&line)?;
+            if let PiResponse::Response(msg) = response
+                && msg.success
+            {
+                let state = self.get_pi_state(writer).await?;
+                Ok(state)
+            } else {
+                Err(anyhow!("Creating new session failed"))
+            }
+        } else {
+            Err(anyhow!("Failed to fetch session_id from Pi"))
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn from_test_command(program: &str, args: &[&str]) -> anyhow::Result<PiAgent> {
+    let mut process = Command::new(program)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()?;
+
+    let stdin = process.stdin.take().unwrap();
+    let stdout = process.stdout.take().unwrap();
+
+    Ok(PiAgent {
+        process,
+        writer: PiWriter { stdin },
+        reader: PiReader {
+            lines: BufReader::new(stdout).lines(),
+        },
+    })
 }

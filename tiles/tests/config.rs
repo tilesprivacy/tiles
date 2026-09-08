@@ -1,21 +1,37 @@
 // use anyhow::Result;
-use std::path::PathBuf;
+// use std::path::PathBuf;
+// use tempfile::TempDir;
 // use tiles::utils::config::ConfigProvider;
 
-#[allow(dead_code)]
-struct MockProvider {
-    base: PathBuf,
-}
+// #[derive(Default, Debug)]
+// struct MockProvider {
+//     tmpdir: TempDir,
+// }
 
 // impl ConfigProvider for MockProvider {
 //     fn get_config_dir(&self) -> Result<PathBuf> {
-//         Ok(self.base.join("config"))
+//         Ok(self.tmpdir.path().to_path_buf())
+//     }
+//     fn get_or_create_config_dir(&self) -> Result<PathBuf> {
+//         Ok(self.tmpdir.path().to_path_buf())
 //     }
 //     fn get_data_dir(&self) -> Result<PathBuf> {
-//         Ok(self.base.join("data"))
+//         Ok(self.tmpdir.path().to_path_buf())
+//     }
+//     fn get_or_create_data_dir(&self) -> Result<PathBuf> {
+//         Ok(self.tmpdir.path().to_path_buf())
+//     }
+//     fn get_user_data_dir(&self) -> Result<PathBuf> {
+//         Ok(self.tmpdir.path().to_path_buf())
 //     }
 //     fn get_lib_dir(&self) -> Result<PathBuf> {
-//         Ok(self.base.join("lib"))
+//         Ok(self.tmpdir.path().to_path_buf())
+//     }
+//     fn get_user_bin_dir(&self) -> Result<PathBuf> {
+//         Ok(self.tmpdir.path().to_path_buf())
+//     }
+//     fn get_user_bin_path(&self) -> Result<PathBuf> {
+//         Ok(self.tmpdir.path().to_path_buf())
 //     }
 // }
 

@@ -67,6 +67,16 @@ const COMMON_MIGRATION_ARRAY: &[M] = &[
         CREATE INDEX idx_tokens_did ON tokens(did);
         ",
     ),
+    M::up(
+        "CREATE TABLE IF NOT EXISTS licenses(
+                key TEXT PRIMARY KEY,
+                polar_status TEXT NOT NULL,
+                active INTEGER NOT NULL,
+                activation_id TEXT NOT NULL,
+                created_at  INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+        )",
+    ),
 ];
 
 const COMMON_MIGRATIONS: Migrations = Migrations::from_slice(COMMON_MIGRATION_ARRAY);
