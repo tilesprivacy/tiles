@@ -90,6 +90,27 @@ pub struct DeltaChat {
     pub sessions: Vec<Session>,
 }
 
+/// Adds one finished turn to a session's snapshot, starting the snapshot if the
+/// session has none yet.
+///
+/// This is how a session gets the same snapshot the REPL keeps: built from what
+/// Pi reported, so the thinking and the tool calls survive. Rebuilding from the
+/// chat rows afterwards cannot recover either, because only the final text of a
+/// turn is ever stored.
+pub fn append_turn_to_snapshot(conn: &Connection, session_id: &str, turn: Turn) -> Result<()> {
+    let session = fetch_session(conn, session_id)?;
+
+    let mut record: SessionSnapshotRecord = match session.snapshot.as_deref() {
+        Some(stored) => serde_json::from_str(stored)?,
+        None => SessionSnapshotRecord::new(&session.name, &session.id),
+    };
+
+    record.turns.push(turn);
+    update_snapshot(conn, session_id, serde_json::to_string(&record)?)?;
+
+    Ok(())
+}
+
 /// Rebuilds a snapshot from the stored rows.
 ///
 /// The REPL keeps a snapshot as it goes, built from the events Pi hands it. The
