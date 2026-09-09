@@ -22,8 +22,9 @@ const MIN_HEIGHT: f64 = 480.0;
 /// --void, so the window is never white before the page paints
 const GROUND: Color = Color(0x11, 0x11, 0x11, 0xff);
 
-/// dev points at the vite server, which keeps the page on its own origin and
-/// out of the panel's csp. a bundled build has to carry the built ui instead
+/// dev points at the vite server, release at the chat ui bundled into the app.
+/// a deep link has no file behind it, but the webview falls back to the root
+/// index.html on a miss, which hands the route to the router where it belongs
 fn url(path: &str) -> Result<WebviewUrl, String> {
     #[cfg(debug_assertions)]
     {
@@ -37,7 +38,7 @@ fn url(path: &str) -> Result<WebviewUrl, String> {
 
     #[cfg(not(debug_assertions))]
     {
-        Ok(WebviewUrl::App(format!("ui{path}").into()))
+        Ok(WebviewUrl::App(path.trim_start_matches('/').into()))
     }
 }
 
@@ -79,9 +80,12 @@ pub fn open(app: &AppHandle, path: &str) -> Result<(), String> {
     let window = match app.get_webview_window(LABEL) {
         // reuse means the click lands on the conversation, not wherever it was left
         Some(window) => {
-            if let WebviewUrl::External(url) = url(path)? {
-                window.navigate(url).map_err(|e| e.to_string())?;
-            }
+            let target = window
+                .url()
+                .map_err(|e| e.to_string())?
+                .join(path)
+                .map_err(|e| format!("bad chat window url: {e}"))?;
+            window.navigate(target).map_err(|e| e.to_string())?;
             window
         }
         None => build(app, path)?,

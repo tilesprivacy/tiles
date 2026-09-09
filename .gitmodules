@@ -1,0 +1,3 @@
+[submodule "vendor/tiles-ui"]
+	path = vendor/tiles-ui
+	url = https://github.com/tilesprivacy/tiles-ui.git
