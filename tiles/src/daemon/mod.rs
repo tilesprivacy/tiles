@@ -47,6 +47,7 @@ use tower_http::cors::CorsLayer;
 pub mod account;
 pub mod agent;
 pub mod atproto;
+pub mod modelfile;
 pub mod server;
 pub mod session;
 use crate::{
@@ -311,6 +312,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
         .route("/remote-status", get(show_remote_status))
         .route("/connect-remote", get(connect_remote_inference))
         .merge(agent_router())
+        .merge(modelfile::modelfile_router())
         .merge(server_router())
         .merge(account_router())
         .merge(session_router())
