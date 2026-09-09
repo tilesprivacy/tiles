@@ -1,4 +1,4 @@
 # The chat UI this app carries. Bump the commit to ship a newer one, the
 # build fetches exactly this and nothing else.
 repo=https://github.com/tilesprivacy/tiles-ui.git
-commit=43cd724407f0bb747af8195fe9276ac039b1d51b
+commit=9483c4832e07e20a43bfb85a259650f6625a0d6d
