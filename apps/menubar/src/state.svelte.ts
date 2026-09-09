@@ -27,8 +27,31 @@ export type Account =
   | { state: "none" }
   | { state: "local"; did: string; nickname: string };
 
+export type Atproto =
+  | { state: "unknown" }
+  | { state: "none" }
+  | { state: "pending"; handle: string }
+  | {
+      state: "session";
+      handle: string;
+      did: string;
+      displayName?: string | null;
+      avatar?: string | null;
+      pds?: string | null;
+    };
+
 export type Session = { id: string; name: string; createdAt: number };
 export type Sessions = { state: "unknown" } | { state: "ready"; sessions: Session[] };
+
+/** the power assertion, held by the menubar and not the daemon */
+export type Awake = {
+  active: boolean;
+  paused: boolean;
+  since: number | null;
+  until: number | null;
+  frozen: number | null;
+  ac: boolean;
+};
 
 export type Remote =
   | { state: "unknown" }
@@ -40,12 +63,16 @@ export const inference = $state<{ value: Inference }>({
   value: { power: "unknown", model: null, llama: null },
 });
 export const account = $state<{ value: Account }>({ value: { state: "unknown" } });
+export const atproto = $state<{ value: Atproto }>({ value: { state: "unknown" } });
 export const sessions = $state<{ value: Sessions }>({ value: { state: "unknown" } });
 export const remote = $state<{ value: Remote }>({ value: { state: "unknown" } });
+export const awake = $state<{ value: Awake }>({
+  value: { active: false, paused: false, since: null, until: null, frozen: null, ac: false },
+});
 
 /**
  * events only fire on a change, so every state has to be asked for once as
- * well. returns the teardown for all five listeners
+ * well. returns the teardown for all seven listeners
  */
 export function connect(): () => void {
   let connected = true;
@@ -85,8 +112,10 @@ export function connect(): () => void {
     sync<Health>("daemon://health", "daemon_health", (v) => (health.value = v)),
     sync<Inference>("inference://state", "inference_state", (v) => (inference.value = v)),
     sync<Account>("account://state", "account_state", (v) => (account.value = v)),
+    sync<Atproto>("atproto://state", "atproto_state", (v) => (atproto.value = v)),
     sync<Sessions>("sessions://state", "sessions_state", (v) => (sessions.value = v)),
     sync<Remote>("remote://state", "remote_state", (v) => (remote.value = v)),
+    sync<Awake>("awake://state", "awake_state", (v) => (awake.value = v)),
   ];
 
   return () => {
