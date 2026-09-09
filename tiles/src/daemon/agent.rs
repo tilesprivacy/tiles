@@ -3,11 +3,14 @@
 use crate::{
     core::agent::{
         pi::{self, PiAgent, handle_graceful_exit},
-        types::PiResponse,
+        types::{PiAgentEndEvent, PiMsgContent, PiResponse},
     },
+    core::chats::append_turn_to_snapshot,
+    core::storage::db::{DBTYPE, get_db_conn},
     daemon::{ApiResponse, AppError, AppState},
     repl::{get_default_modelfile, model_spec},
     utils::config::{ConfigProvider, DefaultProvider, PY_PORT},
+    utils::lexicons::Turn,
 };
 
 // use async_stream::stream;
@@ -29,6 +32,10 @@ use tokio_util::sync::CancellationToken;
 #[derive(Deserialize)]
 struct PromptRequest {
     message: String,
+    /// Which session the turn belongs to. Without it the turn still runs, it
+    /// just leaves no snapshot behind, which is what sharing publishes.
+    #[serde(default)]
+    session_id: Option<String>,
 }
 
 struct SseEvent {
@@ -148,6 +155,7 @@ async fn process_chat_prompt(
     Json(payload): Json<PromptRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let t_state = state.clone();
+    let session_id = payload.session_id.clone();
     let (tx, rx) = mpsc::channel::<SseEvent>(32);
     let cancel_token = CancellationToken::new();
     let t_cancel = cancel_token.clone();
@@ -170,14 +178,20 @@ async fn process_chat_prompt(
             handle_pi_errors(err_str.to_owned(), &tx).await;
             return;
         }
-        tokio::select! {
+        let ended = tokio::select! {
                 _ = t_cancel.cancelled() => {
                     log::info!("Will cancel the agent process");
                     let _ = handle_graceful_exit(&mut agent.writer).await;
                     // To read the rest of stdout after aborting the current request
-                    let _ = read_from_pi(agent, &tx).await;
+                    read_from_pi(agent, &tx).await
                  },
-                _ = read_from_pi(agent, &tx) => ()
+                ended = read_from_pi(agent, &tx) => ended
+        };
+
+        // pi has reported the whole turn by now, so this is the one moment the
+        // thinking and the tool calls exist together in one place
+        if let (Some(session_id), Some(ended)) = (session_id, ended) {
+            record_turn(&session_id, ended);
         }
     });
 
@@ -205,8 +219,11 @@ async fn handle_pi_errors(err_str: String, tx: &Sender<SseEvent>) {
     let _ = tx.send(event).await.map_err(|e| log::error!("{:?}", e));
 }
 
-async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
+/// Returns the turn Pi reported, which is what a snapshot is built from.
+async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> Option<PiAgentEndEvent> {
     let mut last_event = String::from("");
+    let mut ended = None;
+
     while let Ok(Some(line)) = agent.reader.next_line().await {
         let response = if let Ok(response) = serde_json::from_str::<PiResponse>(&line) {
             response
@@ -214,7 +231,7 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
             let err_str = format!("Failed to parse pi response, response {:?}", &line);
 
             handle_pi_errors(err_str.to_owned(), tx).await;
-            return;
+            return ended;
         };
 
         let sse_event = SseEvent {
@@ -226,10 +243,65 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
 
         match response {
             PiResponse::AgentSettled => break,
+            PiResponse::AgentEnd(event) => ended = Some(event),
             _ => continue,
         }
     }
     log::info!("reading ended with last event {}", last_event);
+
+    ended
+}
+
+/// Nothing here is worth failing a turn over, the reply already reached the
+/// caller. A missing snapshot only costs the richer share.
+fn record_turn(session_id: &str, ended: PiAgentEndEvent) {
+    let model = match get_agent_start_params(DefaultProvider) {
+        Ok((model, _)) => model,
+        Err(err) => {
+            log::warn!("No model name for the snapshot: {err:?}");
+            String::new()
+        }
+    };
+
+    let mut turn = Turn {
+        api: Some(String::from("open-responses")),
+        provider: Some(String::from("tiles")),
+        model,
+        messages: ended.messages,
+    };
+
+    // pi reports the assistant's thinking and its answer as separate messages,
+    // and a snapshot reads better with the parts of one reply kept together
+    fold_assistant_messages(&mut turn);
+
+    // the connection is not Send, so it must not outlive this synchronous scope
+    let recorded = get_db_conn(&DBTYPE::CHAT)
+        .and_then(|conn| append_turn_to_snapshot(&conn, session_id, turn));
+
+    if let Err(err) = recorded {
+        log::warn!("Could not record the turn for session {session_id}: {err:?}");
+    }
+}
+
+fn fold_assistant_messages(turn: &mut Turn) {
+    let mut folded: Vec<crate::core::agent::types::PiMsgEvent> = vec![];
+
+    for message in turn.messages.drain(..) {
+        let is_assistant = matches!(message.role, tilekit::modelfile::Role::Assistant);
+
+        match folded.last_mut() {
+            Some(previous)
+                if is_assistant && matches!(previous.role, tilekit::modelfile::Role::Assistant) =>
+            {
+                let mut content: Vec<PiMsgContent> = message.content;
+                previous.content.append(&mut content);
+                previous.stop_reason = message.stop_reason;
+            }
+            _ => folded.push(message),
+        }
+    }
+
+    turn.messages = folded;
 }
 #[cfg(test)]
 mod tests {
