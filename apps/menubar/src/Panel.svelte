@@ -7,6 +7,7 @@
   import { nav, type ViewId } from "./nav.svelte";
   import { connect } from "./state.svelte";
   import AccountView from "./views/AccountView.svelte";
+  import AtmosphereView from "./views/AtmosphereView.svelte";
   import ModelView from "./views/ModelView.svelte";
   import RootView from "./views/RootView.svelte";
   import SessionsView from "./views/SessionsView.svelte";
@@ -87,6 +88,8 @@
     {#snippet view(id: ViewId)}
       {#if id === "account"}
         <AccountView />
+      {:else if id === "atmosphere"}
+        <AtmosphereView />
       {:else if id === "sessions"}
         <SessionsView />
       {:else if id === "model"}

@@ -31,7 +31,14 @@ export type Atproto =
   | { state: "unknown" }
   | { state: "none" }
   | { state: "pending"; handle: string }
-  | { state: "session"; handle: string; did: string };
+  | {
+      state: "session";
+      handle: string;
+      did: string;
+      displayName?: string | null;
+      avatar?: string | null;
+      pds?: string | null;
+    };
 
 export type Session = { id: string; name: string; createdAt: number };
 export type Sessions = { state: "unknown" } | { state: "ready"; sessions: Session[] };

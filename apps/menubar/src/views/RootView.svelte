@@ -95,25 +95,38 @@
 
   const atmosphere = $derived.by(() => {
     switch (atproto.value.state) {
-      case "session":
+      case "session": {
+        // the name takes the title when there is one, and the handle carries
+        // the did off the row when it does
+        const name = atproto.value.displayName?.trim() || null;
         return {
-          name: atproto.value.handle,
-          title: `@${atproto.value.handle}`,
-          sub: truncateMiddle(atproto.value.did, 16, 6),
+          name: name ?? atproto.value.handle,
+          title: name ?? `@${atproto.value.handle}`,
+          sub: name ? `@${atproto.value.handle}` : truncateMiddle(atproto.value.did, 16, 6),
+          avatar: atproto.value.avatar ?? null,
         };
+      }
       case "pending":
         return {
           name: atproto.value.handle,
           title: `@${atproto.value.handle}`,
           sub: "Waiting for your browser",
+          avatar: null,
         };
       default:
-        return { name: "?", title: "Not connected", sub: "" };
+        return { name: "?", title: "Not connected", sub: "", avatar: null };
     }
   });
 
   const signedOut = $derived(atproto.value.state === "none");
   const signingIn = $derived(atproto.value.state === "pending");
+  const signedIn = $derived(atproto.value.state === "session");
+
+  // signed out the row opens the drawer, signed in it pushes, and mid-login it
+  // is neither
+  const enterAtmosphere = $derived(
+    signedOut ? askForHandle : signedIn ? () => nav.push("atmosphere") : undefined,
+  );
 
   let drawer = $state(false);
   let signInError = $state<string | null>(null);
@@ -252,14 +265,16 @@
     sub={atmosphere.sub}
     submono={atproto.value.state === "session"}
     dimmed={atproto.value.state === "unknown"}
-    onselect={signedOut ? askForHandle : undefined}
+    onselect={enterAtmosphere}
   >
     {#snippet leading()}
-      <Avatar nickname={atmosphere.name} />
+      <Avatar nickname={atmosphere.name} src={atmosphere.avatar} />
     {/snippet}
     {#snippet trailing()}
       {#if signedOut}
         <span class="signin" data-open={drawer}>Sign in</span>
+      {:else if signedIn}
+        <Chevron />
       {/if}
     {/snippet}
   </Row>
@@ -384,6 +399,12 @@
 
   .account:not(:first-of-type) {
     margin-top: 9px;
+  }
+
+  /* the zone label carries 5 of the 9 this wants, and a label under a label
+     needs the same step everything else separates on */
+  .account:first-of-type {
+    margin-top: 4px;
   }
 
   /* the row is the button, so this is a span. two buttons in one row is one

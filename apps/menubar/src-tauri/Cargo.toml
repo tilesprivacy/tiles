@@ -14,8 +14,11 @@ tauri = { version = "2.11", features = [] }
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "c9ec2130422200f0863b23dfdad02b133a529b07" }
 tauri-plugin-single-instance = "2"
 
-# the daemon is plain http on loopback, a TLS backend would be dead weight
-reqwest = { version = "0.12", default-features = false }
+# loopback for the daemon and https for the pds, and default-tls is the system
+# store on macos rather than a second one bundled in
+reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
+# base64 for the avatar
+data-encoding = "2"
 tokio = { version = "1", features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
