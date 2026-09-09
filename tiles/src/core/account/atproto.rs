@@ -326,11 +326,14 @@ pub fn fetch_logged_in_data(conn: &Connection) -> Result<Option<AtprotoAuthData>
 
 //TODO: Move the login check to common fn
 // TODO: Add tests for share session plss
+/// Publishes a session snapshot to the user's PDS and returns the link to it.
+/// A private share encrypts the record and carries the key in the URL fragment,
+/// which never leaves the browser.
 pub async fn share_session(
     conn: &Connection,
     shared_session: &SessionSnapshotRecord,
     is_private: bool,
-) -> Result<()> {
+) -> Result<String> {
     if let Some(auth_data) = fetch_logged_in_data(conn)? {
         let (client, mem_session_store) = create_oauth_client()?;
         let session: Session = serde_json::from_str(&auth_data.session)?;
@@ -344,7 +347,7 @@ pub async fn share_session(
         } else {
             "Writing to PDS and generating link..."
         };
-        println!("{}", write_info);
+        info!("{}", write_info);
         let oauth_session = client
             .restore(&did_struct)
             .await
@@ -406,7 +409,7 @@ pub async fn share_session(
             shareable_base_url
         };
 
-        println!("successfully posted at {}", shareable_url);
+        info!("Shared session posted to the PDS");
 
         // Updating the session token
         let session = mem_session_store
@@ -426,11 +429,12 @@ pub async fn share_session(
         };
 
         upsert_auth_data(conn, &auth_data)?;
+
+        Ok(shareable_url)
     } else {
         info!("No logged-in user, please login");
-        return Err(anyhow!("NOT_LOGGED_IN"));
+        Err(anyhow!("NOT_LOGGED_IN"))
     }
-    Ok(())
 }
 
 fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
