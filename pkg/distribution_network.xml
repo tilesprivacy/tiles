@@ -9,7 +9,9 @@
 <background-darkAqua file="tiles-logo-dark.png" mime-type="image/png" scaling="none" alignment="bottomleft"/>
 
 
-<options customize="never"/>
+<!-- everything we ship is arm64. without this the installer re-executes
+     itself as Intel, then calls the app bundle incompatible -->
+<options customize="never" hostArchitectures="arm64"/>
 
 <welcome file="welcome_network.html"/>
 
