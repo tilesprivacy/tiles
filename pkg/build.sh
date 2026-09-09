@@ -181,3 +181,15 @@ pkgbuild --root "${PKG_APP_STAGE}" --install-location /Applications --component-
 # and anything at the top of it lands at the root of the volume. it also keeps a
 # stray copy of the app out of Spotlight and out of the apps drawer
 rm -rf "${PKG_APP_STAGE}"
+
+# tauri leaves its own copy behind too, and an installed Tiles then shares the
+# apps drawer with a build artefact. the packaged copy is the one to launch
+rm -rf "target/${TARGET}/bundle/macos/Tiles.app"
+
+# Launch Services indexes an app the moment it appears and keeps the entry after
+# it is gone, so both copies have to be withdrawn or they haunt the drawer
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "${LSREGISTER}" ]]; then
+  "${LSREGISTER}" -u "${PWD}/${PKG_APP_STAGE}/Tiles.app" 2>/dev/null || true
+  "${LSREGISTER}" -u "${PWD}/target/${TARGET}/bundle/macos/Tiles.app" 2>/dev/null || true
+fi
