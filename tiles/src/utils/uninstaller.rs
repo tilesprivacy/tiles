@@ -8,6 +8,8 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 
+#[cfg(target_os = "macos")]
+use crate::utils::config::SYSTEM_APP_PATH;
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LIB_RUNTIME_DIRS_TO_REMOVE, SYSTEM_BIN_DIR, SYSTEM_BIN_PATH,
     SYSTEM_LIB_DIR, is_tiles_lib_dir,
@@ -58,6 +60,10 @@ impl UninstallPlanner {
         plan.remove_files.insert(layout.bin);
         #[cfg(target_os = "macos")]
         add_service_file_to_plan(&mut plan, crate::core::service::plist_path()?);
+        // the app is a program, not something a person put there, so it goes on
+        // a plain uninstall as well as an --all one
+        #[cfg(target_os = "macos")]
+        plan.remove_dirs.insert(PathBuf::from(SYSTEM_APP_PATH));
 
         if all {
             let user_data_dir = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
@@ -145,7 +151,7 @@ fn print_plan(plan: &UninstallPlanner, needs_elevation: bool) {
 
     if needs_elevation {
         println!();
-        println!("Administrator privileges are required to remove system files under /usr/local.");
+        println!("Administrator privileges are required to remove files outside your home folder.");
         println!();
     }
 }
@@ -390,6 +396,11 @@ impl InstallLayout {
 }
 
 fn requires_elevation(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    if path.starts_with(SYSTEM_APP_PATH) {
+        return true;
+    }
+
     path.starts_with(SYSTEM_BIN_DIR) || path.starts_with(SYSTEM_LIB_DIR)
 }
 
@@ -608,6 +619,24 @@ mod tests {
         assert_eq!(layout.bin, bin);
         assert_eq!(layout.lib_dir, root.path());
         assert!(is_tiles_lib_dir(&layout.lib_dir));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_app_goes_on_a_plain_uninstall_too() -> Result<()> {
+        use crate::utils::config::SYSTEM_APP_PATH;
+
+        let app = PathBuf::from(SYSTEM_APP_PATH);
+
+        // a program, not something a person put there, so --all is not required
+        for all in [false, true] {
+            let plan = UninstallPlanner::from_current_system(all)?;
+            assert!(plan.remove_dirs.contains(&app), "missing on all={all}");
+        }
+
+        // and it is outside the home folder, so removing it needs root
+        assert!(requires_elevation(&app));
         Ok(())
     }
 

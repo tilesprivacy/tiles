@@ -125,6 +125,9 @@ const MODEL_SUB_PATH: &str = "models/huggingface/hub";
 pub const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
 pub const SYSTEM_BIN_PATH: &str = "/usr/local/bin/tiles";
 pub const SYSTEM_LIB_DIR: &str = "/usr/local/share/tiles";
+/// Where the installer puts the app, and where the daemon looks for it
+#[cfg(target_os = "macos")]
+pub const SYSTEM_APP_PATH: &str = "/Applications/Tiles.app";
 pub const PY_PORT: u32 = 6969;
 // Used in remote inference, this is port where we open a TCP connection to proxy
 pub const REMOTE_BOUND_PORT: u32 = 9271;
