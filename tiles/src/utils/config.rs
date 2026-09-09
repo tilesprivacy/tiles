@@ -45,6 +45,9 @@ struct DataConfig {
 pub struct InferenceConfig {
     // setting this to true, will prevent repl auto-exiting inference
     pub daemon: bool,
+    /// Bring the inference server up with the daemon, when a person started it.
+    /// Absent counts as on, see [`autostart_inference`]
+    pub autostart: Option<bool>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq)]
@@ -598,6 +601,17 @@ fn try_update_pi_provider_model(config: &str, model_name: &str) -> Result<String
     } else {
         Ok(config.to_owned())
     }
+}
+
+/// Whether to bring inference up alongside the daemon. On unless it was turned
+/// off, and a config we cannot read is not a reason to leave someone unable to
+/// hold a conversation
+pub fn autostart_inference() -> bool {
+    get_inference_config()
+        .ok()
+        .flatten()
+        .and_then(|config| config.autostart)
+        .unwrap_or(true)
 }
 
 pub fn get_inference_config() -> Result<Option<InferenceConfig>> {

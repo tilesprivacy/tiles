@@ -14,6 +14,7 @@ use crate::{
         account::account_router, agent::agent_router, atproto::atproto_router,
         server::server_router, session::session_router,
     },
+    utils::config::autostart_inference,
 };
 use anyhow::{Result, anyhow};
 use axum::{
@@ -326,6 +327,20 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
     if with_ui {
         ui::start(ui, show_ui);
     }
+
+    // a person starting Tiles wants to be able to talk to it, so bring the
+    // inference server up with everything else. launchd starting the daemon at
+    // login is not that, and loading a model nobody asked for is rude
+    if show_ui && autostart_inference() {
+        tokio::spawn(async {
+            match crate::core::server::start_server_daemon().await {
+                Ok(msg) => info!("Inference server: {msg}"),
+                // the daemon is useful without it, and the menu bar offers a retry
+                Err(err) => log::warn!("Could not start the inference server: {err:?}"),
+            }
+        });
+    }
+
     listen_for_signals(shared_state.clone());
 
     let _ = axum::serve(listener, app)
