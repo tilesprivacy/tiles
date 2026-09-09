@@ -20,6 +20,8 @@ PKG_CLI_BIN_PATH="pkgroot/usr/local/bin"
 
 PKG_LIBS_PATH="pkgroot/usr/local/share/tiles"
 
+PKG_APPS_PATH="pkgroot/Applications"
+
 # CLI binary pkg install path
 mkdir -p "${PKG_CLI_BIN_PATH}"
 
@@ -119,6 +121,30 @@ rm -rf "${PKG_LIBS_PATH}/server/stack"
 
 cp -r "${MODELFILE_DIR}" "${PKG_LIBS_PATH}"
 
+
+echo "🖥  Building the menu bar app..."
+
+# builds the panel, fetches the chat UI named in apps/menubar/ui.pin, and embeds
+# both in the bundle. the daemon looks for the app at this exact path
+[ -d apps/menubar/node_modules ] || pnpm install --frozen-lockfile
+
+(cd apps/menubar && pnpm tauri build)
+
+mkdir -p "${PKG_APPS_PATH}"
+rm -rf "${PKG_APPS_PATH}/Tiles.app"
+cp -R "target/${TARGET}/bundle/macos/Tiles.app" "${PKG_APPS_PATH}/"
+
+echo "Signing the app..."
+
+# no entitlements: the webview runs its JIT in a system process, not in ours
+codesign --force \
+  --sign "$DEVELOPER_ID_APPLICATION" \
+  --options runtime \
+  --timestamp \
+  --strict \
+  "${PKG_APPS_PATH}/Tiles.app"
+
+codesign --verify --strict --deep "${PKG_APPS_PATH}/Tiles.app"
 
 # Creating .pkg
 pkgbuild --root pkgroot --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg
