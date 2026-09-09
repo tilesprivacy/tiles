@@ -146,5 +146,25 @@ codesign --force \
 
 codesign --verify --strict --deep "${PKG_APPS_PATH}/Tiles.app"
 
+# pkgbuild makes every bundle in the payload relocatable, so the installer looks
+# for an existing copy of the app anywhere on disk and updates that instead of
+# /Applications. A stale copy in a build tree is enough to catch it.
+pkgbuild --analyze --root pkgroot pkg/component.plist
+
+python3 - pkg/component.plist <<'PLIST'
+import plistlib, sys
+
+path = sys.argv[1]
+
+with open(path, "rb") as f:
+    components = plistlib.load(f)
+
+for component in components:
+    component["BundleIsRelocatable"] = False
+
+with open(path, "wb") as f:
+    plistlib.dump(components, f)
+PLIST
+
 # Creating .pkg
-pkgbuild --root pkgroot --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg
+pkgbuild --root pkgroot --component-plist pkg/component.plist --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg

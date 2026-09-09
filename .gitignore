@@ -28,3 +28,5 @@ apps/menubar/src-tauri/gen/
 
 # chat UI checkout, fetched at the pin in apps/menubar/ui.pin
 apps/menubar/.ui-src/
+
+pkg/component.plist
