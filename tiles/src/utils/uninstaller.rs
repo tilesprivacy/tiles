@@ -15,6 +15,19 @@ use crate::utils::config::{
     SYSTEM_LIB_DIR, is_tiles_lib_dir,
 };
 
+/// The receipts the installer writes. Removing the files is not enough: a
+/// receipt outlives them and goes on claiming the package is installed, which
+/// is enough to make a later install skip what it thinks is already there
+#[cfg(target_os = "macos")]
+const PKG_RECEIPT_IDS: &[&str] = &[
+    "com.tilesprivacy.tiles",
+    "com.tilesprivacy.tiles.app",
+    "com.tilesprivacy.tiles_models_gguf",
+];
+
+#[cfg(target_os = "macos")]
+const PKGUTIL_PATH: &str = "/usr/sbin/pkgutil";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstallLayout {
     bin: PathBuf,
@@ -37,9 +50,56 @@ pub fn uninstall(all: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     crate::core::service::unload().context("Failed to unload Tiles service")?;
     plan.apply()?;
+    #[cfg(target_os = "macos")]
+    forget_pkg_receipts();
 
     println!("Tiles uninstalled successfully.");
     Ok(())
+}
+
+/// Discards the installer's receipts. The files are already gone by now, so a
+/// receipt that will not budge is worth saying out loud but not worth failing
+/// the uninstall over.
+#[cfg(target_os = "macos")]
+fn forget_pkg_receipts() {
+    let installed: Vec<&str> = PKG_RECEIPT_IDS
+        .iter()
+        .copied()
+        .filter(|id| pkg_receipt_exists(id))
+        .collect();
+
+    for id in installed {
+        if let Err(err) = forget_pkg_receipt(id) {
+            eprintln!("Could not discard the receipt for {id}: {err}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pkg_receipt_exists(id: &str) -> bool {
+    Command::new(PKGUTIL_PATH)
+        .args(["--pkg-info", id])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn forget_pkg_receipt(id: &str) -> Result<()> {
+    // one id per call, --forget takes a single PKGID
+    let mut command = if is_running_as_root() {
+        Command::new(PKGUTIL_PATH)
+    } else {
+        let mut command = new_trusted_sudo_command()?;
+        command.arg(PKGUTIL_PATH);
+        command
+    };
+
+    command
+        .args(["--forget", id])
+        .stdout(std::process::Stdio::null());
+    run_elevated_command(&mut command, "discard installer receipts")
 }
 
 #[derive(Debug, Default)]
@@ -147,6 +207,11 @@ fn print_plan(plan: &UninstallPlanner, needs_elevation: bool) {
 
     for dir in plan.remove_dirs.iter().filter(|path| path.exists()) {
         println!("  {}", dir.display());
+    }
+
+    #[cfg(target_os = "macos")]
+    for id in PKG_RECEIPT_IDS.iter().filter(|id| pkg_receipt_exists(id)) {
+        println!("  installer receipt {id}");
     }
 
     if needs_elevation {
