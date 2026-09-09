@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { onDestroy, onMount } from "svelte";
 
+  import { act } from "../lib/act";
+
   import Avatar from "../lib/Avatar.svelte";
   import CopyMark from "../lib/CopyMark.svelte";
   import Navbar from "../lib/Navbar.svelte";
@@ -72,7 +74,7 @@
     mono
     title={home}
     dimmed={dataDir === null}
-    onselect={dataDir ? () => void invoke("reveal_path", { path: dataDir }).catch(() => {}) : undefined}
+    onselect={dataDir ? () => act("reveal_path", { path: dataDir }) : undefined}
   >
     {#snippet inline()}
       {#if dataDir}<OpenMark />{/if}

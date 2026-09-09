@@ -65,6 +65,7 @@ fn plist(program: &Path, out_log: &Path, err_log: &Path) -> String {
   <array>
     <string>{program}</string>
     <string>daemon</string>
+    <string>--at-login</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -188,9 +189,7 @@ pub(crate) fn unload() -> Result<()> {
 pub fn start() -> Result<()> {
     require_macos()?;
     if !is_installed() {
-        return Err(anyhow!(
-            "Service is not installed, run `tiles service add`"
-        ));
+        return Err(anyhow!("Service is not installed, run `tiles service add`"));
     }
     launchctl_checked(&["kickstart", "-k", &target()])
 }
@@ -199,9 +198,7 @@ pub fn start() -> Result<()> {
 pub fn stop() -> Result<()> {
     require_macos()?;
     if !is_installed() {
-        return Err(anyhow!(
-            "Service is not installed, run `tiles service add`"
-        ));
+        return Err(anyhow!("Service is not installed, run `tiles service add`"));
     }
     launchctl_checked(&["bootout", &target()])
 }

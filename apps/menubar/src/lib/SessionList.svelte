@@ -1,4 +1,6 @@
 <script lang="ts">
+  import { act } from "./act";
+
   import type { Session } from "../state.svelte";
   import Row from "./Row.svelte";
   import { relativeTime } from "./time";
@@ -9,14 +11,14 @@
 
   let { sessions }: Props = $props();
 
-  /** no route opens a session yet, the row is live so the rail and the arrow
-      keys already reach it */
-  function open() {}
+  function open(id: string) {
+    act("open_session", { id });
+  }
 </script>
 
 {#each sessions as session (session.id)}
   <!-- the name is the conversation's first prompt, so it carries the row -->
-  <Row title={session.name} onselect={open}>
+  <Row title={session.name} onselect={() => open(session.id)}>
     {#snippet trailing()}
       <span class="when">{relativeTime(session.createdAt)}</span>
     {/snippet}

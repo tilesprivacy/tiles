@@ -1,6 +1,7 @@
 mod account;
 mod atproto;
 mod awake;
+mod boot;
 mod clipboard;
 mod daemon;
 mod inference;
@@ -10,8 +11,9 @@ mod paths;
 mod remote;
 mod sessions;
 mod tray;
+mod ui;
 
-use tauri::{ActivationPolicy, Manager, WindowEvent};
+use tauri::{Manager, WindowEvent};
 
 fn main() {
     tauri::Builder::default()
@@ -20,7 +22,11 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if lifeline::should_yield_to(&argv) {
                 app.exit(0);
+                return;
             }
+
+            // launching again is someone asking for the window back
+            let _ = ui::open(app, "/");
         }))
         .plugin(tauri_nspanel::init())
         .invoke_handler(tauri::generate_handler![
@@ -44,12 +50,11 @@ fn main() {
             awake::awake_start,
             awake::awake_stop,
             awake::awake_pause,
-            awake::awake_resume
+            awake::awake_resume,
+            ui::open_session,
+            ui::open_ui
         ])
         .setup(|app| {
-            // LSUIElement covers the launch window before this runs
-            app.set_activation_policy(ActivationPolicy::Accessory);
-
             // first, so a daemon that dies mid-setup still takes us with it
             lifeline::init(app.handle());
             panel::init(app.handle())?;
@@ -65,6 +70,8 @@ fn main() {
             daemon::init(app.handle());
 
             panel::warm_up(app.handle());
+            ui::init(app.handle());
+            boot::init(app.handle());
 
             Ok(())
         })

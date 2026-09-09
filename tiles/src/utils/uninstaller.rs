@@ -8,10 +8,25 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 
+#[cfg(target_os = "macos")]
+use crate::utils::config::SYSTEM_APP_PATH;
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LIB_RUNTIME_DIRS_TO_REMOVE, SYSTEM_BIN_DIR, SYSTEM_BIN_PATH,
     SYSTEM_LIB_DIR, is_tiles_lib_dir,
 };
+
+/// The receipts the installer writes. Removing the files is not enough: a
+/// receipt outlives them and goes on claiming the package is installed, which
+/// is enough to make a later install skip what it thinks is already there
+#[cfg(target_os = "macos")]
+const PKG_RECEIPT_IDS: &[&str] = &[
+    "com.tilesprivacy.tiles",
+    "com.tilesprivacy.tiles.app",
+    "com.tilesprivacy.tiles_models_gguf",
+];
+
+#[cfg(target_os = "macos")]
+const PKGUTIL_PATH: &str = "/usr/sbin/pkgutil";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstallLayout {
@@ -35,9 +50,56 @@ pub fn uninstall(all: bool) -> Result<()> {
     #[cfg(target_os = "macos")]
     crate::core::service::unload().context("Failed to unload Tiles service")?;
     plan.apply()?;
+    #[cfg(target_os = "macos")]
+    forget_pkg_receipts();
 
     println!("Tiles uninstalled successfully.");
     Ok(())
+}
+
+/// Discards the installer's receipts. The files are already gone by now, so a
+/// receipt that will not budge is worth saying out loud but not worth failing
+/// the uninstall over.
+#[cfg(target_os = "macos")]
+fn forget_pkg_receipts() {
+    let installed: Vec<&str> = PKG_RECEIPT_IDS
+        .iter()
+        .copied()
+        .filter(|id| pkg_receipt_exists(id))
+        .collect();
+
+    for id in installed {
+        if let Err(err) = forget_pkg_receipt(id) {
+            eprintln!("Could not discard the receipt for {id}: {err}");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn pkg_receipt_exists(id: &str) -> bool {
+    Command::new(PKGUTIL_PATH)
+        .args(["--pkg-info", id])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+fn forget_pkg_receipt(id: &str) -> Result<()> {
+    // one id per call, --forget takes a single PKGID
+    let mut command = if is_running_as_root() {
+        Command::new(PKGUTIL_PATH)
+    } else {
+        let mut command = new_trusted_sudo_command()?;
+        command.arg(PKGUTIL_PATH);
+        command
+    };
+
+    command
+        .args(["--forget", id])
+        .stdout(std::process::Stdio::null());
+    run_elevated_command(&mut command, "discard installer receipts")
 }
 
 #[derive(Debug, Default)]
@@ -58,6 +120,10 @@ impl UninstallPlanner {
         plan.remove_files.insert(layout.bin);
         #[cfg(target_os = "macos")]
         add_service_file_to_plan(&mut plan, crate::core::service::plist_path()?);
+        // the app is a program, not something a person put there, so it goes on
+        // a plain uninstall as well as an --all one
+        #[cfg(target_os = "macos")]
+        plan.remove_dirs.insert(PathBuf::from(SYSTEM_APP_PATH));
 
         if all {
             let user_data_dir = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
@@ -143,9 +209,14 @@ fn print_plan(plan: &UninstallPlanner, needs_elevation: bool) {
         println!("  {}", dir.display());
     }
 
+    #[cfg(target_os = "macos")]
+    for id in PKG_RECEIPT_IDS.iter().filter(|id| pkg_receipt_exists(id)) {
+        println!("  installer receipt {id}");
+    }
+
     if needs_elevation {
         println!();
-        println!("Administrator privileges are required to remove system files under /usr/local.");
+        println!("Administrator privileges are required to remove files outside your home folder.");
         println!();
     }
 }
@@ -390,6 +461,11 @@ impl InstallLayout {
 }
 
 fn requires_elevation(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    if path.starts_with(SYSTEM_APP_PATH) {
+        return true;
+    }
+
     path.starts_with(SYSTEM_BIN_DIR) || path.starts_with(SYSTEM_LIB_DIR)
 }
 
@@ -608,6 +684,24 @@ mod tests {
         assert_eq!(layout.bin, bin);
         assert_eq!(layout.lib_dir, root.path());
         assert!(is_tiles_lib_dir(&layout.lib_dir));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_app_goes_on_a_plain_uninstall_too() -> Result<()> {
+        use crate::utils::config::SYSTEM_APP_PATH;
+
+        let app = PathBuf::from(SYSTEM_APP_PATH);
+
+        // a program, not something a person put there, so --all is not required
+        for all in [false, true] {
+            let plan = UninstallPlanner::from_current_system(all)?;
+            assert!(plan.remove_dirs.contains(&app), "missing on all={all}");
+        }
+
+        // and it is outside the home folder, so removing it needs root
+        assert!(requires_elevation(&app));
         Ok(())
     }
 

@@ -25,3 +25,9 @@ server/stack/macos/requirements/
 # menu bar app
 node_modules/
 apps/menubar/src-tauri/gen/
+
+# chat UI checkout, fetched at the pin in apps/menubar/ui.pin
+apps/menubar/.ui-src/
+
+pkg/component-app.plist
+pkg/tiles-app-unsigned.pkg

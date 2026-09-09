@@ -325,6 +325,10 @@ struct DaemonArgs {
     /// Serve without launching the menu bar app
     #[arg(long)]
     no_ui: bool,
+
+    /// Started by launchd rather than a person, so stay out of the way
+    #[arg(long)]
+    at_login: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -550,7 +554,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("{:?}", e))
                 .inspect(|_| println!("Daemon stopped successfully"))?,
-            _ => start_server(None, !daemon_args.no_ui).await?,
+            _ => start_server(None, !daemon_args.no_ui, !daemon_args.at_login).await?,
         },
         Some(Commands::System(SystemCommands::Service(service_args))) => {
             match service_args.command {

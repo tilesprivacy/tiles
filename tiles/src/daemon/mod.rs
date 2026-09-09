@@ -14,12 +14,17 @@ use crate::{
         account::account_router, agent::agent_router, atproto::atproto_router,
         server::server_router, session::session_router,
     },
+    utils::config::autostart_inference,
 };
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
     extract::{Query, State},
     http::StatusCode,
+    http::{
+        HeaderValue, Method,
+        header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
+    },
     response::IntoResponse,
     routing::get,
 };
@@ -37,6 +42,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
+use tower_http::cors::CorsLayer;
 
 pub mod account;
 pub mod agent;
@@ -248,7 +254,32 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
     wait_until_server_is_up(port).await
 }
 
-pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
+/// Browsers refuse a cross-origin request unless the daemon says who may make
+/// one, and the UI is cross-origin from the moment it stops being served by the
+/// Vite proxy: a Tauri webview runs on `tauri://localhost`.
+///
+/// The list is explicit on purpose. Allowing any origin would let any page the
+/// user happens to visit read their sessions and chats off the loopback port,
+/// since nothing here asks for credentials.
+fn cors_layer() -> CorsLayer {
+    let origins = [
+        // Tauri webviews
+        "tauri://localhost",
+        // `npm run dev`
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    .iter()
+    .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+    .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
+        .allow_headers([CONTENT_TYPE, ACCEPT, AUTHORIZATION])
+}
+
+pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Result<()> {
     let dyn_port: u32 = get_port(port);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -285,6 +316,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         .merge(session_router())
         .merge(atproto_router())
         // .layer(service)
+        .layer(cors_layer())
         .with_state(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);
@@ -293,8 +325,22 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     info!("Daemon server started at {}", dyn_port);
 
     if with_ui {
-        ui::start(ui);
+        ui::start(ui, show_ui);
     }
+
+    // a person starting Tiles wants to be able to talk to it, so bring the
+    // inference server up with everything else. launchd starting the daemon at
+    // login is not that, and loading a model nobody asked for is rude
+    if show_ui && autostart_inference() {
+        tokio::spawn(async {
+            match crate::core::server::start_server_daemon().await {
+                Ok(msg) => info!("Inference server: {msg}"),
+                // the daemon is useful without it, and the menu bar offers a retry
+                Err(err) => log::warn!("Could not start the inference server: {err:?}"),
+            }
+        });
+    }
+
     listen_for_signals(shared_state.clone());
 
     let _ = axum::serve(listener, app)
@@ -688,7 +734,7 @@ mod tests {
     #[serial]
     async fn test_sever_process_and_server_started() -> Result<()> {
         tokio::spawn(async move {
-            let _ = start_server(None, false).await;
+            let _ = start_server(None, false, false).await;
         });
         wait_until_server_is_up(None).await?;
         assert!(ping(None).await.is_ok());
