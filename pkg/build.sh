@@ -176,3 +176,8 @@ PLIST
 pkgbuild --root pkgroot --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg
 
 pkgbuild --root "${PKG_APP_STAGE}" --install-location /Applications --component-plist pkg/component-app.plist --identifier com.tilesprivacy.tiles.app --version "$VERSION" pkg/tiles-app-unsigned.pkg
+
+# nothing may be left loose in a staging root: every file in there is installed,
+# and anything at the top of it lands at the root of the volume. it also keeps a
+# stray copy of the app out of Spotlight and out of the apps drawer
+rm -rf "${PKG_APP_STAGE}"
