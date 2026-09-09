@@ -1,4 +1,10 @@
-# The chat UI this app carries. Bump the commit to ship a newer one, the
-# build fetches exactly this and nothing else.
+# The chat UI this app carries.
+#
+# `latest` takes whatever is on the repo's default branch at build time, so UI
+# work ships without a second commit here. The build prints the commit it
+# resolved, since that is the only record of what a given package contains.
+#
+# Put a commit sha here instead to hold a build to one, for a release that has
+# to stay reproducible.
 repo=https://github.com/tilesprivacy/tiles-ui.git
-commit=9483c4832e07e20a43bfb85a259650f6625a0d6d
+commit=latest
