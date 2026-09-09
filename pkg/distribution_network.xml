@@ -23,6 +23,7 @@
 
 <choice id="app" visible="true" start_selected="true" title="app">
     <pkg-ref id="com.tilesprivacy.tiles" onConclusion="none">tiles-unsigned.pkg</pkg-ref>
+    <pkg-ref id="com.tilesprivacy.tiles.app" onConclusion="none">tiles-app-unsigned.pkg</pkg-ref>
 </choice>
 
 

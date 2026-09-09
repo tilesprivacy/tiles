@@ -20,7 +20,10 @@ PKG_CLI_BIN_PATH="pkgroot/usr/local/bin"
 
 PKG_LIBS_PATH="pkgroot/usr/local/share/tiles"
 
-PKG_APPS_PATH="pkgroot/Applications"
+# the app is its own component, installed to /Applications. it cannot ride in
+# pkgroot: a package rooted at / that carries an ./Applications directory entry
+# is asking to write to the signed system volume, and macOS refuses the lot
+PKG_APP_STAGE="pkgapp"
 
 # CLI binary pkg install path
 mkdir -p "${PKG_CLI_BIN_PATH}"
@@ -130,9 +133,9 @@ echo "🖥  Building the menu bar app..."
 
 (cd apps/menubar && pnpm tauri build)
 
-mkdir -p "${PKG_APPS_PATH}"
-rm -rf "${PKG_APPS_PATH}/Tiles.app"
-cp -R "target/${TARGET}/bundle/macos/Tiles.app" "${PKG_APPS_PATH}/"
+rm -rf "${PKG_APP_STAGE}"
+mkdir -p "${PKG_APP_STAGE}"
+cp -R "target/${TARGET}/bundle/macos/Tiles.app" "${PKG_APP_STAGE}/"
 
 echo "Signing the app..."
 
@@ -142,16 +145,18 @@ codesign --force \
   --options runtime \
   --timestamp \
   --strict \
-  "${PKG_APPS_PATH}/Tiles.app"
+  "${PKG_APP_STAGE}/Tiles.app"
 
-codesign --verify --strict --deep "${PKG_APPS_PATH}/Tiles.app"
+codesign --verify --strict --deep "${PKG_APP_STAGE}/Tiles.app"
 
 # pkgbuild makes every bundle in the payload relocatable, so the installer looks
 # for an existing copy of the app anywhere on disk and updates that instead of
-# /Applications. A stale copy in a build tree is enough to catch it.
-pkgbuild --analyze --root pkgroot pkg/component.plist
+# /Applications. A stale copy in a build tree is enough to catch it. The version
+# check has to go too, or a record of the last install is enough to skip writing
+# the app at all.
+pkgbuild --analyze --root "${PKG_APP_STAGE}" pkg/component-app.plist
 
-python3 - pkg/component.plist <<'PLIST'
+python3 - pkg/component-app.plist <<'PLIST'
 import plistlib, sys
 
 path = sys.argv[1]
@@ -160,10 +165,7 @@ with open(path, "rb") as f:
     components = plistlib.load(f)
 
 for component in components:
-    # never hunt for an existing copy to update instead of /Applications
     component["BundleIsRelocatable"] = False
-    # and never skip the app because some record says this version is already
-    # installed. the payload is the truth, always write it
     component["BundleIsVersionChecked"] = False
 
 with open(path, "wb") as f:
@@ -171,4 +173,6 @@ with open(path, "wb") as f:
 PLIST
 
 # Creating .pkg
-pkgbuild --root pkgroot --component-plist pkg/component.plist --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg
+pkgbuild --root pkgroot --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg
+
+pkgbuild --root "${PKG_APP_STAGE}" --install-location /Applications --component-plist pkg/component-app.plist --identifier com.tilesprivacy.tiles.app --version "$VERSION" pkg/tiles-app-unsigned.pkg
