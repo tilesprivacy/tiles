@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { act } from "./act";
 
   import AwakeMenu from "./AwakeMenu.svelte";
   import CupMark from "./CupMark.svelte";
@@ -55,12 +55,12 @@
 
   function pick(seconds: number | null) {
     menu = false;
-    void invoke("awake_start", { seconds }).catch(() => {});
+    act("awake_start", { seconds });
   }
 
   function run(command: string) {
     menu = false;
-    void invoke(command).catch(() => {});
+    act(command);
   }
 
   // capture, or the panel's own handler pops the view out from under the menu
@@ -129,7 +129,7 @@
     </button>
   </div>
 
-  <button class="footer__quit" onclick={() => void invoke("quit_app").catch(() => {})}>
+  <button class="footer__quit" onclick={() => act("quit_app")}>
     Quit
   </button>
 </footer>

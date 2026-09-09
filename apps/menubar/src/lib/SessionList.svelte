@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { invoke } from "@tauri-apps/api/core";
+  import { act } from "./act";
 
   import type { Session } from "../state.svelte";
   import Row from "./Row.svelte";
@@ -12,7 +12,7 @@
   let { sessions }: Props = $props();
 
   function open(id: string) {
-    void invoke("open_session", { id }).catch(() => {});
+    act("open_session", { id });
   }
 </script>
 
