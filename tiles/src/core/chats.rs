@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::core::account::local::User;
+use crate::core::agent::types::{PiMsgContent, PiMsgEvent};
 use crate::core::storage::db::get_db_conn;
 use crate::repl::ChatResponse;
 use crate::utils::get_unix_time_now;
+use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Result, anyhow};
 use log::{info, warn};
 use rusqlite::types::FromSqlError;
@@ -88,6 +90,54 @@ pub struct DeltaChat {
     pub sessions: Vec<Session>,
 }
 
+/// Rebuilds a snapshot from the stored rows.
+///
+/// The REPL keeps a snapshot as it goes, built from the events Pi hands it. The
+/// daemon has no such event to keep, it saves one chat at a time, so a session
+/// started from the app reaches sharing with nothing stored. The rows carry the
+/// text, the role and the model, which is what a snapshot is made of.
+pub fn snapshot_from_chats(session: &Session, chats: &[Chats]) -> SessionSnapshotRecord {
+    let mut record = SessionSnapshotRecord::new(&session.name, &session.id);
+    let mut turn: Option<Turn> = None;
+
+    for chat in chats {
+        // a turn is one prompt and the reply to it, so every user row but the
+        // first closes the turn before it
+        if chat.role == Role::User
+            && let Some(finished) = turn.take()
+        {
+            record.turns.push(finished);
+        }
+
+        turn.get_or_insert_with(|| Turn {
+            api: Some(String::from("open-responses")),
+            provider: Some(String::from("tiles")),
+            model: chat.model_name.clone(),
+            messages: vec![],
+        })
+        .messages
+        .push(PiMsgEvent {
+            role: chat.role,
+            content: vec![PiMsgContent {
+                r#type: String::from("text"),
+                text: Some(chat.content.clone()),
+                thinking: None,
+                arguments: None,
+                name: None,
+            }],
+            stop_reason: None,
+            timestamp: chat.created_at,
+            tool_name: None,
+        });
+    }
+
+    if let Some(last) = turn {
+        record.turns.push(last);
+    }
+
+    record
+}
+
 pub fn save_chat(conn: &Connection, user: &User, chat_resp: ChatResponse) -> Result<Chats> {
     let row_counter = get_last_row_counter(conn, &user.user_id)?;
     let chat = Chats {
@@ -164,7 +214,7 @@ fn fetch_delta_chats(
         let updated_at: f64 = row.get(7)?;
         let resp_id: Option<String> = row.get(3)?;
         let ctx_id = row.get(5)?;
-        let model_name_db: Option<String> = row.get(9)?;
+        let model_name_db: Option<String> = row.get(10)?;
 
         let model_name: String = model_name_db.unwrap_or("".to_owned());
 
@@ -442,7 +492,7 @@ fn decode_delta_from_bytes(bytes: &[u8]) -> Result<DeltaChat> {
 }
 
 pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<DeltaChat> {
-    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where session_id = ?1 order by id";
+    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id, model_name from chats where session_id = ?1 order by id";
 
     let params = vec![("?1", session_id)];
 
@@ -473,12 +523,63 @@ pub mod tests {
             account::local::{ACCOUNT, User},
             chats::{
                 apply_delta, create_session, decode_delta_from_bytes, encode_delta_to_bytes,
-                fetch_models_used_by_session, get_delta, get_last_row_counter, save_chat,
+                fetch_chats_by_session_id, fetch_models_used_by_session, get_delta,
+                get_last_row_counter, save_chat, snapshot_from_chats,
             },
         },
         repl::ChatResponse,
         utils::{get_unix_time_now, test_logger},
     };
+
+    /// A session started from the app has no stored snapshot, so sharing one
+    /// depends on this rebuilding the turns from the rows.
+    #[test]
+    fn a_snapshot_is_rebuilt_from_the_saved_chats() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let session_id = String::from("session_snapshot");
+
+        create_session(&conn, &session_id, "a name", &user.user_id).unwrap();
+
+        for (role, text) in [
+            (Role::User, "first prompt"),
+            (Role::Assistant, "first reply"),
+            (Role::User, "second prompt"),
+            (Role::Assistant, "second reply"),
+        ] {
+            save_chat(
+                &conn,
+                &user,
+                ChatResponse {
+                    input: text.to_owned(),
+                    session_id: session_id.clone(),
+                    role,
+                    parent_chat_id: None,
+                    metrics: None,
+                    model_used: "a-model".to_owned(),
+                },
+            )
+            .unwrap();
+        }
+
+        let delta = fetch_chats_by_session_id(&conn, &session_id).unwrap();
+        let snapshot = snapshot_from_chats(&delta.sessions[0], &delta.chats);
+
+        // one prompt and its reply per turn, so four rows are two turns
+        assert_eq!(snapshot.turns.len(), 2);
+        assert_eq!(snapshot.turns[0].messages.len(), 2);
+        assert_eq!(snapshot.turns[1].messages.len(), 2);
+        assert_eq!(snapshot.name, "a name");
+        assert_eq!(snapshot.turns[0].model, "a-model");
+        assert_eq!(
+            snapshot.turns[0].messages[0].content[0].text.as_deref(),
+            Some("first prompt")
+        );
+        assert_eq!(
+            snapshot.turns[1].messages[1].content[0].text.as_deref(),
+            Some("second reply")
+        );
+    }
 
     #[test]
     fn test_valid_input_save_chat() {
