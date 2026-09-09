@@ -628,9 +628,19 @@ async fn wait_until_server_is_up() {
     }
 }
 
+/// where an edited modelfile is kept. the shipped one sits in the lib dir, which
+/// is root owned on an installed copy, so nothing running as the user can write it
+pub fn user_modelfile_path(provider: &impl ConfigProvider) -> Result<PathBuf> {
+    Ok(provider.get_data_dir()?.join("modelfile"))
+}
+
 pub fn get_default_modelfile(provider: impl ConfigProvider) -> Result<PathBuf> {
-    let path = provider.get_lib_dir()?.join("modelfiles/gemma-4-12b-gguf");
-    Ok(path)
+    let edited = user_modelfile_path(&provider)?;
+    if edited.is_file() {
+        return Ok(edited);
+    }
+
+    Ok(provider.get_lib_dir()?.join("modelfiles/gemma-4-12b-gguf"))
 }
 
 async fn load_model_in_py(
@@ -1319,11 +1329,70 @@ mod tests {
     use crate::core::chats::tests::create_user;
     use rusqlite::Connection;
 
+    /// the real provider points at the running machine, where an edited
+    /// modelfile may or may not be sitting in the data dir
+    #[derive(Clone)]
+    struct TempDirs {
+        data: std::path::PathBuf,
+        lib: std::path::PathBuf,
+    }
+
+    impl ConfigProvider for TempDirs {
+        fn get_config_dir(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.data.clone())
+        }
+        fn get_or_create_config_dir(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.data.clone())
+        }
+        fn get_data_dir(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.data.clone())
+        }
+        fn get_or_create_data_dir(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.data.clone())
+        }
+        fn get_user_data_dir(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.data.clone())
+        }
+        fn get_lib_dir(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.lib.clone())
+        }
+        fn get_user_bin_dir(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.data.clone())
+        }
+        fn get_user_bin_path(&self) -> anyhow::Result<PathBuf> {
+            Ok(self.data.clone())
+        }
+    }
+
+    fn temp_dirs() -> (tempfile::TempDir, TempDirs) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = TempDirs {
+            data: tmp.path().join("data"),
+            lib: tmp.path().join("lib"),
+        };
+        std::fs::create_dir_all(&dirs.data).unwrap();
+        std::fs::create_dir_all(dirs.lib.join("modelfiles")).unwrap();
+        (tmp, dirs)
+    }
+
     #[test]
-    fn default_modelfile_uses_platform_default() {
-        let path =
-            get_default_modelfile(DefaultProvider).expect("default modelfile should resolve");
+    fn the_shipped_modelfile_is_used_when_nothing_was_edited() {
+        let (_tmp, dirs) = temp_dirs();
+
+        let path = get_default_modelfile(dirs).expect("default modelfile should resolve");
+
         assert!(path.ends_with("modelfiles/gemma-4-12b-gguf"));
+    }
+
+    #[test]
+    fn an_edited_modelfile_wins_over_the_shipped_one() {
+        let (_tmp, dirs) = temp_dirs();
+        let edited = user_modelfile_path(&dirs).unwrap();
+        std::fs::write(&edited, "FROM somewhere/else\n").unwrap();
+
+        let path = get_default_modelfile(dirs).expect("default modelfile should resolve");
+
+        assert_eq!(path, edited);
     }
 
     #[test]

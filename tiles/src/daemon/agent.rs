@@ -52,6 +52,7 @@ pub fn agent_router() -> Router<Arc<AppState>> {
         .route("/v1/tilekit/agent/end_session", get(end_current_session))
         .route("/v1/tilekit/agent/state", get(agent_state))
         .route("/v1/tilekit/agent/prompt", post(process_chat_prompt))
+        .route("/v1/tilekit/agent/reload", get(reload_agent))
 }
 
 async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
@@ -83,6 +84,28 @@ pub fn get_agent_start_params(provider: impl ConfigProvider) -> Result<(String, 
     let system_prompt = default_modelfile.system.clone().unwrap_or("".to_owned());
 
     Ok((modelname, system_prompt))
+}
+
+/// Drop the running agent and start a fresh one. The modelfile is only read at
+/// start, so this is what applies an edited one without restarting the daemon.
+async fn reload_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    // before taking the old one down, so a bad modelfile leaves it running
+    let (modelname, system_prompt) = get_agent_start_params(DefaultProvider)?;
+
+    let mut agent = state.agent.lock().await;
+
+    // pi is setsid into its own session and PiAgent has no Drop, so letting the
+    // handle go would leave the process behind
+    if let Some(current) = agent.take() {
+        let (mut process, _, _) = current.split();
+        let _ = process.kill().await;
+    }
+
+    let pi_agent = pi::new(&modelname, &system_prompt, PY_PORT)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    *agent = Some(pi_agent);
+
+    Ok(ApiResponse::success(json!({"message": "reloaded agent"})))
 }
 
 #[debug_handler]
