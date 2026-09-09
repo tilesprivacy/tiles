@@ -28,6 +28,8 @@ use tokio::{process::Command, sync::oneshot};
 use std::error::Error;
 
 use hickory_resolver::TokioResolver;
+use hickory_resolver::config::{NameServerConfig, ResolverConfig};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
 
 use crate::{
     core::storage::db::{Dbconn, get_db_conn},
@@ -77,22 +79,48 @@ struct HickoryDnsTxtResolver {
     resolver: TokioResolver,
 }
 
+/// The nameservers macOS hands out, minus the ones that cannot be used.
+///
+/// System Configuration reports a router's link-local IPv6 resolver with the
+/// interface it belongs to, as `fe80::1%en0`, and the zone makes it unparseable
+/// as a plain address. hickory treats that as fatal and drops the whole config,
+/// so a working IPv4 resolver sitting next to it is lost with it. Reading the
+/// same list and skipping only what will not parse keeps the usable ones.
+fn nameservers_from_resolv_conf() -> Option<ResolverConfig> {
+    let text = std::fs::read_to_string("/etc/resolv.conf").ok()?;
+    let mut nameservers = vec![];
+
+    for line in text.lines() {
+        let Some(address) = line.trim().strip_prefix("nameserver") else {
+            continue;
+        };
+
+        // a scoped address is only reachable through the interface it names,
+        // which is not something this resolver can carry, so it goes
+        if let Ok(ip) = address.trim().parse() {
+            nameservers.push(NameServerConfig::udp_and_tcp(ip));
+        }
+    }
+
+    (!nameservers.is_empty()).then(|| ResolverConfig::from_parts(None, vec![], nameservers))
+}
+
 impl HickoryDnsTxtResolver {
     fn new() -> Result<Self> {
-        let build_resolver = if let Ok(resolver_builder) = TokioResolver::builder_tokio() {
-            resolver_builder.build()
-        } else {
-            return Err(anyhow!(
-                "Failed to resolve DNS, please check your internet connection"
-            ));
-        };
-        if let Ok(resolved) = build_resolver {
-            Ok(Self { resolver: resolved })
-        } else {
-            Err(anyhow!(
-                "Failed to resolve DNS, please check your internet connection"
-            ))
+        if let Ok(builder) = TokioResolver::builder_tokio()
+            && let Ok(resolver) = builder.build()
+        {
+            return Ok(Self { resolver });
         }
+
+        let config = nameservers_from_resolv_conf().ok_or_else(|| {
+            anyhow!("Failed to resolve DNS, please check your internet connection")
+        })?;
+
+        TokioResolver::builder_with_config(config, TokioRuntimeProvider::default())
+            .build()
+            .map(|resolver| Self { resolver })
+            .map_err(|_e| anyhow!("Failed to resolve DNS, please check your internet connection"))
     }
 }
 
