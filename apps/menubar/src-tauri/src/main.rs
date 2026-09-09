@@ -1,5 +1,6 @@
 mod account;
 mod atproto;
+mod awake;
 mod clipboard;
 mod daemon;
 mod inference;
@@ -38,7 +39,12 @@ fn main() {
             atproto::atproto_login,
             sessions::sessions_state,
             remote::remote_state,
-            remote::remote_set
+            remote::remote_set,
+            awake::awake_state,
+            awake::awake_start,
+            awake::awake_stop,
+            awake::awake_pause,
+            awake::awake_resume
         ])
         .setup(|app| {
             // LSUIElement covers the launch window before this runs
@@ -54,6 +60,8 @@ fn main() {
             atproto::init(app.handle());
             sessions::init(app.handle());
             remote::init(app.handle());
+            // before the watcher, whose every pass reconciles it
+            awake::init(app.handle());
             daemon::init(app.handle());
 
             panel::warm_up(app.handle());

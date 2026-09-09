@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
-use crate::{account, atproto, inference, remote, sessions};
+use crate::{account, atproto, awake, inference, remote, sessions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -90,6 +90,10 @@ async fn watch(app: AppHandle) {
         .expect("a client with only a timeout set always builds");
 
     loop {
+        // outside the branch below: the mains are not the daemon's business,
+        // and a manual assertion outlives it going away
+        awake::tick(&app);
+
         match ping(&client).await {
             Some(version) => {
                 set(&app, Health::Up { version });
