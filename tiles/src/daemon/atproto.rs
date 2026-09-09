@@ -15,7 +15,7 @@ use serde_json::json;
 use crate::{
     core::{
         account::atproto,
-        chats::fetch_chats_by_session_id,
+        chats::{fetch_chats_by_session_id, snapshot_from_chats},
         storage::db::{Dbconn, get_db_conn},
     },
     daemon::{ApiResponse, AppError, AppState},
@@ -64,14 +64,15 @@ pub async fn share_session(
         .first()
         .ok_or_else(|| AppError::NotFound(format!("No session {session_id}")))?;
 
-    // the snapshot is what gets published, and sessions from before it existed
-    // have nothing to publish
-    let snapshot = session.snapshot.as_ref().ok_or_else(|| {
-        AppError::CannotProcess("This session predates snapshots and cannot be shared".to_owned())
-    })?;
-
-    let shared_session: SessionSnapshotRecord =
-        serde_json::from_str(snapshot).map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    // the REPL stores a snapshot as it goes and the daemon does not, so a
+    // session started from the app arrives here with nothing stored and has one
+    // built from its rows instead
+    let shared_session: SessionSnapshotRecord = match session.snapshot.as_ref() {
+        Some(snapshot) => {
+            serde_json::from_str(snapshot).map_err(|e| AppError::CannotProcess(e.to_string()))?
+        }
+        None => snapshot_from_chats(session, &delta_chats.chats),
+    };
 
     let is_private = request.is_private;
 
