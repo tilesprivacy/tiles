@@ -160,7 +160,11 @@ with open(path, "rb") as f:
     components = plistlib.load(f)
 
 for component in components:
+    # never hunt for an existing copy to update instead of /Applications
     component["BundleIsRelocatable"] = False
+    # and never skip the app because some record says this version is already
+    # installed. the payload is the truth, always write it
+    component["BundleIsVersionChecked"] = False
 
 with open(path, "wb") as f:
     plistlib.dump(components, f)
