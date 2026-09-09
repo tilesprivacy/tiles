@@ -8,12 +8,13 @@ mod inference;
 mod lifeline;
 mod panel;
 mod paths;
+mod quit;
 mod remote;
 mod sessions;
 mod tray;
 mod ui;
 
-use tauri::{Manager, WindowEvent};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 fn main() {
     tauri::Builder::default()
@@ -88,6 +89,24 @@ fn main() {
                 panel::dismiss(app, mode);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("failed to start the Tiles menu bar app");
+        .build(tauri::generate_context!())
+        .expect("failed to start the Tiles menu bar app")
+        .run(|app, event| match event {
+            // the delegate only exists once the loop is up
+            RunEvent::Ready => quit::init(app),
+            // the dock's quit and cmd-q both land here, and killing the process
+            // on the spot only gets us restarted by the daemon that owns us.
+            // quitting is the daemon's to do, same as the tray item
+            RunEvent::ExitRequested {
+                code: None, api, ..
+            } => {
+                api.prevent_exit();
+                daemon::quit(app);
+            }
+            // clicking the dock icon with the window closed. nothing else
+            // brings it back, the tray item aside
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => ui::reopen(app),
+            _ => {}
+        });
 }

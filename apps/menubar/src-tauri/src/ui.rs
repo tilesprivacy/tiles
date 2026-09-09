@@ -110,6 +110,22 @@ pub fn init(app: &AppHandle) {
     }
 }
 
+/// the dock icon was clicked. a window that is merely buried comes forward
+/// where it was left, only a closed one goes back to the start
+pub fn reopen(app: &AppHandle) {
+    let result = match app.get_webview_window(LABEL) {
+        Some(window) => window
+            .show()
+            .and_then(|()| window.set_focus())
+            .map_err(|e| e.to_string()),
+        None => open(app, "/"),
+    };
+
+    if let Err(err) = result {
+        eprintln!("[ui] could not reopen the chat window: {err}");
+    }
+}
+
 #[tauri::command]
 pub fn open_session(app: AppHandle, id: String) -> Result<(), String> {
     open(&app, &format!("/chat/{id}"))
