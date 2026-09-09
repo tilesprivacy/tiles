@@ -6,16 +6,32 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../../.." && pwd)
-ui="$root/vendor/tiles-ui"
 out="$root/apps/menubar/dist"
+cache="$root/apps/menubar/.ui-src"
 
-if [ ! -f "$ui/package.json" ]; then
-  echo "vendor/tiles-ui is empty, run: git submodule update --init" >&2
-  exit 1
+if [ -n "${TILES_UI_DIR:-}" ]; then
+  # working on both at once, build whatever is in the checkout
+  ui="$TILES_UI_DIR"
+else
+  # shellcheck source=../ui.pin
+  . "$root/apps/menubar/ui.pin"
+  ui="$cache"
+
+  if [ ! -d "$ui/.git" ]; then
+    rm -rf "$ui"
+    git clone -q "$repo" "$ui"
+  fi
+
+  # a bare sha is not a ref, so ask for it directly and fall back to everything
+  git -C "$ui" fetch -q origin "$commit" 2>/dev/null || git -C "$ui" fetch -q origin
+  git -C "$ui" checkout -q --detach "$commit"
 fi
 
 cd "$ui"
-[ -d node_modules ] || npm ci
+
+if [ ! -d node_modules ] || [ package-lock.json -nt node_modules ]; then
+  npm ci
+fi
 
 # the adapter writes into dist without clearing it, so a worker from an earlier
 # build would survive
