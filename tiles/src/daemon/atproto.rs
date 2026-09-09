@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{
     Json, Router,
+    extract::Path,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -14,14 +15,24 @@ use serde_json::json;
 use crate::{
     core::{
         account::atproto,
+        chats::fetch_chats_by_session_id,
         storage::db::{Dbconn, get_db_conn},
     },
     daemon::{ApiResponse, AppError, AppState},
+    utils::lexicons::SessionSnapshotRecord,
 };
 
 #[derive(Serialize, Deserialize)]
 pub struct AtLoginReq {
     user_handle: String,
+}
+
+#[derive(Deserialize)]
+pub struct ShareSessionReq {
+    /// A private share is encrypted before it goes to the PDS, and the key
+    /// rides in the link's fragment rather than in the record
+    #[serde(default)]
+    is_private: bool,
 }
 // atproto apis needed
 // login, logout
@@ -30,10 +41,71 @@ pub fn atproto_router() -> Router<Arc<AppState>> {
         .route("/v1/tilekit/atproto/login", post(login))
         .route("/v1/tilekit/atproto/logout", post(logout))
         .route("/v1/tilekit/atproto/status", get(status))
-    // .route(
-    //     "/v1/tilekit/atproto/share-session/{session-id}",
-    //     get(share_session),
-    // )
+        .route(
+            "/v1/tilekit/atproto/share-session/{session_id}",
+            post(share_session),
+        )
+}
+
+/// Publishes a session to the user's PDS and hands back the link. Posting
+/// rather than getting, because it writes a record every time it is called.
+#[debug_handler]
+pub async fn share_session(
+    Path(session_id): Path<String>,
+    Json(request): Json<ShareSessionReq>,
+) -> Result<impl IntoResponse, AppError> {
+    let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
+        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    let delta_chats = fetch_chats_by_session_id(&chat_db_conn, &session_id)
+        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+
+    let session = delta_chats
+        .sessions
+        .first()
+        .ok_or_else(|| AppError::NotFound(format!("No session {session_id}")))?;
+
+    // the snapshot is what gets published, and sessions from before it existed
+    // have nothing to publish
+    let snapshot = session.snapshot.as_ref().ok_or_else(|| {
+        AppError::CannotProcess("This session predates snapshots and cannot be shared".to_owned())
+    })?;
+
+    let shared_session: SessionSnapshotRecord =
+        serde_json::from_str(snapshot).map_err(|e| AppError::CannotProcess(e.to_string()))?;
+
+    let is_private = request.is_private;
+
+    // rusqlite's Connection is not Sync, so a share that holds one across its
+    // awaits cannot be a Send future, which is what axum wants. Keeping the
+    // whole thing on one blocking thread with a runtime of its own sidesteps
+    // that without threading a connection pool through the atproto code
+    let url = tokio::task::spawn_blocking(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+
+        runtime.block_on(async {
+            let conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
+
+            atproto::share_session(&conn, &shared_session, is_private).await
+        })
+    })
+    .await
+    .map_err(|e| AppError::InternalServerError(format!("Share task failed: {e}")))?
+    .map_err(|e| {
+        if e.to_string() == "NOT_LOGGED_IN" {
+            AppError::CannotProcess(
+                "Sharing needs an ATmosphere login, the session is stored on your PDS".to_owned(),
+            )
+        } else {
+            AppError::InternalServerError(e.to_string())
+        }
+    })?;
+
+    Ok(ApiResponse::success(json!({
+        "url": url,
+        "is_private": is_private
+    })))
 }
 
 #[debug_handler]

@@ -823,13 +823,17 @@ async fn process_share_session(
                 println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
                 stdin.read_line(&mut input)?;
                 login(input.trim()).await?;
-                share_session(&conn.common, &shared_session, is_private).await?;
+
+                let url = share_session(&conn.common, &shared_session, is_private).await?;
+
+                println!("successfully posted at {}", url);
             }
         }
         Err(err) => {
             eprintln!("Failed to share session due to {:?}", err)
         }
-        Ok(_) => {
+        Ok(url) => {
+            println!("successfully posted at {}", url);
             info!("Session shared successfully")
         }
     }
