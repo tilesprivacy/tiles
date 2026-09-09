@@ -15,7 +15,19 @@
   const copier = new Copier();
   onDestroy(() => copier.dispose());
 
-  const local = $derived(account.value.state === "local" ? account.value : null);
+  // the daemon misses a tick and reports unknown, and an account already on
+  // screen should not blink out with it. the identity itself does not change
+  let held = $state(account.value.state === "local" ? account.value : null);
+
+  $effect(() => {
+    const at = account.value;
+    if (at.state === "local") held = at;
+    // no account is not a blip, and this view is of one that is gone
+    else if (at.state === "none") nav.pop();
+  });
+
+  // const, so the row below can narrow it inside its own handler
+  const local = $derived(held);
 
   // read once on open rather than polled, the daemon rewrites it only on a
   // `tiles data path` and this view is not on screen for long

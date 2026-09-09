@@ -18,7 +18,20 @@
     did.dispose();
   });
 
-  const session = $derived(atproto.value.state === "session" ? atproto.value : null);
+  // the daemon misses a tick and reports unknown, and an account already on
+  // screen should not blink out with it. the identity itself does not change
+  let held = $state(atproto.value.state === "session" ? atproto.value : null);
+
+  $effect(() => {
+    const at = atproto.value;
+    if (at.state === "session") held = at;
+    // signed out is not a blip, and this view is of an account that is gone
+    else if (at.state === "none") nav.pop();
+  });
+
+  // const, so the rows below can narrow it inside their own handlers
+  const session = $derived(held);
+
   const name = $derived(session?.displayName?.trim() || null);
 
   // the scheme is the same for every one of them, the host is the part that says
