@@ -22,10 +22,20 @@ else
     git clone -q "$repo" "$ui"
   fi
 
-  # a bare sha is not a ref, so ask for it directly and fall back to everything
-  git -C "$ui" fetch -q origin "$commit" 2>/dev/null || git -C "$ui" fetch -q origin
-  git -C "$ui" checkout -q --detach "$commit"
+  if [ "$commit" = "latest" ]; then
+    # HEAD rather than a branch name, so this follows whatever the repo calls
+    # its default branch
+    git -C "$ui" fetch -q origin HEAD
+    git -C "$ui" checkout -q --detach FETCH_HEAD
+  else
+    # a bare sha is not a ref, so ask for it directly and fall back to everything
+    git -C "$ui" fetch -q origin "$commit" 2>/dev/null || git -C "$ui" fetch -q origin
+    git -C "$ui" checkout -q --detach "$commit"
+  fi
 fi
+
+# a floating build has nothing else recording which ui it carries
+echo "chat ui: $(git -C "$ui" rev-parse HEAD)"
 
 cd "$ui"
 
