@@ -10,7 +10,7 @@ use tauri_nspanel::objc2_foundation::{NSString, NSURL};
 /// `data.path` is blank until the user moves it, and the daemon resolves that
 /// blank against its own dirs without publishing the result anywhere. this is
 /// the same rule for a released daemon, `$XDG_DATA_HOME` or `~/.local/share`
-fn default_dir() -> Option<PathBuf> {
+pub fn default_dir() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_DATA_HOME") {
         Some(dir) => PathBuf::from(dir),
         None => std::env::home_dir()?.join(".local/share"),

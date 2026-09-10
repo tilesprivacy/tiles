@@ -31,11 +31,15 @@ pub enum Health {
 
 pub struct Daemon {
     health: Mutex<Health>,
+    /// boot's account of why the daemon is not answering. the watcher can only
+    /// say "not running", so this wins as the reason until a ping succeeds
+    boot_error: Mutex<Option<String>>,
 }
 
 pub fn init(app: &AppHandle) {
     app.manage(Daemon {
         health: Mutex::new(Health::Starting),
+        boot_error: Mutex::new(None),
     });
 
     let app = app.clone();
@@ -59,6 +63,23 @@ async fn ping(client: &reqwest::Client) -> Option<String> {
 
 fn current(app: &AppHandle) -> Health {
     app.state::<Daemon>().health.lock().unwrap().clone()
+}
+
+/// boot could not start the daemon, or started it and it never answered.
+/// stdout and stderr used to vanish into /dev/null here, which made this the
+/// one failure a user could neither see nor report
+pub fn report_boot_failure(app: &AppHandle, reason: String) {
+    eprintln!("[boot] {reason}");
+    *app.state::<Daemon>().boot_error.lock().unwrap() = Some(reason.clone());
+    set(app, Health::Down { reason });
+}
+
+fn boot_error(app: &AppHandle) -> Option<String> {
+    app.state::<Daemon>().boot_error.lock().unwrap().clone()
+}
+
+fn clear_boot_error(app: &AppHandle) {
+    *app.state::<Daemon>().boot_error.lock().unwrap() = None;
 }
 
 /// emits on change only, the watcher polls far more often than state moves
@@ -96,6 +117,8 @@ async fn watch(app: AppHandle) {
 
         match ping(&client).await {
             Some(version) => {
+                // it answered after all, whatever boot saw is history
+                clear_boot_error(&app);
                 set(&app, Health::Up { version });
                 inference::poll(&app, &client).await;
                 account::poll(&app, &client).await;
@@ -103,12 +126,8 @@ async fn watch(app: AppHandle) {
                 remote::poll(&app, &client).await;
             }
             None => {
-                set(
-                    &app,
-                    Health::Down {
-                        reason: "not running".into(),
-                    },
-                );
+                let reason = boot_error(&app).unwrap_or_else(|| "not running".into());
+                set(&app, Health::Down { reason });
                 inference::unknown(&app);
                 account::unknown(&app);
                 atproto::unknown(&app);
