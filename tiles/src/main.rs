@@ -67,7 +67,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    server    Configure the inference server\n",
     "    daemon    Configure daemon behavior\n\n",
     "  Tools\n",
-    "    plugin    Manage plugins such as skills, extensions etc\n\n",
+    "    plugin    Install and manage plugins\n\n",
     "Options:\n",
     "  -h, --help       Show help\n",
     "  -V, --version    Show version\n\n",
@@ -338,16 +338,19 @@ struct PluginArgs {
 
 #[derive(Debug, Subcommand)]
 enum PluginCommands {
+    /// List plugins and what they do
     List,
     /// Install a plugin
-    Install {
-        path: String,
-    },
+    Install { path: String },
 
     /// Uninstall a plugin
-    Uninstall {
-        name: String,
-    },
+    Uninstall { name: String },
+
+    /// Turn a plugin off without removing it
+    Disable { name: String },
+
+    /// Turn a plugin back on
+    Enable { name: String },
 }
 #[derive(Debug, Args)]
 #[command(args_conflicts_with_subcommands = true)]
@@ -522,15 +525,20 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                     Ok(resp) => println!("{}", resp),
                     Err(err) => eprintln!("Plugin failed to install due to {:?}", err),
                 },
-                PluginCommands::Uninstall { name } => {
-                    // handle uninstall
-                    match uninstall(&name) {
-                        Ok(resp) => println!("{}", resp),
-                        Err(_err) => eprintln!(
-                            "Plugin failed to uninstall, please check if the name is correct and try again"
-                        ),
-                    }
-                }
+                PluginCommands::Uninstall { name } => match uninstall(&name) {
+                    Ok(resp) => println!("{}", resp),
+                    // Show the real reason: it explains bundled plugins and
+                    // points at `disable`.
+                    Err(err) => eprintln!("{}", err),
+                },
+                PluginCommands::Disable { name } => match plugin::set_enabled(&name, false) {
+                    Ok(resp) => println!("{}", resp),
+                    Err(err) => eprintln!("{}", err),
+                },
+                PluginCommands::Enable { name } => match plugin::set_enabled(&name, true) {
+                    Ok(resp) => println!("{}", resp),
+                    Err(err) => eprintln!("{}", err),
+                },
             }
         }
         Some(Commands::Sync(SyncCommands::Link(link_args))) => match link_args.command {

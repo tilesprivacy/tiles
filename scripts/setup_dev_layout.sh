@@ -22,6 +22,8 @@ link_dir() {
 
 link_dir modelfiles
 link_dir server
+link_dir vendor
+link_dir plugins
 
 if [[ ! -d "${DEV_DIR}/pi" ]]; then
   echo "Pi binary missing. Run: just build_w_pi"

@@ -19,6 +19,14 @@ pub enum PiResponse {
     AgentEnd(PiAgentEndEvent),
     #[serde(rename = "turn_end")]
     TurnEnd(PiTurnEndEvent),
+    #[serde(rename = "extension_ui_request")]
+    ExtensionUiRequest(PiExtensionUiRequest),
+    #[serde(rename = "tool_execution_start")]
+    ToolExecutionStart(PiToolExecution),
+    #[serde(rename = "tool_execution_update")]
+    ToolExecutionUpdate(PiToolExecution),
+    #[serde(rename = "tool_execution_end")]
+    ToolExecutionEnd(PiToolExecutionEnd),
     #[serde[other]]
     Unknown,
 }
@@ -27,6 +35,82 @@ pub enum PiResponse {
 pub struct PiAgentEndEvent {
     pub messages: Vec<PiMsgEvent>,
 }
+/// A tool starting or streaming progress. `partial_result` is cumulative, so
+/// each update replaces the display rather than appending to it.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PiToolExecution {
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    #[serde(rename = "toolName")]
+    pub tool_name: String,
+    pub args: Option<Value>,
+    #[serde(rename = "partialResult")]
+    pub partial_result: Option<Value>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PiToolExecutionEnd {
+    #[serde(rename = "toolCallId")]
+    pub tool_call_id: String,
+    #[serde(rename = "toolName")]
+    pub tool_name: String,
+    pub result: Option<Value>,
+    #[serde(rename = "isError")]
+    pub is_error: Option<bool>,
+}
+
+/// A `ui.*` call from a Pi extension. Dialog methods block Pi until we
+/// answer with a matching `extension_ui_response`; the rest are one-way.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct PiExtensionUiRequest {
+    pub id: String,
+    pub method: ExtensionUiMethod,
+    pub title: Option<String>,
+    pub message: Option<String>,
+    pub options: Option<Vec<String>>,
+    pub placeholder: Option<String>,
+    pub prefill: Option<String>,
+    #[serde(rename = "notifyType")]
+    pub notify_type: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub enum ExtensionUiMethod {
+    #[serde(rename = "select")]
+    Select,
+    #[serde(rename = "confirm")]
+    Confirm,
+    #[serde(rename = "input")]
+    Input,
+    #[serde(rename = "editor")]
+    Editor,
+    #[serde(rename = "notify")]
+    Notify,
+    #[serde(rename = "setStatus")]
+    SetStatus,
+    #[serde(rename = "setWidget")]
+    SetWidget,
+    #[serde(rename = "setTitle")]
+    SetTitle,
+    #[serde(rename = "set_editor_text")]
+    SetEditorText,
+    #[serde(other)]
+    Unknown,
+}
+
+impl ExtensionUiMethod {
+    /// Dialog methods block Pi on stdin, so they must always get a reply.
+    pub fn is_dialog(&self) -> bool {
+        matches!(
+            self,
+            ExtensionUiMethod::Select
+                | ExtensionUiMethod::Confirm
+                | ExtensionUiMethod::Input
+                | ExtensionUiMethod::Editor
+        )
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct GetStateData {
     pub model: PiModelInfo,
@@ -49,6 +133,9 @@ pub struct PiSettings {
     pub compaction: Option<CompactionSettings>,
     #[serde(rename = "defaultThinkingLevel")]
     pub default_thinking_level: Option<ReasoningEffort>,
+    /// Keeps settings Tiles does not know about from being wiped on rewrite.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl Default for PiSettings {
@@ -56,6 +143,7 @@ impl Default for PiSettings {
         PiSettings {
             compaction: Some(CompactionSettings { enabled: false }),
             default_thinking_level: Some(ReasoningEffort::Medium),
+            extra: serde_json::Map::new(),
         }
     }
 }
@@ -128,14 +216,27 @@ pub enum CommandType {
     Skills,
     #[serde(rename = "get_commands")]
     GetCommands,
+    /// Pi acks every `prompt` with this.
+    #[serde(rename = "prompt")]
+    Prompt,
     #[serde(other)]
     Unknown,
 }
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Commands {
     pub name: String,
     pub description: String,
     pub source: String,
+    /// Where the command came from. The path is what tells a plugin's command
+    /// apart from the bundled adapter's own plumbing.
+    #[serde(rename = "sourceInfo")]
+    pub source_info: Option<CommandSource>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CommandSource {
+    /// File that registered it, or `<inline:...>` for one of Pi's own.
+    pub path: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
