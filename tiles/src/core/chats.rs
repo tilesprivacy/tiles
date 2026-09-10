@@ -111,6 +111,35 @@ pub fn append_turn_to_snapshot(conn: &Connection, session_id: &str, turn: Turn) 
     Ok(())
 }
 
+/// The stored turns of a session, formatted to hand Pi as context when its one
+/// conversation is switched onto this session.
+///
+/// The UI saves the user's prompt before it sends it, so the newest user row
+/// usually is the prompt itself; repeating it as history would make Pi read
+/// the question twice, so a trailing row matching `current_prompt` is skipped.
+/// None when there is nothing left to replay, which is what a fresh session
+/// switched to for its first prompt looks like.
+pub fn history_for_resume(chats: &[Chats], current_prompt: &str) -> Option<String> {
+    let mut rows = chats;
+    if let Some((last, rest)) = rows.split_last()
+        && last.role == Role::User
+        && last.content == current_prompt
+    {
+        rows = rest;
+    }
+
+    if rows.is_empty() {
+        return None;
+    }
+
+    let lines: Vec<String> = rows
+        .iter()
+        .map(|chat| format!("{}: {}", Into::<String>::into(chat.role), chat.content))
+        .collect();
+
+    Some(lines.join("\n"))
+}
+
 /// Rebuilds a snapshot from the stored rows.
 ///
 /// The REPL keeps a snapshot as it goes, built from the events Pi hands it. The
@@ -551,6 +580,48 @@ pub mod tests {
         repl::ChatResponse,
         utils::{get_unix_time_now, test_logger},
     };
+
+    fn history_row(role: Role, content: &str) -> super::Chats {
+        super::Chats {
+            id: Uuid::now_v7().to_string(),
+            content: content.to_owned(),
+            response_id: None,
+            role,
+            user_id: "u".to_owned(),
+            context_id: None,
+            created_at: 1,
+            updated_at: 1,
+            row_counter: 1,
+            session_id: "s".to_owned(),
+            model_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn resume_history_carries_roles_and_drops_the_prompt_itself() {
+        use super::history_for_resume;
+
+        let chats = vec![
+            history_row(Role::User, "first question"),
+            history_row(Role::Assistant, "first answer"),
+            history_row(Role::User, "new question"),
+        ];
+
+        // the UI saves the prompt before sending it, so the trailing copy goes
+        let history = history_for_resume(&chats, "new question").unwrap();
+        assert!(history.contains("first question"));
+        assert!(history.contains("first answer"));
+        assert!(!history.contains("new question"));
+
+        // an unrelated trailing user row is real history and stays
+        let history = history_for_resume(&chats, "something else").unwrap();
+        assert!(history.contains("new question"));
+
+        // a session with nothing but the prompt has nothing to replay
+        let only_prompt = vec![history_row(Role::User, "new question")];
+        assert!(history_for_resume(&only_prompt, "new question").is_none());
+        assert!(history_for_resume(&[], "anything").is_none());
+    }
 
     /// A session started from the app has no stored snapshot, so sharing one
     /// depends on this rebuilding the turns from the rows.
