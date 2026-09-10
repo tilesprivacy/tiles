@@ -164,10 +164,20 @@ def _health_url() -> str:
 
 
 def _resolve_log_dir() -> Path:
-    log_dir = Path.cwd() / ".tiles_dev" / "tiles" / "data" / "logs"
-    if not log_dir.is_dir():
-        log_dir = Path.home() / ".local" / "share" / "tiles" / "data" / "logs"
-    return log_dir
+    """Where Tiles keeps its logs.
+
+    Mirrors the Rust side's data dir so llama-server logs sit next to the
+    daemon and server logs. They used to go under the user data dir, which
+    mixed app output into user content and kept them out of reach of the
+    uninstaller, since that deliberately preserves user data.
+    """
+    dev_dir = Path.cwd() / ".tiles_dev" / "tiles" / "logs"
+    if dev_dir.is_dir():
+        return dev_dir
+
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    data_home = Path(xdg_data_home) if xdg_data_home else Path.home() / ".local" / "share"
+    return data_home / "tiles" / "logs"
 
 
 def _llama_server_log_hint() -> str:

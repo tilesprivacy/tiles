@@ -11,9 +11,92 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 - Model-load warnings from the inference server (e.g. MTP requested but no MTP head GGUF found) are now surfaced in the CLI as yellow `WARNING:` lines before the input prompt.
 
+- **Exa web search ships with Tiles.** Search and page fetch work out of the box,
+  no setup and no API key: Exa's free tier covers casual use. Set `EXA_API_KEY` to
+  lift the rate limits and it is picked up automatically.
+  - It also ships a `web-research` skill covering when to read a full page rather
+    than trust a snippet, how to write a query, and how to read publish dates. The
+    model loads it on demand for research-shaped questions and ignores it for a
+    quick lookup.
+- First-party plugins can now be bundled with Tiles. They install to
+  `<lib_dir>/plugins/` and are replaced on upgrade, so they cannot be uninstalled.
+  `tiles plugin disable <name>` turns one off instead, and that survives upgrades.
+- `tiles plugin list` now describes what each plugin is for, and marks built-in and
+  disabled ones:
+    ```
+    exa  Web search and page fetch  [built-in]
+    ```
+- `tiles plugin disable <name>` and `tiles plugin enable <name>`.
+- A plugin's MCP tools are now registered directly with the model, each with its own
+  name and parameters, so the model calls them like any built-in tool. Previously they
+  sat behind proxy tools that the model had to know to route through, which smaller
+  local models did not do reliably. Set `directTools` to false in
+  `<data>/pi/agent/mcp.json` to go back to proxies if you run many servers and want the
+  prompt space back. Tiles only fills the setting in when it is missing.
+- `tiles plugin install` takes a plain folder, so there is nothing to pack while you are
+  working on a plugin. Archives and URLs still work for sharing one. Installed plugins
+  stay as plain files, so a person or an agent can read one with ordinary file tools.
+- Install works with any URL that returns an archive. The format now comes from the
+  downloaded bytes instead of the address, so a link with no file extension or one that
+  picks its format from a query parameter both work. Git host tarball URLs work as they
+  are. A URL that returns something else, such as an HTML error page, now says so
+  instead of failing later during extraction, and a failed download is reported with its
+  HTTP status.
+
 ### Changed
 
 - MTP speculative decoding is now opt-in: it no longer auto-enables when an MTP head GGUF is detected next to the model. Enable it with `mtp = true` under `[llama]` in `config.toml` or per-run with `tiles run --mtp`.
+
+- The plugin format's top-level `extensions` folder is now
+  `run.tiles/extensions`. The old name was never implemented, and `extensions`
+  means something different in a spec-conformant `plugin.json`.
+
+### Fixed
+
+- Tiles now tells the model today's date. Without it the model filled the gap from its
+  training data, which was harmless in conversation but wrong in a web search: asked for
+  today's news it searched for "latest news today October 24 2024" and got news from that
+  day in 2024. The search itself worked correctly. Reproduced on gemma-4-12b in 1 of 3
+  runs, and consistent once the date is supplied.
+
+- `/skills` no longer panics on commands without a `skill:` prefix. It sliced
+  the first 6 bytes off every name, which broke on shorter ones like `/mcp`.
+- Unknown slash commands are forwarded to Pi instead of being rejected, so
+  extension-registered commands are reachable. The command keeps its original
+  case, so URLs and server names survive.
+- Writing Pi's `settings.json` no longer wipes settings Tiles does not model
+  (theme, MCP config, and anything extensions persist).
+- Plugin archives are checked for path traversal before being unpacked.
+- Plugins can now ship a `node_modules` tree. Symlinks that resolve inside the
+  package are preserved (npm creates these in `node_modules/.bin`), and only
+  ones escaping it are refused. Previously every symlink was rejected, so a
+  plugin with npm dependencies could not be installed at all.
+- A failed plugin install no longer leaves a half-copied plugin behind.
+- Plugin-provided MCP servers are now actually reachable. The adapter reads
+  `agentPluginPaths` from its own `mcp.json`, not Pi's `settings.json`, so the
+  setting was being written where nothing read it. Tiles now merges it into
+  `<data>/pi/agent/mcp.json`, leaving hand-added servers and other settings
+  alone.
+- Any change to the plugin set clears the MCP tool cache. The adapter only probes
+  every server when that cache is absent, so a newly added server used to register
+  without its tools ever reaching the model. This now covers installing, removing,
+  disabling and enabling a plugin, plus an upgrade that ships a new bundled one.
+- Tiles could fail to start with a bundled plugin loaded. The startup state read took
+  the first line off Pi's output and treated anything unexpected as an error, but the
+  MCP adapter always announces itself first, so startup saw that event instead of the
+  state it asked for. Requests now read past events until the real response arrives.
+- Slash commands handled by an extension no longer hang the REPL. Pi acks a
+  forwarded command with `response{command:"prompt"}` and then stops, so the
+  REPL now treats that ack as the end of the turn.
+
+### Notes
+
+- Pi 0.84.2 exits immediately if an extension opens a dialog during
+  `session_start`. Extensions under `run.tiles/` should only open dialogs from
+  handlers. The bundled adapter already does.
+- On macOS the vendored `.node` binaries are re-signed with our Team ID at
+  bundle time. Pi runs with hardened runtime and no
+  `disable-library-validation`, so unsigned native modules are rejected.
 
 ## [0.4.18] - 2026-08-23
 

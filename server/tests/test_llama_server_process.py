@@ -368,3 +368,40 @@ def test_ensure_running_restarts_on_config_change(tmp_path: Path):
     # every spawn; the first call is a no-op since no prior process exists).
     assert popen.call_count == 2
     assert stop.call_count == 2
+
+
+def test_log_dir_sits_with_the_other_logs(tmp_path, monkeypatch):
+    """llama-server logs belong in <data_dir>/logs, not under user data.
+
+    The uninstaller deliberately preserves the user data dir, so logs placed
+    there are never cleaned up.
+    """
+    from server.backend.llama_server.process import _resolve_log_dir
+
+    # no dev layout in cwd, so this takes the installed path
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+
+    resolved = _resolve_log_dir()
+    assert resolved == tmp_path / ".local" / "share" / "tiles" / "logs"
+    assert "data" not in resolved.parts
+
+
+def test_log_dir_honours_xdg_data_home(tmp_path, monkeypatch):
+    from server.backend.llama_server.process import _resolve_log_dir
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+
+    assert _resolve_log_dir() == tmp_path / "xdg" / "tiles" / "logs"
+
+
+def test_log_dir_prefers_the_dev_layout(tmp_path, monkeypatch):
+    from server.backend.llama_server.process import _resolve_log_dir
+
+    dev_logs = tmp_path / ".tiles_dev" / "tiles" / "logs"
+    dev_logs.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+
+    assert _resolve_log_dir() == dev_logs
