@@ -208,6 +208,8 @@ fi
 SERVER_DIR="${LIB_DIR}/server"         # Python server folder
 MODELFILE_DIR="${LIB_DIR}/modelfiles"  # Modelfile server folder
 PI_DIR="${LIB_DIR}/pi"
+VENDOR_DIR="${LIB_DIR}/vendor"        # Vendored node packages for Pi extensions
+PLUGINS_DIR="${LIB_DIR}/plugins"      # First-party plugins shipped with Tiles
 
 TMPDIR="$(mktemp -d)"
 RELEASE_TAG="${VERSION}"
@@ -274,6 +276,27 @@ rm -rf "${PI_DIR}"
 mkdir -p "${PI_DIR}"
 
 cp -r "${TMPDIR}/pi"/* "${PI_DIR}/"
+
+
+log "Installing vendored Pi extensions ..."
+
+rm -rf "${VENDOR_DIR}"
+
+mkdir -p "${VENDOR_DIR}"
+
+cp -r "${TMPDIR}/vendor"/* "${VENDOR_DIR}/"
+
+
+log "Installing bundled plugins ..."
+
+rm -rf "${PLUGINS_DIR}"
+
+mkdir -p "${PLUGINS_DIR}"
+
+# guarded: an empty plugins dir leaves the glob unexpanded and cp would abort
+if [ -d "${TMPDIR}/plugins" ] && [ -n "$(ls -A "${TMPDIR}/plugins" 2>/dev/null)" ]; then
+  cp -r "${TMPDIR}/plugins"/* "${PLUGINS_DIR}/"
+fi
 
 
 log "📦 Installing Python server to ${SERVER_DIR}..."

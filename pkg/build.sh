@@ -5,6 +5,8 @@ BINARY_NAME="tiles"
 DIST_DIR="dist"
 MODELFILE_DIR="modelfiles"
 SERVER_DIR="server"
+VENDOR_DIR="vendor"
+PLUGINS_DIR="plugins"
 TARGET="release"
 
 VERSION=$(grep '^version' tiles/Cargo.toml | head -1 | awk -F'"' '{print $2}')
@@ -123,6 +125,23 @@ rm -rf "${PKG_LIBS_PATH}/server/.venv"
 rm -rf "${PKG_LIBS_PATH}/server/stack"
 
 cp -r "${MODELFILE_DIR}" "${PKG_LIBS_PATH}"
+
+cp -r "${VENDOR_DIR}" "${PKG_LIBS_PATH}"
+
+cp -r "${PLUGINS_DIR}" "${PKG_LIBS_PATH}"
+
+# Unsigned nested Mach-Os fail notarization, so sign before pkgbuild. Only
+# the darwin binaries: codesign fails on the Linux ELF in the same tree.
+echo "Signing vendored native modules..."
+
+find "${PKG_LIBS_PATH}/${VENDOR_DIR}" -name '*.darwin-*.node' -type f | while read -r node_bin; do
+  codesign --force \
+    --sign "$DEVELOPER_ID_APPLICATION" \
+    --options runtime \
+    --timestamp \
+    --strict \
+    "$node_bin"
+done
 
 
 echo "🖥  Building the menu bar app..."

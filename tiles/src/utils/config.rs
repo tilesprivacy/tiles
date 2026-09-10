@@ -25,6 +25,7 @@ use std::{env, fs};
 use toml::Table;
 
 use crate::core::agent::types::{CompactionSettings, PiSettings};
+use crate::core::plugin::installed_plugin_roots;
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ModelConfig {
@@ -39,6 +40,14 @@ struct RootUserConfig {
 #[derive(Serialize, Deserialize, Debug)]
 struct DataConfig {
     path: String,
+}
+
+/// `[plugins]` in config.toml. Plugins are enabled unless named here, so a
+/// bundled plugin can be switched off without touching its read-only files.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct PluginsConfig {
+    #[serde(default)]
+    pub disabled: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -93,6 +102,7 @@ struct RootConfig {
     pub inference: Option<InferenceConfig>,
     pub llama: Option<LlamaConfig>,
     pub ui: Option<UiConfig>,
+    pub plugins: Option<PluginsConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -133,7 +143,8 @@ pub const PY_PORT: u32 = 6969;
 pub const REMOTE_BOUND_PORT: u32 = 9271;
 
 /// Bundled runtime directories under lib_dir removed on default uninstall.
-pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "models"];
+pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] =
+    &["server", "modelfiles", "pi", "models", "vendor", "plugins"];
 
 pub trait ConfigProvider {
     fn get_config_dir(&self) -> Result<PathBuf>;
@@ -633,6 +644,38 @@ pub fn get_ui_config() -> Result<UiConfig> {
     Ok(root_config.ui.unwrap_or_default())
 }
 
+pub fn get_disabled_plugins() -> Vec<String> {
+    // A missing or unreadable config must not disable everything.
+    get_or_create_root_config()
+        .ok()
+        .and_then(|config| config.plugins)
+        .map(|plugins| plugins.disabled)
+        .unwrap_or_default()
+}
+
+/// Adds or removes a plugin from the disabled list. Returns false when the
+/// config already said what was asked.
+pub fn set_plugin_disabled(name: &str, disabled: bool) -> Result<bool> {
+    let mut root_config = get_or_create_root_config()?;
+    let mut plugins = root_config.plugins.unwrap_or_default();
+    let already = plugins.disabled.iter().any(|entry| entry == name);
+
+    if disabled == already {
+        root_config.plugins = Some(plugins);
+        return Ok(false);
+    }
+    if disabled {
+        plugins.disabled.push(name.to_owned());
+        plugins.disabled.sort();
+    } else {
+        plugins.disabled.retain(|entry| entry != name);
+    }
+
+    root_config.plugins = Some(plugins);
+    save_root_config(&root_config)?;
+    Ok(true)
+}
+
 pub fn get_llama_config() -> Result<LlamaConfig> {
     let root_config = get_or_create_root_config()?;
     Ok(root_config.llama.unwrap_or_default())
@@ -660,6 +703,78 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     llama_config.no_mmap = config.no_mmap.or(llama_config.no_mmap).or(Some(true));
     root_config.llama = Some(llama_config);
     save_root_config(&root_config)
+}
+
+/// Points the MCP adapter at the installed plugin roots so it picks up each
+/// plugin's `mcp.json`. This setting lives in the adapter's own config file,
+/// not Pi's `settings.json`. That file is user-editable, so merge into it.
+pub fn handle_pi_mcp_config(mcp_path: &PathBuf) -> Result<()> {
+    let plugin_roots: Vec<String> = installed_plugin_roots()
+        .iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect();
+
+    // Nothing to say and no file to correct, so do not create one. There is
+    // still the directTools default below, but it is only worth writing once a
+    // plugin exists to expose tools from.
+    if plugin_roots.is_empty() && !mcp_path.exists() {
+        return Ok(());
+    }
+
+    let mut root: serde_json::Map<String, serde_json::Value> = if mcp_path.exists() {
+        let raw = fs::read_to_string(mcp_path).context("Failed to read Pi mcp.json")?;
+        serde_json::from_str(&raw).context("Failed to parse Pi mcp.json")?
+    } else {
+        serde_json::Map::new()
+    };
+
+    let settings = root
+        .entry("settings")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+
+    let mut changed = false;
+    if let Some(settings) = settings.as_object_mut() {
+        let previous = settings.get("agentPluginPaths").cloned();
+        if plugin_roots.is_empty() {
+            changed = previous.is_some();
+            settings.remove("agentPluginPaths");
+        } else {
+            let next = serde_json::json!(plugin_roots);
+            changed = previous.as_ref() != Some(&next);
+            settings.insert("agentPluginPaths".to_owned(), next);
+        }
+
+        // Without this the model only sees the adapter's generic `mcp` gateway
+        // and has to work out for itself that a plugin's tools live behind it,
+        // which smaller local models do not do reliably. Turning it on lists
+        // each tool directly, so the model just calls it. Only a default: an
+        // explicit setting here is left alone.
+        settings
+            .entry("directTools")
+            .or_insert(serde_json::Value::Bool(true));
+    }
+
+    // The adapter only probes every server when its tool cache is missing, so a
+    // changed plugin set has to drop the cache or new servers register without
+    // their tools ever reaching the model. This covers install, uninstall,
+    // disable, enable, and an upgrade that ships a new bundled plugin.
+    if changed {
+        invalidate_mcp_tool_cache(mcp_path);
+    }
+
+    fs::write(mcp_path, serde_json::to_string_pretty(&root)?)
+        .map_err(Into::<anyhow::Error>::into)
+        .context("Failed to write to Pi mcp.json")
+}
+
+/// Drops the MCP adapter's tool cache, which sits beside its config.
+fn invalidate_mcp_tool_cache(mcp_path: &Path) {
+    if let Some(agent_dir) = mcp_path.parent() {
+        let cache = agent_dir.join("mcp-cache.json");
+        if cache.exists() {
+            let _ = fs::remove_file(&cache);
+        }
+    }
 }
 
 pub fn handle_pi_settings_config(settings_path: &PathBuf) -> Result<()> {
@@ -865,12 +980,144 @@ mod tests {
     }
 
     #[test]
+    fn test_settings_round_trip_keeps_unknown_keys() {
+        // Pi and its extensions write settings we do not model. Rewriting the
+        // file must not drop them.
+        let raw = r#"{
+            "compaction": {"enabled": false},
+            "defaultThinkingLevel": "low",
+            "mcp": {"servers": {"github": {"type": "stdio"}}},
+            "theme": "dracula"
+        }"#;
+        let parsed: PiSettings = serde_json::from_str(raw).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&parsed).unwrap()).unwrap();
+
+        assert_eq!(written["theme"], "dracula");
+        assert_eq!(written["mcp"]["servers"]["github"]["type"], "stdio");
+        // absent by default, never serialised as null
+        assert!(written.get("agentPluginPaths").is_none());
+    }
+
+    #[test]
+    fn test_mcp_config_keeps_user_servers_and_settings() {
+        // mcp.json is where users add servers by hand, so rewriting it must
+        // not disturb anything except agentPluginPaths.
+        let tmp = tempdir().expect("created tmp dir");
+        let mcp_path = tmp.path().join("mcp.json");
+        fs::write(
+            &mcp_path,
+            r#"{
+                "mcpServers": {"mine": {"command": "/usr/bin/thing"}},
+                "settings": {"idleTimeout": 30, "agentPluginPaths": ["/gone"]}
+            }"#,
+        )
+        .unwrap();
+
+        handle_pi_mcp_config(&mcp_path).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).unwrap();
+        assert_eq!(written["mcpServers"]["mine"]["command"], "/usr/bin/thing");
+        assert_eq!(written["settings"]["idleTimeout"], 30);
+        // no plugins installed in this test env, so the stale entry is dropped
+        assert!(written["settings"].get("agentPluginPaths").is_none());
+    }
+
+    #[test]
+    fn test_mcp_config_turns_direct_tools_on_by_default() {
+        // Without this the model only sees the generic `mcp` gateway.
+        let tmp = tempdir().expect("created tmp dir");
+        let mcp_path = tmp.path().join("mcp.json");
+        fs::write(&mcp_path, r#"{"mcpServers": {}}"#).unwrap();
+
+        handle_pi_mcp_config(&mcp_path).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).unwrap();
+        assert_eq!(written["settings"]["directTools"], true);
+    }
+
+    #[test]
+    fn test_mcp_config_respects_direct_tools_turned_off() {
+        // it is a default, not something Tiles forces on every start
+        let tmp = tempdir().expect("created tmp dir");
+        let mcp_path = tmp.path().join("mcp.json");
+        fs::write(
+            &mcp_path,
+            r#"{"mcpServers": {}, "settings": {"directTools": false}}"#,
+        )
+        .unwrap();
+
+        handle_pi_mcp_config(&mcp_path).unwrap();
+
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).unwrap();
+        assert_eq!(written["settings"]["directTools"], false);
+    }
+
+    #[test]
+    fn test_mcp_config_drops_tool_cache_when_plugin_set_changes() {
+        // The adapter only re-probes servers when this cache is gone, so a
+        // changed plugin set has to remove it.
+        let tmp = tempdir().expect("created tmp dir");
+        let mcp_path = tmp.path().join("mcp.json");
+        let cache_path = tmp.path().join("mcp-cache.json");
+        fs::write(
+            &mcp_path,
+            r#"{"settings": {"agentPluginPaths": ["/gone/plugin"]}}"#,
+        )
+        .unwrap();
+        fs::write(&cache_path, r#"{"version":1,"servers":{}}"#).unwrap();
+
+        handle_pi_mcp_config(&mcp_path).unwrap();
+
+        assert!(
+            !cache_path.exists(),
+            "stale plugin path should have dropped the cache"
+        );
+    }
+
+    #[test]
+    fn test_mcp_config_keeps_tool_cache_when_unchanged() {
+        let tmp = tempdir().expect("created tmp dir");
+        let mcp_path = tmp.path().join("mcp.json");
+        let cache_path = tmp.path().join("mcp-cache.json");
+        // no plugins installed in the test env, and none recorded, so nothing changed
+        fs::write(&mcp_path, r#"{"mcpServers": {}}"#).unwrap();
+        fs::write(&cache_path, r#"{"version":1,"servers":{}}"#).unwrap();
+
+        handle_pi_mcp_config(&mcp_path).unwrap();
+
+        assert!(cache_path.exists(), "an unchanged set must not re-probe");
+    }
+
+    #[test]
+    fn test_plugins_config_round_trips_through_toml() {
+        let parsed: PluginsConfig = toml::from_str("disabled = [\"exa\", \"gmail\"]").unwrap();
+        assert_eq!(parsed.disabled, vec!["exa", "gmail"]);
+
+        // a bare [plugins] section means nothing disabled, not a parse error
+        let empty: PluginsConfig = toml::from_str("").unwrap();
+        assert!(empty.disabled.is_empty());
+    }
+
+    #[test]
+    fn test_mcp_config_not_created_when_nothing_to_write() {
+        let tmp = tempdir().expect("created tmp dir");
+        let mcp_path = tmp.path().join("mcp.json");
+        handle_pi_mcp_config(&mcp_path).unwrap();
+        assert!(!mcp_path.exists(), "should not litter an empty mcp.json");
+    }
+
+    #[test]
     fn test_settings_file_exits_but_no_compaction_settings() {
         let tmp = tempdir().expect("created tmp dir");
         let src = tmp.path().join("settings.json");
         let pi_settings = PiSettings {
             default_thinking_level: Some(ReasoningEffort::Low),
             compaction: None,
+            ..Default::default()
         };
         fs::write(&src, serde_json::to_string_pretty(&pi_settings).unwrap()).unwrap();
 
@@ -899,6 +1146,7 @@ mod tests {
         let pi_settings = PiSettings {
             default_thinking_level: Some(ReasoningEffort::Low),
             compaction: Some(CompactionSettings { enabled: true }),
+            ..Default::default()
         };
         fs::write(&src, serde_json::to_string_pretty(&pi_settings).unwrap()).unwrap();
 

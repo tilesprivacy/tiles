@@ -1,0 +1,166 @@
+{
+  "name": "@modelcontextprotocol/client",
+  "version": "2.0.0",
+  "description": "Model Context Protocol implementation for TypeScript - Client package",
+  "license": "MIT",
+  "author": "Anthropic, PBC (https://anthropic.com)",
+  "homepage": "https://modelcontextprotocol.io",
+  "bugs": "https://github.com/modelcontextprotocol/typescript-sdk/issues",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/modelcontextprotocol/typescript-sdk.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "modelcontextprotocol",
+    "mcp",
+    "client"
+  ],
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.mts",
+        "default": "./dist/index.mjs"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./stdio": {
+      "import": {
+        "types": "./dist/stdio.d.mts",
+        "default": "./dist/stdio.mjs"
+      },
+      "require": {
+        "types": "./dist/stdio.d.cts",
+        "default": "./dist/stdio.cjs"
+      }
+    },
+    "./validators/ajv": {
+      "import": {
+        "types": "./dist/validators/ajv.d.mts",
+        "default": "./dist/validators/ajv.mjs"
+      },
+      "require": {
+        "types": "./dist/validators/ajv.d.cts",
+        "default": "./dist/validators/ajv.cjs"
+      }
+    },
+    "./validators/cf-worker": {
+      "import": {
+        "types": "./dist/validators/cfWorker.d.mts",
+        "default": "./dist/validators/cfWorker.mjs"
+      },
+      "require": {
+        "types": "./dist/validators/cfWorker.d.cts",
+        "default": "./dist/validators/cfWorker.cjs"
+      }
+    },
+    "./_shims": {
+      "workerd": {
+        "import": {
+          "types": "./dist/shimsWorkerd.d.mts",
+          "default": "./dist/shimsWorkerd.mjs"
+        },
+        "require": {
+          "types": "./dist/shimsWorkerd.d.cts",
+          "default": "./dist/shimsWorkerd.cjs"
+        }
+      },
+      "browser": {
+        "import": {
+          "types": "./dist/shimsBrowser.d.mts",
+          "default": "./dist/shimsBrowser.mjs"
+        },
+        "require": {
+          "types": "./dist/shimsBrowser.d.cts",
+          "default": "./dist/shimsBrowser.cjs"
+        }
+      },
+      "node": {
+        "import": {
+          "types": "./dist/shimsNode.d.mts",
+          "default": "./dist/shimsNode.mjs"
+        },
+        "require": {
+          "types": "./dist/shimsNode.d.cts",
+          "default": "./dist/shimsNode.cjs"
+        }
+      },
+      "default": {
+        "import": {
+          "types": "./dist/shimsNode.d.mts",
+          "default": "./dist/shimsNode.mjs"
+        },
+        "require": {
+          "types": "./dist/shimsNode.d.cts",
+          "default": "./dist/shimsNode.cjs"
+        }
+      }
+    }
+  },
+  "main": "./dist/index.cjs",
+  "types": "./dist/index.d.mts",
+  "typesVersions": {
+    "*": {
+      "validators/ajv": [
+        "dist/validators/ajv.d.mts"
+      ],
+      "validators/cf-worker": [
+        "dist/validators/cfWorker.d.mts"
+      ],
+      "stdio": [
+        "dist/stdio.d.mts"
+      ]
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "cross-spawn": "^7.0.5",
+    "eventsource": "^3.0.2",
+    "eventsource-parser": "^3.0.0",
+    "jose": "^6.1.3",
+    "pkce-challenge": "^5.0.0",
+    "zod": "^4.2.0",
+    "@modelcontextprotocol/core": "2.0.0"
+  },
+  "devDependencies": {
+    "@cfworker/json-schema": "^4.1.1",
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1",
+    "@types/content-type": "^1.1.8",
+    "@types/cross-spawn": "^6.0.6",
+    "@types/eventsource": "^1.1.15",
+    "@typescript/native-preview": "^7.0.0-dev.20251217.1",
+    "@eslint/js": "^9.39.2",
+    "eslint": "^9.39.2",
+    "eslint-config-prettier": "^10.1.8",
+    "eslint-plugin-n": "^17.23.1",
+    "prettier": "3.6.2",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.48.1",
+    "vitest": "^4.0.15",
+    "tsdown": "^0.18.0",
+    "@modelcontextprotocol/core-internal": "^2.0.0",
+    "@modelcontextprotocol/tsconfig": "^2.0.0",
+    "@modelcontextprotocol/eslint-config": "^2.0.0",
+    "@modelcontextprotocol/vitest-config": "^2.0.0",
+    "@modelcontextprotocol/test-helpers": "^2.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsgo -p tsconfig.json --noEmit",
+    "build": "tsdown",
+    "build:watch": "tsdown --watch",
+    "lint": "eslint src/ && prettier --ignore-path ../../.prettierignore --check .",
+    "lint:fix": "eslint src/ --fix && prettier --ignore-path ../../.prettierignore --write .",
+    "check": "pnpm run typecheck && pnpm run lint",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  }
+}

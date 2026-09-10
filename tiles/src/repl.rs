@@ -2,8 +2,8 @@ use crate::core::account::atproto::{fetch_logged_in_data, login, share_session};
 use crate::core::account::local::get_current_user;
 use crate::core::agent::pi::{PiAgent, PiWriter};
 use crate::core::agent::types::{
-    CommandType, Commands, PiAgentEndEvent, PiMsgContent, PiResponse, PiResponseMessage,
-    ReasoningEffort,
+    CommandType, Commands, ExtensionUiMethod, PiAgentEndEvent, PiExtensionUiRequest, PiMsgContent,
+    PiResponse, PiResponseMessage, ReasoningEffort,
 };
 use crate::core::agent::{pi, types};
 use crate::core::chats::{
@@ -11,6 +11,7 @@ use crate::core::chats::{
     update_snapshot,
 };
 use crate::core::network;
+use crate::core::plugin::{self, PluginSummary};
 use crate::core::server::{ping, start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::Dbconn;
 use crate::utils::config::{
@@ -34,7 +35,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self};
 use std::io::{self};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -172,10 +173,10 @@ impl Helper for TilesHinter {}
 
 enum InputType {
     Skip,
-    Command(String),
+    Command,
     Exit,
     Prompt,
-    Skill,
+    Invoke,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -205,6 +206,10 @@ struct ReplSession {
     pub session_started: bool,
     pub reasoning: ReasoningEffort,
     pub session_snapshot: SessionSnapshotRecord,
+    /// Every command Pi knows, used to resolve `@name` to a skill.
+    pub commands: Vec<Commands>,
+    /// Enabled plugins, the primary thing `@name` resolves against.
+    pub plugins: Vec<PluginSummary>,
 }
 
 impl ReplSession {
@@ -218,6 +223,8 @@ impl ReplSession {
             session_started: false,
             reasoning: state.thinking_level.parse().unwrap_or(ReasoningEffort::Low),
             session_snapshot: SessionSnapshotRecord::new("", &state.session_id),
+            commands: vec![],
+            plugins: vec![],
         }
     }
 
@@ -250,10 +257,11 @@ fn handle_input(input: &str) -> InputType {
                 println!("Empty command. Type /help for available commands.");
                 InputType::Skip
             }
-            _ => InputType::Command(cmd.to_owned()),
+            _ => InputType::Command,
         }
-    } else if let Some(_skill) = input.strip_prefix('$') {
-        InputType::Skill
+    } else if input.starts_with('@') || input.starts_with('$') {
+        // `$` is the old skills-only sigil, kept working
+        InputType::Invoke
     } else {
         InputType::Prompt
     }
@@ -299,8 +307,8 @@ fn show_help() {
         (
             "Plugins",
             vec![
-                ("/skills", "List all the available skills"),
-                ("$<skill-name>", "Use the skill directly"),
+                ("/skills", "List everything you can use"),
+                ("@<name>", "Use a skill or plugin directly"),
             ],
         ),
     ];
@@ -394,6 +402,19 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
     let pi_session_state = pi_agent.reader.get_pi_state(&mut pi_agent.writer).await?;
     let mut repl_session = ReplSession::new(&pi_session_state);
 
+    // Needed up front so `@name` can be resolved on the first input. A failure
+    // here only costs `@` resolution, so do not block the session on it.
+    match pi_agent.reader.get_pi_commands(&mut pi_agent.writer).await {
+        Ok(commands) => repl_session.commands = commands,
+        Err(err) => warn!("Could not load the command list: {}", err),
+    }
+    repl_session.plugins = plugin::summaries()
+        .into_iter()
+        .filter(|plugin| plugin.enabled)
+        .collect();
+    // resolved once: it decides which commands belong to a plugin
+    let vendor = vendor_dir();
+
     // The great REPL loop
     loop {
         // Reads the user input
@@ -410,6 +431,10 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
             continue;
         }
 
+        // Set when a plugin command is sent, so the read loop knows Pi's ack
+        // ends the turn instead of waiting for `agent_end`.
+        let mut awaiting_command_ack = false;
+
         // Process the user input in the repl
         match handle_input(&input.to_lowercase()) {
             InputType::Skip => continue,
@@ -420,18 +445,67 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
             InputType::Prompt => {
                 handle_input_prompt(&mut pi_agent.writer, &mut repl_session, &input).await?;
             }
-            InputType::Skill => {
-                let (_, skill_name) = input.split_at(1);
-                let skill_prompt = format!("/skill:{}", skill_name);
-                handle_input_prompt(&mut pi_agent.writer, &mut repl_session, &skill_prompt).await?;
+            InputType::Invoke => {
+                let invoked = input[1..].trim();
+                let resolved = resolve_invocation(
+                    &repl_session.plugins,
+                    &repl_session.commands,
+                    vendor.as_deref(),
+                    invoked,
+                );
+                match resolved {
+                    Some(Invocation::Describe { name, description }) => {
+                        println!("{}: {}", name.bright_green(), description);
+                        println!(
+                            "{}",
+                            format!("Ask a question after it, e.g. @{} latest release", name)
+                                .dimmed()
+                        );
+                        continue;
+                    }
+                    Some(invocation) => {
+                        let Some(message) = invocation.message().map(str::to_owned) else {
+                            continue;
+                        };
+                        // A plugin command is answered by the plugin, so Pi's ack
+                        // is the last event. Without this the loop would wait for
+                        // an `agent_end` that never arrives.
+                        awaiting_command_ack = invocation.ends_on_ack();
+                        handle_input_prompt(&mut pi_agent.writer, &mut repl_session, &message)
+                            .await?;
+                    }
+                    None => {
+                        let name = invoked.split_whitespace().next().unwrap_or(invoked);
+                        println!("Nothing called '{}'.", name);
+                        let available = repl_session
+                            .plugins
+                            .iter()
+                            .map(|plugin| format!("@{}", plugin.name))
+                            .collect::<Vec<String>>();
+                        if available.is_empty() {
+                            println!(
+                                "{}",
+                                "No plugins installed. Add one with `tiles plugin install`."
+                                    .dimmed()
+                            );
+                        } else {
+                            println!("{} {}", "Available:".dimmed(), available.join(" ").dimmed());
+                        }
+                        continue;
+                    }
+                }
             }
-            InputType::Command(cmd) => {
+            InputType::Command => {
+                // Classification is case-insensitive, but the command text keeps
+                // its case so URLs and server names survive forwarding to Pi.
+                let cmd = input.strip_prefix('/').unwrap_or(&input).to_owned();
                 let res =
                     handle_input_commands(cmd, &mut repl_session, db_conn, &mut pi_agent.writer)
                         .await?;
 
-                if let InputCommandResponse::ProcessNextInput = res {
-                    continue;
+                match res {
+                    InputCommandResponse::ProcessNextInput => continue,
+                    InputCommandResponse::WaitForNextLine => (),
                 }
             }
         }
@@ -488,6 +562,15 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                             CommandType::Unknown => {
                                 continue;
                             }
+                            CommandType::Prompt => {
+                                // For a question this ack arrives first and
+                                // `agent_start` follows, so keep reading. For a
+                                // plugin command it is the last event.
+                                if awaiting_command_ack {
+                                    break;
+                                }
+                                continue;
+                            }
                             CommandType::Abort => {
                                 info!("Abort command received");
                                 // continuing as we need to process the
@@ -504,6 +587,22 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                         println!("Command failed, try again")
                     }
                     break;
+                }
+                PiResponse::ToolExecutionStart(event) => {
+                    print_tool_start(&event);
+                    continue;
+                }
+                PiResponse::ToolExecutionUpdate(event) => {
+                    print_tool_progress(&event);
+                    continue;
+                }
+                PiResponse::ToolExecutionEnd(event) => {
+                    print_tool_end(&event);
+                    continue;
+                }
+                PiResponse::ExtensionUiRequest(ui_req) => {
+                    handle_extension_ui_request(&mut pi_agent.writer, ui_req).await?;
+                    continue;
                 }
                 PiResponse::Unknown => {
                     info!("Unsupported response {}", &line);
@@ -732,17 +831,21 @@ async fn process_command(
                     serde_json::from_value(commands)?;
 
                 if let Some(commands) = commands_obj.get("commands") {
-                    let mut index = 0;
-                    commands.iter().for_each(|cmd| {
-                        index += 1;
-                        // chucking off `skill:` from the name
-                        let (_, skill_name) = cmd.name.split_at(6);
+                    repl_session.commands = commands.clone();
+                    let vendor = vendor_dir();
+                    let visible = commands
+                        .iter()
+                        .filter(|cmd| !is_plumbing(cmd, vendor.as_deref()))
+                        .collect::<Vec<&Commands>>();
+                    if visible.is_empty() {
                         println!(
-                            "{}. {}{} - {}",
-                            index.purple(),
-                            "$".yellow(),
-                            skill_name.bright_green(),
-                            cmd.description.bright_cyan()
+                            "Nothing available yet. Install a plugin with `tiles plugin install`."
+                        );
+                    }
+                    visible.iter().enumerate().for_each(|(i, cmd)| {
+                        println!(
+                            "{}",
+                            format_command_entry(i + 1, &cmd.name, &cmd.description)
                         );
                     });
                 } else {
@@ -911,6 +1014,412 @@ fn show_status(repl_session: &ReplSession, db_conn: &Dbconn) -> Result<()> {
     Ok(())
 }
 
+/// Friendly names for tools the user is likely to see. Everything else is
+/// humanised from its own name, so a new plugin still reads sensibly without
+/// needing an entry here.
+fn tool_label(tool_name: &str) -> String {
+    match tool_name {
+        "bash" => return "Bash".to_owned(),
+        "read" => return "Read".to_owned(),
+        "write" => return "Write".to_owned(),
+        "edit" => return "Edit".to_owned(),
+        "mcp" | "mcpScript" => return "MCP".to_owned(),
+        _ => (),
+    }
+    if tool_name.contains("web_search") {
+        return "Web Search".to_owned();
+    }
+    if tool_name.contains("web_fetch") {
+        return "Fetch Page".to_owned();
+    }
+
+    // `<plugin>__<server>_<tool>` from an MCP server: keep the tail and tidy it
+    let tail = tool_name.rsplit("__").next().unwrap_or(tool_name);
+    let words: Vec<String> = tail
+        .split(['_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    if words.is_empty() {
+        tool_name.to_owned()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// The one argument worth showing, so a tool line says what it is doing rather
+/// than dumping the whole call.
+fn tool_detail(args: Option<&Value>) -> Option<String> {
+    let args = args?.as_object()?;
+    for key in [
+        "query",
+        "command",
+        "url",
+        "file_path",
+        "path",
+        "pattern",
+        "text",
+    ] {
+        if let Some(value) = args.get(key).and_then(|value| value.as_str())
+            && !value.trim().is_empty()
+        {
+            return Some(truncate_for_display(value.trim(), 72));
+        }
+    }
+    None
+}
+
+fn truncate_for_display(text: &str, limit: usize) -> String {
+    let flat = text.replace('\n', " ");
+    if flat.chars().count() <= limit {
+        return flat;
+    }
+    let kept: String = flat.chars().take(limit.saturating_sub(1)).collect();
+    format!("{}…", kept.trim_end())
+}
+
+/// How much a tool has produced so far, for the live line.
+fn tool_progress(partial: Option<&Value>) -> Option<String> {
+    let text = collect_tool_text(partial?);
+    if text.is_empty() {
+        return None;
+    }
+    let lines = text.lines().count();
+    Some(if lines > 1 {
+        format!("{} lines", lines)
+    } else {
+        format!("{} chars", text.chars().count())
+    })
+}
+
+/// Pulls the text out of a tool result's `content` blocks.
+fn collect_tool_text(value: &Value) -> String {
+    value
+        .get("content")
+        .and_then(|content| content.as_array())
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| block.get("text").and_then(|text| text.as_str()))
+                .collect::<Vec<&str>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+fn print_tool_start(event: &types::PiToolExecution) {
+    println!();
+    let label = tool_label(&event.tool_name);
+    match tool_detail(event.args.as_ref()) {
+        Some(detail) => println!("{} {}  {}", "●".cyan(), label.bold(), detail.dimmed()),
+        None => println!("{} {}", "●".cyan(), label.bold()),
+    }
+}
+
+/// Rewrites one line in place, so progress does not scroll the transcript.
+fn print_tool_progress(event: &types::PiToolExecution) {
+    if let Some(progress) = tool_progress(event.partial_result.as_ref()) {
+        print!("\r  {} {}\x1b[K", "⋯".dimmed(), progress.dimmed());
+        io::Write::flush(&mut io::stdout()).ok();
+    }
+}
+
+fn print_tool_end(event: &types::PiToolExecutionEnd) {
+    print!("\r\x1b[K");
+    if event.is_error.unwrap_or(false) {
+        let reason = event
+            .result
+            .as_ref()
+            .map(collect_tool_text)
+            .map(|text| truncate_for_display(&text, 100))
+            .filter(|text| !text.is_empty())
+            .unwrap_or_else(|| "failed".to_owned());
+        println!("  {} {}", "✗".red(), reason.red());
+        return;
+    }
+    match event.result.as_ref().and_then(|r| tool_progress(Some(r))) {
+        Some(summary) => println!("  {} {}", "✓".green(), summary.dimmed()),
+        None => println!("  {} {}", "✓".green(), "done".dimmed()),
+    }
+}
+
+/// True when a command belongs to the bundled adapter or Pi itself rather than
+/// to a plugin.
+///
+/// Decided by where the command was registered from, not by its name: the
+/// adapter lives under `<lib>/vendor/` and Pi's own are `<inline:...>`. A
+/// name list would need updating for every new adapter command, and would
+/// wrongly catch a plugin that happened to pick a similar name.
+fn is_plumbing(command: &Commands, vendor_dir: Option<&Path>) -> bool {
+    let Some(path) = command
+        .source_info
+        .as_ref()
+        .and_then(|info| info.path.as_deref())
+    else {
+        // no provenance, so treat it as Pi's rather than surface it as a plugin
+        return true;
+    };
+    if path.starts_with("<inline:") {
+        return true;
+    }
+    vendor_dir.is_some_and(|vendor| Path::new(path).starts_with(vendor))
+}
+
+/// Where the bundled adapter lives, so its commands can be told apart.
+fn vendor_dir() -> Option<PathBuf> {
+    DefaultProvider
+        .get_lib_dir()
+        .ok()
+        .map(|lib| lib.join("vendor"))
+}
+
+/// Works out what `@name` means.
+///
+/// Skills and plugin commands are both invoked with `@`, but Pi names them
+/// differently: a skill is `skill:deploy` while a plugin command is `gmail`.
+/// Users should not have to know which is which, so look it up.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    /// `@plugin question` asks the question using that plugin.
+    Plugin(String),
+    /// `@skill args` runs a named skill.
+    Skill(String),
+    /// `@plugin-command args`, handled by the plugin itself with no model turn.
+    /// This is how a plugin does things the model cannot, such as a login flow.
+    Command(String),
+    /// `@plugin` on its own, so say what it is for instead of guessing.
+    Describe { name: String, description: String },
+}
+
+impl Invocation {
+    /// The prompt to send Pi, or none when there is nothing to ask.
+    fn message(&self) -> Option<&str> {
+        match self {
+            Invocation::Plugin(message)
+            | Invocation::Skill(message)
+            | Invocation::Command(message) => Some(message),
+            Invocation::Describe { .. } => None,
+        }
+    }
+
+    /// True when Pi answers with only an ack, because a plugin handled it and
+    /// no model turn runs. The read loop has to stop there.
+    fn ends_on_ack(&self) -> bool {
+        matches!(self, Invocation::Command(_))
+    }
+}
+
+/// Nudges the model towards one plugin's tools for this question.
+///
+/// The model already has the tools; this only says which ones to prefer. Tool
+/// names from a plugin are prefixed with the plugin name, so naming the prefix
+/// is enough to point at them.
+fn scoped_prompt(plugin: &str, description: &str, question: &str) -> String {
+    format!(
+        "Answer using the \"{}\" plugin ({}). Prefer its tools, whose names start \
+         with \"{}__\", over answering from memory.\n\n{}",
+        plugin, description, plugin, question
+    )
+}
+
+/// Resolves `@name rest of the line`.
+///
+/// `@` is the plugin namespace. It deliberately does not reach Pi's own slash
+/// commands, so the adapter's plumbing (`mcp`, `llama`, ...) is not addressable
+/// this way. Only the first word is the name; the rest is the question or the
+/// skill's arguments.
+fn resolve_invocation(
+    plugins: &[PluginSummary],
+    commands: &[Commands],
+    vendor: Option<&Path>,
+    input: &str,
+) -> Option<Invocation> {
+    let input = input.trim();
+    let (name, rest) = match input.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (input, ""),
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    // a plugin wins over a skill of the same name: it is the coarser thing
+    if let Some(plugin) = plugins.iter().find(|plugin| plugin.name == name) {
+        if rest.is_empty() {
+            return Some(Invocation::Describe {
+                name: plugin.name.clone(),
+                description: plugin.description.clone(),
+            });
+        }
+        return Some(Invocation::Plugin(scoped_prompt(
+            &plugin.name,
+            &plugin.description,
+            rest,
+        )));
+    }
+
+    let with_args = |resolved: &str| {
+        if rest.is_empty() {
+            format!("/{}", resolved)
+        } else {
+            format!("/{} {}", resolved, rest)
+        }
+    };
+
+    // a named skill, from a plugin or from the user's own skills dir
+    let skill = format!("skill:{}", name);
+    if commands
+        .iter()
+        .any(|cmd| cmd.name == skill && !is_plumbing(cmd, vendor))
+    {
+        return Some(Invocation::Skill(with_args(&skill)));
+    }
+
+    // a command a plugin registered, for things the model cannot do itself:
+    // a login flow, storing a credential, a status check
+    if commands
+        .iter()
+        .any(|cmd| cmd.name == name && !is_plumbing(cmd, vendor))
+    {
+        return Some(Invocation::Command(with_args(name)));
+    }
+    None
+}
+
+/// One line of the `/skills` list. Everything invocable uses `@name`, so the
+/// user never has to know whether it came from a skill or a plugin.
+fn format_command_entry(index: usize, name: &str, description: &str) -> String {
+    let label = name.strip_prefix("skill:").unwrap_or(name);
+    format!(
+        "{}. {}{} - {}",
+        index.purple(),
+        "@".yellow(),
+        label.bright_green(),
+        description.bright_cyan()
+    )
+}
+
+/// Renders a Pi extension's `ui.*` request into printable lines.
+/// Kept pure so the formatting is testable without a live Pi.
+fn build_extension_ui_lines(req: &PiExtensionUiRequest) -> Vec<String> {
+    let mut lines = vec![];
+    if let Some(title) = &req.title {
+        lines.push(format!("{}", title.bright_yellow()));
+    }
+    if let Some(message) = &req.message {
+        lines.push(message.to_owned());
+    }
+    match req.method {
+        ExtensionUiMethod::Select => {
+            let options = req.options.as_deref().unwrap_or_default();
+            for (i, option) in options.iter().enumerate() {
+                lines.push(format!("{}. {}", (i + 1).purple(), option.bright_green()));
+            }
+            lines.push(format!("{}", "Pick a number (blank to cancel):".dimmed()));
+        }
+        ExtensionUiMethod::Confirm => lines.push(format!("{}", "(Y/n)".dimmed())),
+        ExtensionUiMethod::Input => {
+            let hint = req.placeholder.as_deref().unwrap_or("blank to cancel");
+            lines.push(format!("{}", hint.dimmed()));
+        }
+        ExtensionUiMethod::Editor => {
+            if let Some(prefill) = &req.prefill {
+                lines.push(format!("{}", prefill.dimmed()));
+            }
+            lines.push(format!(
+                "{}",
+                "Enter replacement text (blank to keep):".dimmed()
+            ));
+        }
+        ExtensionUiMethod::Notify => {
+            let level = req.notify_type.as_deref().unwrap_or("info");
+            let label = match level {
+                "error" => "ERROR".red().to_string(),
+                "warning" => "WARNING".yellow().to_string(),
+                _ => "INFO".blue().to_string(),
+            };
+            // notify carries its text in `message`, already pushed above
+            lines.insert(0, label);
+        }
+        _ => (),
+    }
+    lines
+}
+
+/// Reads one line from the terminal. The rustyline editor is owned by the
+/// outer REPL loop, so dialogs use plain stdin like the other prompts here.
+fn read_dialog_line() -> Result<String> {
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_owned())
+}
+
+/// Answers a Pi extension UI request. Dialog methods block Pi on stdin until
+/// we reply with the matching id, so every dialog path must send something.
+async fn handle_extension_ui_request(
+    writer: &mut PiWriter,
+    req: PiExtensionUiRequest,
+) -> Result<()> {
+    if !req.method.is_dialog() && req.method != ExtensionUiMethod::Notify {
+        info!("ignoring extension ui method {:?}", req.method);
+        return Ok(());
+    }
+
+    for line in build_extension_ui_lines(&req) {
+        println!("{}", line);
+    }
+
+    let reply = match req.method {
+        ExtensionUiMethod::Notify => return Ok(()),
+        ExtensionUiMethod::Select => {
+            let options = req.options.clone().unwrap_or_default();
+            match read_dialog_line()?.parse::<usize>() {
+                Ok(choice) if choice >= 1 && choice <= options.len() => {
+                    json!({ "value": options[choice - 1] })
+                }
+                _ => json!({ "cancelled": true }),
+            }
+        }
+        ExtensionUiMethod::Confirm => {
+            let answer = read_dialog_line()?.to_lowercase();
+            json!({ "confirmed": answer.is_empty() || answer == "y" || answer == "yes" })
+        }
+        ExtensionUiMethod::Input => {
+            let answer = read_dialog_line()?;
+            if answer.is_empty() {
+                json!({ "cancelled": true })
+            } else {
+                json!({ "value": answer })
+            }
+        }
+        ExtensionUiMethod::Editor => {
+            let answer = read_dialog_line()?;
+            match (answer.is_empty(), &req.prefill) {
+                (true, Some(prefill)) => json!({ "value": prefill }),
+                (true, None) => json!({ "cancelled": true }),
+                (false, _) => json!({ "value": answer }),
+            }
+        }
+        // A method we do not know might still be a dialog, and an unanswered
+        // dialog hangs Pi. Cancelling is safe either way.
+        _ => json!({ "cancelled": true }),
+    };
+
+    let mut payload = json!({ "type": "extension_ui_response", "id": req.id });
+    if let (Some(target), Some(source)) = (payload.as_object_mut(), reply.as_object()) {
+        for (key, value) in source {
+            target.insert(key.clone(), value.clone());
+        }
+    }
+    writer.send_to_pi(payload).await
+}
+
 fn build_status_lines(
     cwd: &str,
     session_data: Option<Session>,
@@ -988,19 +1497,13 @@ fn handle_pi_message_update(msg_update: types::PiMessageUpdate) {
         types::AsstMsgEventType::ThinkingEnd => {
             println!();
         }
+        // The raw argument json used to be streamed here. The
+        // `tool_execution_*` events carry the tool name and arguments properly,
+        // so the readable version is rendered from those instead.
         types::AsstMsgEventType::ToolcallStart => {
             info!("Selecting tool to execute");
-            println!();
-            let delta = "**[Tool Calling]**";
-            println!("{}", delta.dimmed());
         }
-        types::AsstMsgEventType::ToolcallDelta => {
-            if let Some(delta) = msg_update.assistant_message_event.delta {
-                print!("{}", delta.dimmed());
-                use std::io::Write;
-                std::io::stdout().flush().ok();
-            }
-        }
+        types::AsstMsgEventType::ToolcallDelta => (),
         types::AsstMsgEventType::ToolcallEnd => {
             info!("Tool call selected");
         }
@@ -1068,10 +1571,13 @@ async fn handle_input_commands(
 
     let command: CommandType = serde_json::from_value(cmd_json)?;
     let res = match command {
-        CommandType::Unknown => {
+        CommandType::Unknown | CommandType::Prompt => {
+            // `/` is for Tiles' own commands. Anything a plugin provides is
+            // reached with `@name`, which resolves against Pi's command list.
             println!(
-                "Unknown command: /{}. Type /help for available commands.",
-                cmd
+                "Unknown command: /{}. Type {} for available commands.",
+                cmd,
+                "/help".yellow()
             );
             InputCommandResponse::ProcessNextInput
         }
@@ -1787,6 +2293,433 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// Drops ANSI colour codes so assertions can read the plain text.
+    fn strip_ansi(text: &str) -> String {
+        let mut out = String::new();
+        let mut chars = text.chars();
+        while let Some(c) = chars.next() {
+            if c == '\u{1b}' {
+                for skip in chars.by_ref() {
+                    if skip == 'm' {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_tool_labels_read_like_actions() {
+        // the real names Exa registers, taken from a live run
+        assert_eq!(tool_label("exa__search_web_search_exa"), "Web Search");
+        assert_eq!(tool_label("exa__search_web_fetch_exa"), "Fetch Page");
+
+        // pi builtins
+        assert_eq!(tool_label("bash"), "Bash");
+        assert_eq!(tool_label("read"), "Read");
+        assert_eq!(tool_label("mcpScript"), "MCP");
+
+        // an unknown plugin tool still reads sensibly with no entry of its own,
+        // keeping the server segment for context
+        assert_eq!(
+            tool_label("gmail__inbox_list_messages"),
+            "Inbox List Messages"
+        );
+        assert_eq!(tool_label("weird"), "Weird");
+    }
+
+    #[test]
+    fn test_tool_detail_picks_the_useful_argument() {
+        let search = serde_json::json!({"numResults": 5, "query": "neovim release"});
+        assert_eq!(
+            tool_detail(Some(&search)).as_deref(),
+            Some("neovim release")
+        );
+
+        let bash = serde_json::json!({"command": "ls -la"});
+        assert_eq!(tool_detail(Some(&bash)).as_deref(), Some("ls -la"));
+
+        // nothing worth showing rather than dumping the whole object
+        let opaque = serde_json::json!({"cursor": 3});
+        assert!(tool_detail(Some(&opaque)).is_none());
+        assert!(tool_detail(None).is_none());
+
+        // newlines would break the single-line display
+        let multi = serde_json::json!({"command": "one\ntwo"});
+        assert_eq!(tool_detail(Some(&multi)).as_deref(), Some("one two"));
+    }
+
+    #[test]
+    fn test_long_details_are_truncated() {
+        let long = "x".repeat(200);
+        let args = serde_json::json!({"query": long});
+        let shown = tool_detail(Some(&args)).unwrap();
+        assert!(shown.chars().count() <= 72, "{}", shown.chars().count());
+        assert!(shown.ends_with('…'));
+    }
+
+    #[test]
+    fn test_tool_progress_summarises_partial_output() {
+        let one_line = serde_json::json!({"content": [{"type": "text", "text": "hello"}]});
+        assert_eq!(tool_progress(Some(&one_line)).as_deref(), Some("5 chars"));
+
+        let many = serde_json::json!({"content": [{"type": "text", "text": "a\nb\nc"}]});
+        assert_eq!(tool_progress(Some(&many)).as_deref(), Some("3 lines"));
+
+        // an empty or shapeless result should not print a progress line at all
+        let empty = serde_json::json!({"content": []});
+        assert!(tool_progress(Some(&empty)).is_none());
+        assert!(tool_progress(Some(&serde_json::json!({}))).is_none());
+    }
+
+    #[test]
+    fn test_tool_execution_events_parse() {
+        let start = r#"{"type":"tool_execution_start","toolCallId":"c1",
+            "toolName":"exa__search_web_search_exa","args":{"query":"neovim"}}"#;
+        match serde_json::from_str::<PiResponse>(start).unwrap() {
+            PiResponse::ToolExecutionStart(event) => {
+                assert_eq!(event.tool_call_id, "c1");
+                assert_eq!(tool_label(&event.tool_name), "Web Search");
+                assert_eq!(tool_detail(event.args.as_ref()).as_deref(), Some("neovim"));
+            }
+            other => panic!("parsed as {:?}", other),
+        }
+
+        let end = r#"{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash",
+            "result":{"content":[{"type":"text","text":"ok"}]},"isError":true}#"#;
+        let end = end.trim_end_matches('#');
+        match serde_json::from_str::<PiResponse>(end).unwrap() {
+            PiResponse::ToolExecutionEnd(event) => assert_eq!(event.is_error, Some(true)),
+            other => panic!("parsed as {:?}", other),
+        }
+    }
+
+    fn test_plugins() -> Vec<PluginSummary> {
+        vec![PluginSummary {
+            name: "exa".to_owned(),
+            description: "Web search and page fetch".to_owned(),
+            bundled: true,
+            enabled: true,
+        }]
+    }
+
+    /// The vendored adapter's location, used to tell plumbing from plugins.
+    fn test_vendor() -> PathBuf {
+        PathBuf::from("/lib/tiles/vendor")
+    }
+
+    fn command(name: &str, path: Option<&str>) -> Commands {
+        Commands {
+            name: name.to_owned(),
+            description: "desc".to_owned(),
+            source: "extension".to_owned(),
+            source_info: Some(types::CommandSource {
+                path: path.map(str::to_owned),
+            }),
+        }
+    }
+
+    fn test_commands() -> Vec<Commands> {
+        vec![
+            // a plugin's skill
+            command(
+                "skill:web-research",
+                Some("/lib/tiles/plugins/exa/skills/web-research/SKILL.md"),
+            ),
+            // a plugin's own command, the login-flow case
+            command(
+                "gmail-login",
+                Some("/lib/tiles/plugins/gmail/run.tiles/extensions/auth/index.ts"),
+            ),
+            // the adapter's plumbing, all under vendor/
+            command(
+                "mcp",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/index.ts"),
+            ),
+            command(
+                "mcp-auth",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/index.ts"),
+            ),
+            command(
+                "skill:mcp-scripting",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/skills/mcp-scripting/SKILL.md"),
+            ),
+            // one of Pi's own
+            command("llama", Some("<inline:llama.cpp>")),
+        ]
+    }
+
+    #[test]
+    fn test_at_scopes_a_question_to_a_plugin() {
+        let resolved = resolve_invocation(
+            &test_plugins(),
+            &test_commands(),
+            Some(&test_vendor()),
+            "exa top 3 news today",
+        )
+        .unwrap();
+        let message = resolved.message().expect("a question is sent to Pi");
+        // names the plugin, its tool prefix, and keeps the question intact
+        assert!(message.contains("\"exa\""), "{}", message);
+        assert!(message.contains("exa__"), "{}", message);
+        assert!(message.ends_with("top 3 news today"), "{}", message);
+        assert!(matches!(resolved, Invocation::Plugin(_)));
+    }
+
+    #[test]
+    fn test_at_plugin_with_no_question_describes_it() {
+        let resolved = resolve_invocation(
+            &test_plugins(),
+            &test_commands(),
+            Some(&test_vendor()),
+            "exa",
+        )
+        .unwrap();
+        // nothing is sent to Pi, so no wasted turn
+        assert!(resolved.message().is_none());
+        assert_eq!(
+            resolved,
+            Invocation::Describe {
+                name: "exa".to_owned(),
+                description: "Web search and page fetch".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_at_still_reaches_skills() {
+        assert_eq!(
+            resolve_invocation(
+                &test_plugins(),
+                &test_commands(),
+                Some(&test_vendor()),
+                "web-research"
+            ),
+            Some(Invocation::Skill("/skill:web-research".to_owned()))
+        );
+        // skills take arguments
+        assert_eq!(
+            resolve_invocation(
+                &test_plugins(),
+                &test_commands(),
+                Some(&test_vendor()),
+                "web-research neovim"
+            )
+            .unwrap()
+            .message(),
+            Some("/skill:web-research neovim")
+        );
+    }
+
+    #[test]
+    fn test_at_reaches_a_plugins_own_command() {
+        // The login-flow case: the model cannot do a browser sign-in, so a
+        // plugin needs its own command and `@` has to reach it.
+        let resolved = resolve_invocation(
+            &test_plugins(),
+            &test_commands(),
+            Some(&test_vendor()),
+            "gmail-login",
+        )
+        .unwrap();
+        assert_eq!(resolved, Invocation::Command("/gmail-login".to_owned()));
+        // it is answered by the plugin, so only an ack comes back
+        assert!(resolved.ends_on_ack());
+        // and it takes arguments
+        assert_eq!(
+            resolve_invocation(
+                &test_plugins(),
+                &test_commands(),
+                Some(&test_vendor()),
+                "gmail-login work@example.com"
+            )
+            .unwrap()
+            .message(),
+            Some("/gmail-login work@example.com")
+        );
+    }
+
+    #[test]
+    fn test_at_does_not_reach_the_adapters_plumbing() {
+        // Excluded by where they were registered, not by name, so a new
+        // adapter command needs no list update.
+        for input in [
+            "mcp",
+            "mcp status",
+            "mcp-auth github",
+            "mcp-scripting",
+            "llama",
+        ] {
+            assert!(
+                resolve_invocation(
+                    &test_plugins(),
+                    &test_commands(),
+                    Some(&test_vendor()),
+                    input
+                )
+                .is_none(),
+                "{} should not resolve",
+                input
+            );
+        }
+        assert!(
+            resolve_invocation(&test_plugins(), &test_commands(), Some(&test_vendor()), "")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_plumbing_is_decided_by_ownership() {
+        let vendor = test_vendor();
+        // a plugin's file
+        assert!(!is_plumbing(
+            &command("x", Some("/lib/tiles/plugins/exa/skills/a/SKILL.md")),
+            Some(&vendor)
+        ));
+        // the adapter's
+        assert!(is_plumbing(
+            &command(
+                "x",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/index.ts")
+            ),
+            Some(&vendor)
+        ));
+        // one of Pi's own
+        assert!(is_plumbing(
+            &command("x", Some("<inline:llama.cpp>")),
+            Some(&vendor)
+        ));
+        // no provenance at all: do not surface it as a plugin's
+        assert!(is_plumbing(&command("x", None), Some(&vendor)));
+        // a user's hand-placed skill stays available
+        assert!(!is_plumbing(
+            &command(
+                "x",
+                Some("/home/me/.local/share/tiles/data/pi/agent/skills/mine/SKILL.md")
+            ),
+            Some(&vendor)
+        ));
+    }
+
+    #[test]
+    fn test_command_entry_uses_one_sigil_for_everything() {
+        // a user should not be able to tell a skill from a plugin command here
+        let skill = strip_ansi(&format_command_entry(1, "skill:deploy", "Ship it"));
+        assert_eq!(skill, "1. @deploy - Ship it");
+        let plugin = strip_ansi(&format_command_entry(2, "gmail", "Read mail"));
+        assert_eq!(plugin, "2. @gmail - Read mail");
+    }
+
+    #[test]
+    fn test_command_entry_survives_short_names() {
+        // the old split_at(6) panicked on anything shorter than `skill:`
+        for name in ["a", "mcp", "llama", "skill:"] {
+            let line = format_command_entry(1, name, "desc");
+            assert!(!line.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_extension_ui_request_parses_every_method() {
+        let cases = [
+            ("select", ExtensionUiMethod::Select, true),
+            ("confirm", ExtensionUiMethod::Confirm, true),
+            ("input", ExtensionUiMethod::Input, true),
+            ("editor", ExtensionUiMethod::Editor, true),
+            ("notify", ExtensionUiMethod::Notify, false),
+            ("setStatus", ExtensionUiMethod::SetStatus, false),
+            ("setWidget", ExtensionUiMethod::SetWidget, false),
+            ("setTitle", ExtensionUiMethod::SetTitle, false),
+            ("set_editor_text", ExtensionUiMethod::SetEditorText, false),
+            ("brand_new_thing", ExtensionUiMethod::Unknown, false),
+        ];
+        for (wire, expected, is_dialog) in cases {
+            let raw = format!(
+                r#"{{"type":"extension_ui_request","id":"abc","method":"{}"}}"#,
+                wire
+            );
+            let parsed: PiResponse = serde_json::from_str(&raw).expect(wire);
+            match parsed {
+                PiResponse::ExtensionUiRequest(req) => {
+                    assert_eq!(req.method, expected, "{}", wire);
+                    assert_eq!(req.method.is_dialog(), is_dialog, "{}", wire);
+                    assert_eq!(req.id, "abc");
+                }
+                other => panic!("{} parsed as {:?}", wire, other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_select_request_renders_numbered_options() {
+        let raw = r#"{"type":"extension_ui_request","id":"1","method":"select",
+            "title":"Allow OAuth?","options":["Allow","Block"],"timeout":10000}"#;
+        let PiResponse::ExtensionUiRequest(req) = serde_json::from_str(raw).unwrap() else {
+            panic!("expected an extension ui request");
+        };
+        let lines: Vec<String> = build_extension_ui_lines(&req)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect();
+        assert_eq!(lines[0], "Allow OAuth?");
+        assert_eq!(lines[1], "1. Allow");
+        assert_eq!(lines[2], "2. Block");
+    }
+
+    #[test]
+    fn test_notify_request_renders_level_label() {
+        let raw = r#"{"type":"extension_ui_request","id":"1","method":"notify",
+            "message":"disk is full","notifyType":"error"}"#;
+        let PiResponse::ExtensionUiRequest(req) = serde_json::from_str(raw).unwrap() else {
+            panic!("expected an extension ui request");
+        };
+        let lines: Vec<String> = build_extension_ui_lines(&req)
+            .iter()
+            .map(|line| strip_ansi(line))
+            .collect();
+        assert_eq!(lines[0], "ERROR");
+        assert!(lines.contains(&"disk is full".to_owned()), "{:?}", lines);
+    }
+
+    #[test]
+    fn test_prompt_ack_parses_as_its_own_command() {
+        // this used to fall into CommandType::Unknown, which made the read
+        // loop wait forever after a forwarded slash command
+        let raw = r#"{"type":"response","command":"prompt","success":true}"#;
+        let parsed: PiResponse = serde_json::from_str(raw).unwrap();
+        match parsed {
+            PiResponse::Response(msg) => {
+                assert!(matches!(msg.command, CommandType::Prompt));
+                assert!(msg.success);
+            }
+            other => panic!("parsed as {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_slash_is_reserved_for_tiles_commands() {
+        // `/` no longer reaches plugins. Anything a plugin provides is `@name`,
+        // so an unrecognised slash command is just unknown.
+        assert!(matches!(handle_input("/mcp"), InputType::Command));
+        assert!(matches!(handle_input("/anything"), InputType::Command));
+        // and `@` is what carries plugin commands and skills
+        assert!(matches!(handle_input("@mcp"), InputType::Invoke));
+    }
+
+    #[test]
+    fn test_unknown_input_is_classified_as_command() {
+        // extension commands must reach the forwarding path, not be rejected
+        assert!(matches!(handle_input("/mcp status"), InputType::Command));
+        assert!(matches!(handle_input("/llama"), InputType::Command));
+        assert!(matches!(handle_input("hello there"), InputType::Prompt));
+        assert!(matches!(handle_input("@exa"), InputType::Invoke));
+        assert!(matches!(handle_input("$deploy"), InputType::Invoke));
+        assert!(matches!(handle_input("/bye"), InputType::Exit));
     }
 
     fn setup_common_db() -> Connection {
