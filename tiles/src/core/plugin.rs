@@ -32,6 +32,7 @@ use log::info;
 use reqwest::Client;
 use tempfile::{TempDir, tempdir};
 
+use crate::core::agent::types::Commands;
 use crate::utils::{
     config::{ConfigProvider, DefaultProvider, get_disabled_plugins, set_plugin_disabled},
     copy_recursive,
@@ -601,6 +602,157 @@ pub fn summaries() -> Vec<PluginSummary> {
         .collect()
 }
 
+/// The plugins `@name` resolves against: disabled ones are not addressable.
+pub fn enabled_summaries() -> Vec<PluginSummary> {
+    summaries()
+        .into_iter()
+        .filter(|plugin| plugin.enabled)
+        .collect()
+}
+
+/// True when a command belongs to the bundled adapter or Pi itself rather than
+/// to a plugin.
+///
+/// Decided by where the command was registered from, not by its name: the
+/// adapter lives under `<lib>/vendor/` and Pi's own are `<inline:...>`. A
+/// name list would need updating for every new adapter command, and would
+/// wrongly catch a plugin that happened to pick a similar name.
+pub fn is_plumbing(command: &Commands, vendor_dir: Option<&Path>) -> bool {
+    let Some(path) = command
+        .source_info
+        .as_ref()
+        .and_then(|info| info.path.as_deref())
+    else {
+        // no provenance, so treat it as Pi's rather than surface it as a plugin
+        return true;
+    };
+    if path.starts_with("<inline:") {
+        return true;
+    }
+    vendor_dir.is_some_and(|vendor| Path::new(path).starts_with(vendor))
+}
+
+/// Where the bundled adapter lives, so its commands can be told apart.
+pub fn vendor_dir() -> Option<PathBuf> {
+    DefaultProvider
+        .get_lib_dir()
+        .ok()
+        .map(|lib| lib.join("vendor"))
+}
+
+/// Works out what `@name` means.
+///
+/// Skills and plugin commands are both invoked with `@`, but Pi names them
+/// differently: a skill is `skill:deploy` while a plugin command is `gmail`.
+/// Users should not have to know which is which, so look it up.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Invocation {
+    /// `@plugin question` asks the question using that plugin.
+    Plugin(String),
+    /// `@skill args` runs a named skill.
+    Skill(String),
+    /// `@plugin-command args`, handled by the plugin itself with no model turn.
+    /// This is how a plugin does things the model cannot, such as a login flow.
+    Command(String),
+    /// `@plugin` on its own, so say what it is for instead of guessing.
+    Describe { name: String, description: String },
+}
+
+impl Invocation {
+    /// The prompt to send Pi, or none when there is nothing to ask.
+    pub fn message(&self) -> Option<&str> {
+        match self {
+            Invocation::Plugin(message)
+            | Invocation::Skill(message)
+            | Invocation::Command(message) => Some(message),
+            Invocation::Describe { .. } => None,
+        }
+    }
+
+    /// True when Pi answers with only an ack, because a plugin handled it and
+    /// no model turn runs. The read loop has to stop there.
+    pub fn ends_on_ack(&self) -> bool {
+        matches!(self, Invocation::Command(_))
+    }
+}
+
+/// Nudges the model towards one plugin's tools for this question.
+///
+/// The model already has the tools; this only says which ones to prefer. Tool
+/// names from a plugin are prefixed with the plugin name, so naming the prefix
+/// is enough to point at them.
+fn scoped_prompt(plugin: &str, description: &str, question: &str) -> String {
+    format!(
+        "Answer using the \"{}\" plugin ({}). Prefer its tools, whose names start \
+         with \"{}__\", over answering from memory.\n\n{}",
+        plugin, description, plugin, question
+    )
+}
+
+/// Resolves `@name rest of the line`.
+///
+/// `@` is the plugin namespace. It deliberately does not reach Pi's own slash
+/// commands, so the adapter's plumbing (`mcp`, `llama`, ...) is not addressable
+/// this way. Only the first word is the name; the rest is the question or the
+/// skill's arguments.
+pub fn resolve_invocation(
+    plugins: &[PluginSummary],
+    commands: &[Commands],
+    vendor: Option<&Path>,
+    input: &str,
+) -> Option<Invocation> {
+    let input = input.trim();
+    let (name, rest) = match input.split_once(char::is_whitespace) {
+        Some((name, rest)) => (name, rest.trim()),
+        None => (input, ""),
+    };
+    if name.is_empty() {
+        return None;
+    }
+
+    // a plugin wins over a skill of the same name: it is the coarser thing
+    if let Some(plugin) = plugins.iter().find(|plugin| plugin.name == name) {
+        if rest.is_empty() {
+            return Some(Invocation::Describe {
+                name: plugin.name.clone(),
+                description: plugin.description.clone(),
+            });
+        }
+        return Some(Invocation::Plugin(scoped_prompt(
+            &plugin.name,
+            &plugin.description,
+            rest,
+        )));
+    }
+
+    let with_args = |resolved: &str| {
+        if rest.is_empty() {
+            format!("/{}", resolved)
+        } else {
+            format!("/{} {}", resolved, rest)
+        }
+    };
+
+    // a named skill, from a plugin or from the user's own skills dir
+    let skill = format!("skill:{}", name);
+    if commands
+        .iter()
+        .any(|cmd| cmd.name == skill && !is_plumbing(cmd, vendor))
+    {
+        return Some(Invocation::Skill(with_args(&skill)));
+    }
+
+    // a command a plugin registered, for things the model cannot do itself:
+    // a login flow, storing a credential, a status check
+    if commands
+        .iter()
+        .any(|cmd| cmd.name == name && !is_plumbing(cmd, vendor))
+    {
+        return Some(Invocation::Command(with_args(name)));
+    }
+    None
+}
+
 pub fn list() -> Result<()> {
     let summaries = summaries();
     if summaries.is_empty() {
@@ -665,7 +817,215 @@ pub fn set_enabled(plugin_name: &str, enabled: bool) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::agent::types;
     use serde_json::json;
+
+    fn test_plugins() -> Vec<PluginSummary> {
+        vec![PluginSummary {
+            name: "exa".to_owned(),
+            description: "Web search and page fetch".to_owned(),
+            bundled: true,
+            enabled: true,
+        }]
+    }
+
+    /// The vendored adapter's location, used to tell plumbing from plugins.
+    fn test_vendor() -> PathBuf {
+        PathBuf::from("/lib/tiles/vendor")
+    }
+
+    fn command(name: &str, path: Option<&str>) -> Commands {
+        Commands {
+            name: name.to_owned(),
+            description: "desc".to_owned(),
+            source: "extension".to_owned(),
+            source_info: Some(types::CommandSource {
+                path: path.map(str::to_owned),
+            }),
+        }
+    }
+
+    fn test_commands() -> Vec<Commands> {
+        vec![
+            // a plugin's skill
+            command(
+                "skill:web-research",
+                Some("/lib/tiles/plugins/exa/skills/web-research/SKILL.md"),
+            ),
+            // a plugin's own command, the login-flow case
+            command(
+                "gmail-login",
+                Some("/lib/tiles/plugins/gmail/run.tiles/extensions/auth/index.ts"),
+            ),
+            // the adapter's plumbing, all under vendor/
+            command(
+                "mcp",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/index.ts"),
+            ),
+            command(
+                "mcp-auth",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/index.ts"),
+            ),
+            command(
+                "skill:mcp-scripting",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/skills/mcp-scripting/SKILL.md"),
+            ),
+            // one of Pi's own
+            command("llama", Some("<inline:llama.cpp>")),
+        ]
+    }
+
+    #[test]
+    fn test_at_scopes_a_question_to_a_plugin() {
+        let resolved = resolve_invocation(
+            &test_plugins(),
+            &test_commands(),
+            Some(&test_vendor()),
+            "exa top 3 news today",
+        )
+        .unwrap();
+        let message = resolved.message().expect("a question is sent to Pi");
+        // names the plugin, its tool prefix, and keeps the question intact
+        assert!(message.contains("\"exa\""), "{}", message);
+        assert!(message.contains("exa__"), "{}", message);
+        assert!(message.ends_with("top 3 news today"), "{}", message);
+        assert!(matches!(resolved, Invocation::Plugin(_)));
+    }
+
+    #[test]
+    fn test_at_plugin_with_no_question_describes_it() {
+        let resolved = resolve_invocation(
+            &test_plugins(),
+            &test_commands(),
+            Some(&test_vendor()),
+            "exa",
+        )
+        .unwrap();
+        // nothing is sent to Pi, so no wasted turn
+        assert!(resolved.message().is_none());
+        assert_eq!(
+            resolved,
+            Invocation::Describe {
+                name: "exa".to_owned(),
+                description: "Web search and page fetch".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_at_still_reaches_skills() {
+        assert_eq!(
+            resolve_invocation(
+                &test_plugins(),
+                &test_commands(),
+                Some(&test_vendor()),
+                "web-research"
+            ),
+            Some(Invocation::Skill("/skill:web-research".to_owned()))
+        );
+        // skills take arguments
+        assert_eq!(
+            resolve_invocation(
+                &test_plugins(),
+                &test_commands(),
+                Some(&test_vendor()),
+                "web-research neovim"
+            )
+            .unwrap()
+            .message(),
+            Some("/skill:web-research neovim")
+        );
+    }
+
+    #[test]
+    fn test_at_reaches_a_plugins_own_command() {
+        // The login-flow case: the model cannot do a browser sign-in, so a
+        // plugin needs its own command and `@` has to reach it.
+        let resolved = resolve_invocation(
+            &test_plugins(),
+            &test_commands(),
+            Some(&test_vendor()),
+            "gmail-login",
+        )
+        .unwrap();
+        assert_eq!(resolved, Invocation::Command("/gmail-login".to_owned()));
+        // it is answered by the plugin, so only an ack comes back
+        assert!(resolved.ends_on_ack());
+        // and it takes arguments
+        assert_eq!(
+            resolve_invocation(
+                &test_plugins(),
+                &test_commands(),
+                Some(&test_vendor()),
+                "gmail-login work@example.com"
+            )
+            .unwrap()
+            .message(),
+            Some("/gmail-login work@example.com")
+        );
+    }
+
+    #[test]
+    fn test_at_does_not_reach_the_adapters_plumbing() {
+        // Excluded by where they were registered, not by name, so a new
+        // adapter command needs no list update.
+        for input in [
+            "mcp",
+            "mcp status",
+            "mcp-auth github",
+            "mcp-scripting",
+            "llama",
+        ] {
+            assert!(
+                resolve_invocation(
+                    &test_plugins(),
+                    &test_commands(),
+                    Some(&test_vendor()),
+                    input
+                )
+                .is_none(),
+                "{} should not resolve",
+                input
+            );
+        }
+        assert!(
+            resolve_invocation(&test_plugins(), &test_commands(), Some(&test_vendor()), "")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_plumbing_is_decided_by_ownership() {
+        let vendor = test_vendor();
+        // a plugin's file
+        assert!(!is_plumbing(
+            &command("x", Some("/lib/tiles/plugins/exa/skills/a/SKILL.md")),
+            Some(&vendor)
+        ));
+        // the adapter's
+        assert!(is_plumbing(
+            &command(
+                "x",
+                Some("/lib/tiles/vendor/node_modules/pi-mcp-adapter/index.ts")
+            ),
+            Some(&vendor)
+        ));
+        // one of Pi's own
+        assert!(is_plumbing(
+            &command("x", Some("<inline:llama.cpp>")),
+            Some(&vendor)
+        ));
+        // no provenance at all: do not surface it as a plugin's
+        assert!(is_plumbing(&command("x", None), Some(&vendor)));
+        // a user's hand-placed skill stays available
+        assert!(!is_plumbing(
+            &command(
+                "x",
+                Some("/home/me/.local/share/tiles/data/pi/agent/skills/mine/SKILL.md")
+            ),
+            Some(&vendor)
+        ));
+    }
 
     #[test]
     fn test_archive_kind_reads_bytes_not_names() {
