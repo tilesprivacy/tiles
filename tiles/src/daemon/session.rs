@@ -81,6 +81,9 @@ async fn do_create_session(
             .await
             .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
+        // Pi's one conversation now belongs to this session and no other
+        *state.active_session.lock().await = Some(agent_state.session_id.clone());
+
         let session_data = Session {
             id: agent_state.session_id,
         };
@@ -95,13 +98,16 @@ async fn do_create_session(
             "No agent instance available, start one first".to_string(),
         ))?;
 
-        let state = agent
+        let pi_state = agent
             .reader
             .get_pi_state(&mut agent.writer)
             .await
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+        *state.active_session.lock().await = Some(pi_state.session_id.clone());
+
         Ok(ApiResponse::success(Session {
-            id: state.session_id,
+            id: pi_state.session_id,
         }))
     }
 }

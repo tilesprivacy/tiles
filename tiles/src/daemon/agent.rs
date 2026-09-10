@@ -5,7 +5,7 @@ use crate::{
         pi::{self, PiAgent, handle_graceful_exit},
         types::{PiAgentEndEvent, PiMsgContent, PiResponse},
     },
-    core::chats::append_turn_to_snapshot,
+    core::chats::{append_turn_to_snapshot, fetch_chats_by_session_id, history_for_resume},
     core::plugin::{self, Invocation},
     core::storage::db::{DBTYPE, get_db_conn},
     daemon::{ApiResponse, AppError, AppState},
@@ -131,6 +131,8 @@ async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
         let pi_agent = pi::new(&modelname, &system_prompt, PY_PORT)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         *agent = Some(pi_agent);
+        // a fresh Pi holds a conversation no session owns yet
+        *state.active_session.lock().await = None;
         Ok(ApiResponse::success(json!({"message": "started agent"})))
     }
 }
@@ -168,6 +170,8 @@ async fn reload_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
     let pi_agent = pi::new(&modelname, &system_prompt, PY_PORT)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     *agent = Some(pi_agent);
+    // a fresh Pi holds a conversation no session owns yet
+    *state.active_session.lock().await = None;
 
     Ok(ApiResponse::success(json!({"message": "reloaded agent"})))
 }
@@ -274,6 +278,36 @@ async fn process_chat_prompt(
                     )
                     .await;
                     return;
+                }
+            }
+        }
+
+        // Pi holds one conversation, and nothing tells it when the UI switches
+        // tabs. A prompt for a session other than the one Pi is on would be
+        // answered with the wrong context, so reset Pi and replay the stored
+        // turns first, the way the REPL resumes a session.
+        if let Some(sid) = &session_id {
+            let mut active = t_state.active_session.lock().await;
+            if active.as_deref() != Some(sid.as_str()) {
+                match agent.reader.create_new_session(&mut agent.writer).await {
+                    Ok(_) => {
+                        *active = Some(sid.clone());
+                        let history = get_db_conn(&DBTYPE::CHAT)
+                            .ok()
+                            .and_then(|conn| fetch_chats_by_session_id(&conn, sid).ok())
+                            .and_then(|delta| history_for_resume(&delta.chats, &message));
+                        if let Some(history) = history {
+                            message = format!(
+                                "user_chat_history:\n{}.\nUse the history as context.\n[Followup question] - {}",
+                                history, message
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        // the turn still runs; wrong context beats no answer,
+                        // and the next prompt will try the switch again
+                        log::warn!("Could not switch Pi to session {sid}: {err}");
+                    }
                 }
             }
         }

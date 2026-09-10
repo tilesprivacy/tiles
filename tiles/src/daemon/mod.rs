@@ -71,6 +71,11 @@ pub struct AppState {
     pub remote_running: Mutex<bool>,
     pub remote_shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
     pub agent: AsyncMutex<Option<PiAgent>>,
+    /// Which session Pi's one live conversation belongs to. Pi holds a single
+    /// conversation, and the UI switches sessions freely, so a prompt for a
+    /// different session must reset Pi and replay that session's history first
+    /// or it would be answered with another tab's context.
+    pub active_session: AsyncMutex<Option<String>>,
     pub ui: Arc<Ui>,
 }
 
@@ -85,6 +90,7 @@ impl AppState {
             remote_shutdown_sender: Mutex::new(None),
             remote_running: Mutex::new(false),
             agent: None.into(),
+            active_session: None.into(),
             ui: Ui::new(),
         }
     }
@@ -292,6 +298,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
         remote_ticket: Mutex::new(None),
         remote_shutdown_sender: Mutex::new(None),
         remote_running: Mutex::new(false),
+        active_session: None.into(),
         agent: None.into(),
         ui: ui.clone(),
     };
