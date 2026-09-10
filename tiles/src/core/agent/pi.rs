@@ -193,6 +193,25 @@ impl PiReader {
             .unwrap_or_default()
             .to_owned();
 
+        self.request_optional(writer, payload)
+            .await?
+            .ok_or_else(|| anyhow!("Pi returned no data for {}", request_type))
+    }
+
+    /// Like `request`, for commands whose response carries no data. An ack is
+    /// the whole answer to `new_session`, and demanding data of it would turn
+    /// every success into an error.
+    async fn request_optional(
+        &mut self,
+        writer: &mut PiWriter,
+        payload: Value,
+    ) -> Result<Option<Value>> {
+        let request_type = payload
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
+
         writer
             .send_to_pi(payload)
             .await
@@ -205,9 +224,10 @@ impl PiReader {
             };
             match serde_json::from_str::<PiResponse>(&line) {
                 Ok(PiResponse::Response(msg)) => {
-                    return msg
-                        .data
-                        .ok_or_else(|| anyhow!("Pi returned no data for {}", request_type));
+                    if !msg.success {
+                        return Err(anyhow!("Pi answered {} with a failure", request_type));
+                    }
+                    return Ok(msg.data);
                 }
                 _ => {
                     info!(
@@ -246,26 +266,18 @@ impl PiReader {
     }
 
     /// Creates a new Pi session
+    /// Resets Pi's one conversation.
+    ///
+    /// Goes through the event-skipping request loop: extensions announce
+    /// themselves on the same stream, and the naive single read this used to
+    /// do would take an `extension_ui_request` for the answer, fail the call,
+    /// and leave the real response behind to desync the next reader.
     pub async fn create_new_session(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
-        let cmd_payload = json!({
-            "type": "new_session",
-        });
+        self.request_optional(writer, json!({ "type": "new_session" }))
+            .await
+            .context("Creating new session failed")?;
 
-        writer.send_to_pi(cmd_payload).await?;
-
-        if let Some(line) = self.lines.next_line().await? {
-            let response: PiResponse = serde_json::from_str(&line)?;
-            if let PiResponse::Response(msg) = response
-                && msg.success
-            {
-                let state = self.get_pi_state(writer).await?;
-                Ok(state)
-            } else {
-                Err(anyhow!("Creating new session failed"))
-            }
-        } else {
-            Err(anyhow!("Failed to fetch session_id from Pi"))
-        }
+        self.get_pi_state(writer).await
     }
 }
 
