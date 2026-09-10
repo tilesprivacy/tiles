@@ -6,6 +6,7 @@ use crate::{
         types::{PiAgentEndEvent, PiMsgContent, PiResponse},
     },
     core::chats::append_turn_to_snapshot,
+    core::plugin::{self, Invocation},
     core::storage::db::{DBTYPE, get_db_conn},
     daemon::{ApiResponse, AppError, AppState},
     repl::{get_default_modelfile, model_spec},
@@ -22,7 +23,7 @@ use axum::{
 };
 use axum_macros::debug_handler;
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -60,6 +61,62 @@ pub fn agent_router() -> Router<Arc<AppState>> {
         .route("/v1/tilekit/agent/state", get(agent_state))
         .route("/v1/tilekit/agent/prompt", post(process_chat_prompt))
         .route("/v1/tilekit/agent/reload", get(reload_agent))
+        .route("/v1/tilekit/agent/commands", get(agent_commands))
+}
+
+/// One thing `@name` can reach, for the UI's mention picker.
+#[derive(Serialize)]
+struct Mention {
+    name: String,
+    description: String,
+    kind: &'static str,
+}
+
+/// Everything `@name` resolves against, in the order resolution tries them:
+/// plugins first, then skills, then plugin commands. The REPL builds the same
+/// list for its `/skills` output; this is the UI's copy of it.
+async fn agent_commands(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let mut agent = state.agent.lock().await;
+    let agent = agent.as_mut().ok_or(AppError::InternalServerError(
+        "Failed to get a mutable agent instance".to_string(),
+    ))?;
+
+    let commands = agent
+        .reader
+        .get_pi_commands(&mut agent.writer)
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    let vendor = plugin::vendor_dir();
+    let mut mentions: Vec<Mention> = plugin::enabled_summaries()
+        .into_iter()
+        .map(|plugin| Mention {
+            name: plugin.name,
+            description: plugin.description,
+            kind: "plugin",
+        })
+        .collect();
+
+    for command in commands
+        .iter()
+        .filter(|command| !plugin::is_plumbing(command, vendor.as_deref()))
+    {
+        let (name, kind) = match command.name.strip_prefix("skill:") {
+            Some(skill) => (skill, "skill"),
+            None => (command.name.as_str(), "command"),
+        };
+        // resolution prefers the plugin, so a same-named entry would be a lie
+        if mentions.iter().any(|mention| mention.name == name) {
+            continue;
+        }
+        mentions.push(Mention {
+            name: name.to_owned(),
+            description: command.description.clone(),
+            kind,
+        });
+    }
+
+    Ok(ApiResponse::success(json!({ "mentions": mentions })))
 }
 
 async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
@@ -169,9 +226,61 @@ async fn process_chat_prompt(
             return;
         };
 
+        // `@name` is resolved here so both frontends mean the same thing by it:
+        // the REPL resolves before sending, the UI sends it raw and this is
+        // where the daemon does the same rewrite
+        let mut message = payload.message;
+        let mut stop_on_ack = false;
+        if let Some(invoked) = message.trim().strip_prefix('@') {
+            let commands = agent
+                .reader
+                .get_pi_commands(&mut agent.writer)
+                .await
+                .unwrap_or_else(|err| {
+                    // costs only skill and command resolution, plugins still work
+                    log::warn!("Could not load the command list: {err}");
+                    vec![]
+                });
+            let plugins = plugin::enabled_summaries();
+            let vendor = plugin::vendor_dir();
+
+            match plugin::resolve_invocation(&plugins, &commands, vendor.as_deref(), invoked) {
+                Some(Invocation::Describe { name, description }) => {
+                    // nothing goes to Pi, so no model turn is wasted on it
+                    send_event(
+                        &tx,
+                        "mention",
+                        json!({ "resolved": "describe", "name": name, "description": description }),
+                    )
+                    .await;
+                    return;
+                }
+                Some(invocation) => {
+                    stop_on_ack = invocation.ends_on_ack();
+                    if let Some(resolved) = invocation.message() {
+                        message = resolved.to_owned();
+                    }
+                }
+                None => {
+                    let name = invoked.split_whitespace().next().unwrap_or(invoked);
+                    let available: Vec<String> = plugins
+                        .iter()
+                        .map(|plugin| format!("@{}", plugin.name))
+                        .collect();
+                    send_event(
+                        &tx,
+                        "mention",
+                        json!({ "resolved": "unknown", "name": name, "available": available }),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+
         let payload = json!({
             "type": "prompt",
-            "message": payload.message
+            "message": message
         });
         if let Err(err) = agent.writer.send_to_pi(payload).await {
             let err_str = format!("Failed to send the payload to Pi due to {:?}", err);
@@ -183,9 +292,9 @@ async fn process_chat_prompt(
                     log::info!("Will cancel the agent process");
                     let _ = handle_graceful_exit(&mut agent.writer).await;
                     // To read the rest of stdout after aborting the current request
-                    read_from_pi(agent, &tx).await
+                    read_from_pi(agent, &tx, stop_on_ack).await
                  },
-                ended = read_from_pi(agent, &tx) => ended
+                ended = read_from_pi(agent, &tx, stop_on_ack) => ended
         };
 
         // pi has reported the whole turn by now, so this is the one moment the
@@ -219,8 +328,24 @@ async fn handle_pi_errors(err_str: String, tx: &Sender<SseEvent>) {
     let _ = tx.send(event).await.map_err(|e| log::error!("{:?}", e));
 }
 
+async fn send_event(tx: &Sender<SseEvent>, event: &str, data: serde_json::Value) {
+    let event = SseEvent {
+        event: event.to_owned(),
+        data: data.to_string(),
+    };
+    let _ = tx.send(event).await.map_err(|e| log::error!("{:?}", e));
+}
+
 /// Returns the turn Pi reported, which is what a snapshot is built from.
-async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> Option<PiAgentEndEvent> {
+///
+/// `stop_on_ack` covers a plugin command: the plugin answers it and no model
+/// turn runs, so Pi's ack is the last event and waiting for `agent_settled`
+/// would hang the stream.
+async fn read_from_pi(
+    agent: &mut PiAgent,
+    tx: &Sender<SseEvent>,
+    stop_on_ack: bool,
+) -> Option<PiAgentEndEvent> {
     let mut last_event = String::from("");
     let mut ended = None;
 
@@ -244,6 +369,7 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> Option<PiAg
         match response {
             PiResponse::AgentSettled => break,
             PiResponse::AgentEnd(event) => ended = Some(event),
+            PiResponse::Response(_) if stop_on_ack => break,
             _ => continue,
         }
     }
@@ -384,6 +510,53 @@ mod tests {
 
         assert!(sse_events.contains("event: agent_start"));
         assert!(sse_events.contains("event: message_end"));
+    }
+
+    #[tokio::test]
+    async fn test_an_unknown_mention_answers_without_a_model_turn() {
+        // the fake pi answers the get_commands lookup and nothing else: an
+        // unresolved `@name` must never reach it as a prompt
+        let pi_agent = from_test_command(
+            "sh",
+            &[
+                "-c",
+                r#"read request
+  printf '{"type":"response","success":true,"data":{"commands":[]}}\n'"#,
+            ],
+        )
+        .unwrap();
+
+        let state = AppState {
+            agent: AsyncMutex::new(Some(pi_agent)),
+            ..AppState::for_tests()
+        };
+
+        let body = json!({
+            "message": "@no-such-plugin do something"
+        })
+        .to_string();
+        let agent_app = agent_router();
+        let response = agent_app
+            .with_state(state.into())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .uri("/v1/tilekit/agent/prompt")
+                    .body(Body::new(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let sse_events = String::from_utf8(body_bytes.to_vec()).unwrap();
+
+        assert!(sse_events.contains("event: mention"), "{}", sse_events);
+        assert!(sse_events.contains("\"unknown\""), "{}", sse_events);
+        assert!(sse_events.contains("no-such-plugin"), "{}", sse_events);
     }
 
     #[tokio::test]
