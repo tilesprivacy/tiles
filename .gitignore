@@ -26,6 +26,12 @@ server/stack/macos/requirements/
 node_modules/
 apps/menubar/src-tauri/gen/
 
+# the vendored adapter is committed on purpose, so it must survive both the
+# node_modules/ rule above and the dist/ rule at the top: git cannot re-include
+# below an excluded directory, so the directory itself is unexcluded first
+!vendor/node_modules/
+!vendor/node_modules/**
+
 # chat UI checkout, fetched at the pin in apps/menubar/ui.pin
 apps/menubar/.ui-src/
 
