@@ -1,0 +1,12 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "search": {
+      "type": "streamable-http",
+      "url": "https://mcp.exa.ai/mcp",
+      "headers": {
+        "x-api-key": "$env:EXA_API_KEY"
+      }
+    }
+  }
+}

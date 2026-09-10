@@ -1,12 +1,18 @@
 //! Module that deals with Pi
-use crate::core::agent::types::{GetStateData, PiResponse};
+use crate::core::agent::types::{Commands, GetStateData, PiResponse};
+use crate::core::plugin::{
+    installed_extension_entrypoints, installed_skill_dirs, prune_copied_plugin_skills,
+};
 use crate::utils::config::{
-    ConfigProvider, DefaultProvider, create_pi_provider_config, handle_pi_settings_config,
+    ConfigProvider, DefaultProvider, create_pi_provider_config, handle_pi_mcp_config,
+    handle_pi_settings_config,
 };
 use anyhow::{Context, Result, anyhow};
+use chrono::Local;
+use log::{info, warn};
 use nix::unistd::setsid;
 use serde_json::{Value, json};
-use std::{fs, process::Stdio};
+use std::{collections::HashMap, fs, process::Stdio};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
@@ -19,6 +25,9 @@ pub struct PiAgent {
 pub struct PiWriter {
     stdin: ChildStdin,
 }
+
+/// Startup events we will read past while waiting for a response.
+const MAX_EVENTS_BEFORE_RESPONSE: usize = 64;
 
 pub struct PiReader {
     lines: Lines<BufReader<ChildStdout>>,
@@ -41,15 +50,45 @@ pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> 
     let settings_file_path = pi_agent_dir.join("settings.json");
     handle_pi_settings_config(&settings_file_path)?;
 
+    let mcp_config_file_path = pi_agent_dir.join("mcp.json");
+    handle_pi_mcp_config(&mcp_config_file_path)?;
+
     let pi_exec_path = tiles_lib_dir.join("pi/pi");
 
+    prune_copied_plugin_skills();
+
+    // Extensions are loaded explicitly, never discovered: the bundled MCP
+    // adapter plus whatever installed plugins ship under `run.tiles/`.
+    let mut extensions = vec![tiles_lib_dir.join("vendor/node_modules/pi-mcp-adapter")];
+    extensions.extend(installed_extension_entrypoints());
+
+    // Skills come from the plugins that own them, so disabling a plugin takes
+    // its skills with it.
+    let skill_dirs = installed_skill_dirs();
+
     let mut pi_process = unsafe {
-        Command::new(pi_exec_path)
+        let mut command = Command::new(pi_exec_path);
+        command
             .arg("--mode")
             .arg("rpc")
             .arg("--append-system-prompt")
-            .arg(system_prompt)
+            .arg(with_current_date(system_prompt))
             .arg("--no-session")
+            .arg("--no-extensions");
+
+        for extension in extensions {
+            if extension.exists() {
+                command.arg("-e").arg(extension);
+            } else {
+                warn!("Skipping missing Pi extension {:?}", extension);
+            }
+        }
+
+        for skill_dir in skill_dirs {
+            command.arg("--skill").arg(skill_dir);
+        }
+
+        command
             .env("PI_CODING_AGENT_DIR", pi_agent_dir)
             .env("PI_OFFLINE", "true")
             .stdin(Stdio::piped())
@@ -81,6 +120,23 @@ pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> 
         },
         writer: PiWriter { stdin: pi_stdin },
     })
+}
+
+/// Appends today's date to the system prompt.
+///
+/// The model does not know the date, so it fills the gap from its training
+/// data. Seen in a real session: asked for today's news, it searched for
+/// "latest news today October 24 2024" and got news from that day in 2024.
+/// The search worked; the date in the query was wrong.
+fn with_current_date(system_prompt: &str) -> String {
+    let today = Local::now().format("%A, %-d %B %Y");
+    format!(
+        "{}\n\nCurrent date: {}\n\
+         Use this whenever a question depends on the current date, including when \
+         building a search query. Never take the date from your training data.",
+        system_prompt.trim_end(),
+        today
+    )
 }
 
 /// Gracefully exit an ongoing Pi agent session.
@@ -125,27 +181,63 @@ impl PiWriter {
 
 impl PiReader {
     /// Gets current Pi State
-    pub async fn get_pi_state(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
-        let init_cmd_payload = json!({
-            "type": "get_state",
-        });
+    /// Sends a request and returns the matching `response`.
+    ///
+    /// Extensions emit events on the same stream, and the bundled MCP adapter
+    /// always announces itself before Pi answers, so anything that is not the
+    /// response we asked for is skipped rather than treated as a failure.
+    async fn request(&mut self, writer: &mut PiWriter, payload: Value) -> Result<Value> {
+        let request_type = payload
+            .get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_owned();
 
-        writer.send_to_pi(init_cmd_payload).await?;
+        writer
+            .send_to_pi(payload)
+            .await
+            .inspect_err(|_e| eprintln!("sending command to pi failed"))?;
 
-        if let Some(line) = self.lines.next_line().await? {
-            let response: PiResponse = serde_json::from_str(&line)?;
-            if let PiResponse::Response(msg) = response
-                && msg.success
-            {
-                let state: GetStateData =
-                    serde_json::from_value(msg.data.expect("get state parsing failed"))?;
-                Ok(state)
-            } else {
-                Err(anyhow!("Failed to fetch initial state from Pi"))
+        // bounded so a stream of events can never hang startup
+        for _ in 0..MAX_EVENTS_BEFORE_RESPONSE {
+            let Some(line) = self.lines.next_line().await? else {
+                return Err(anyhow!("Pi closed the connection during {}", request_type));
+            };
+            match serde_json::from_str::<PiResponse>(&line) {
+                Ok(PiResponse::Response(msg)) => {
+                    return msg
+                        .data
+                        .ok_or_else(|| anyhow!("Pi returned no data for {}", request_type));
+                }
+                _ => {
+                    info!(
+                        "skipping event while waiting for {}: {}",
+                        request_type, line
+                    );
+                    continue;
+                }
             }
-        } else {
-            Err(anyhow!("Failed to fetch session_id from Pi"))
         }
+        Err(anyhow!(
+            "Gave up waiting for a response to {}",
+            request_type
+        ))
+    }
+
+    /// Gets current Pi State
+    pub async fn get_pi_state(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
+        let data = self.request(writer, json!({ "type": "get_state" })).await?;
+        serde_json::from_value(data).context("Failed to parse Pi state")
+    }
+
+    /// Every command Pi knows about: skills, plus anything extensions added.
+    pub async fn get_pi_commands(&mut self, writer: &mut PiWriter) -> Result<Vec<Commands>> {
+        let data = self
+            .request(writer, json!({ "type": "get_commands" }))
+            .await?;
+        let mut by_key: HashMap<String, Vec<Commands>> =
+            serde_json::from_value(data).context("Failed to parse Pi commands")?;
+        Ok(by_key.remove("commands").unwrap_or_default())
     }
 
     /// Reads the next line for Pi's stdout
@@ -195,4 +287,38 @@ pub fn from_test_command(program: &str, args: &[&str]) -> anyhow::Result<PiAgent
             lines: BufReader::new(stdout).lines(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_current_date_is_appended_without_losing_the_prompt() {
+        let prompt = "You are Tiles.\n\nBehavior:\n- Be concise.";
+        let result = with_current_date(prompt);
+
+        // the modelfile's prompt has to survive intact
+        assert!(result.starts_with("You are Tiles."));
+        assert!(result.contains("- Be concise."));
+
+        // and the date has to be a real one, not a placeholder
+        let year = Local::now().format("%Y").to_string();
+        assert!(result.contains("Current date: "), "{}", result);
+        assert!(result.contains(&year), "{}", result);
+        // the instruction matters as much as the date: without it the model
+        // still reached for a training-data date when building a query
+        assert!(result.contains("search query"));
+    }
+
+    #[test]
+    fn test_current_date_handles_an_empty_prompt() {
+        // modelfile.system is optional, so this is a real case
+        let result = with_current_date("");
+        assert!(
+            result.trim_start().starts_with("Current date: "),
+            "{}",
+            result
+        );
+    }
 }

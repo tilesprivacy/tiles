@@ -8,6 +8,10 @@ DIST_DIR="dist"
 MODELFILE_DIR="modelfiles"
 # Py server folder, which will be copied to installer
 SERVER_DIR="server"
+# Vendored node packages (Pi MCP adapter + deps), copied to installer
+VENDOR_DIR="vendor"
+# First-party plugins shipped with Tiles, copied to installer
+PLUGINS_DIR="plugins"
 # cargo build mode for production
 TARGET="release"
 
@@ -154,6 +158,25 @@ rm -rf "${DIST_DIR}/tmp/server/.venv"
 rm -rf "${DIST_DIR}/tmp/server/stack"
 
 cp -r "${MODELFILE_DIR}" "${DIST_DIR}/tmp/"
+
+cp -r "${VENDOR_DIR}" "${DIST_DIR}/tmp/"
+
+cp -r "${PLUGINS_DIR}" "${DIST_DIR}/tmp/"
+
+if [[ "${OS}" == "darwin" ]]; then
+  # Pi runs with hardened runtime and no disable-library-validation, so any
+  # .node it dlopens must carry our Team ID. Only sign the darwin binaries:
+  # codesign fails on the Linux ELF we ship for the release matrix.
+  echo "Signing vendored native modules..."
+  find "${DIST_DIR}/tmp/${VENDOR_DIR}" -name '*.darwin-*.node' -type f | while read -r node_bin; do
+    codesign --force \
+      --sign "$DEVELOPER_ID_APPLICATION" \
+      --options runtime \
+      --timestamp \
+      --strict \
+      "$node_bin"
+  done
+fi
 
 echo "📦 Creating ${OUT_NAME}.tar.gz..."
 tar --exclude-from=scripts/tar.exclude -czf "${DIST_DIR}/${OUT_NAME}.tar.gz" -C "${DIST_DIR}/tmp" .
