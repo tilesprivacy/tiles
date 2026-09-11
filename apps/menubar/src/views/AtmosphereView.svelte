@@ -52,8 +52,11 @@
       <Avatar nickname={name ?? session?.handle ?? "?"} src={session?.avatar} size={26} />
     {/snippet}
   </Row>
-  <!-- the sub said what the name was, this says where the account is -->
-  <p class="note">This account lives on the server below, and Tiles reads it there directly</p>
+  <!-- the sub said what the name was, this says what the account adds -->
+  <p class="note">
+    Your Atmosphere Account is connected and ready to share conversations through your AT Protocol
+    PDS.
+  </p>
 </Zone>
 
 <Zone label="Handle">

@@ -40,6 +40,17 @@
   const session = $derived.by<"none" | "running" | "paused">(() =>
     awake.value.paused ? "paused" : awake.value.active ? "running" : "none",
   );
+  const powerAllowed = $derived(
+    awake.value.power.pluggedIn ||
+      (awake.value.power.batteryPercent !== null && awake.value.power.batteryPercent > 10),
+  );
+  const powerCopy = $derived.by(() => {
+    const percent = awake.value.power.batteryPercent;
+    if (!powerAllowed && percent !== null) {
+      return `${percent}% battery · Connect a charger to enable`;
+    }
+    return "Available when plugged in or battery is above 10%";
+  });
 
   // a session with an end counts down to it, one without counts up from where
   // it started, and a held one reads whatever it was banked at
@@ -55,6 +66,7 @@
 
   function pick(seconds: number | null) {
     menu = false;
+    if (!powerAllowed) return;
     act("awake_start", { seconds });
   }
 
@@ -89,6 +101,8 @@
       ></button>
       <AwakeMenu
         {session}
+        available={powerAllowed}
+        note={powerCopy}
         onpick={pick}
         onpause={() => run("awake_pause")}
         onresume={() => run("awake_resume")}
@@ -99,11 +113,10 @@
     <button
       class="footer__cup"
       data-state={session}
-      disabled={!awake.value.ac}
       aria-label="Keep this Mac awake"
       aria-haspopup="menu"
       aria-expanded={menu}
-      title={awake.value.ac ? "Keep this Mac awake" : "Keeping awake needs mains power"}
+      title={powerAllowed ? "Keep this Mac awake" : powerCopy}
       onclick={() => (menu = !menu)}
     >
       <!-- steam is the run, so a held session has none -->
@@ -258,13 +271,6 @@
      still accounts for a session that exists, it is just not running */
   .footer__cup[data-state="paused"] {
     color: var(--signal);
-  }
-
-  /* the assertion is only good on mains, so off them this is not a control */
-  .footer__cup:disabled {
-    background: var(--steel);
-    color: var(--slate);
-    opacity: 0.5;
   }
 
   .footer__quit:hover {

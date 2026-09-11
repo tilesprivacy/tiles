@@ -2,6 +2,9 @@
   interface Props {
     /** a session exists, running or held */
     session: "none" | "running" | "paused";
+    /** new or resumed sessions need mains or enough battery */
+    available: boolean;
+    note: string;
     /** `null` is the open ended one */
     onpick: (seconds: number | null) => void;
     onpause: () => void;
@@ -9,7 +12,7 @@
     onstop: () => void;
   }
 
-  let { session, onpick, onpause, onresume, onstop }: Props = $props();
+  let { session, available, note, onpick, onpause, onresume, onstop }: Props = $props();
 
   const DURATIONS: { label: string; seconds: number | null }[] = [
     { label: "15 minutes", seconds: 15 * 60 },
@@ -22,6 +25,9 @@
 </script>
 
 <div class="menu" role="menu">
+  <p class="menu__note" data-alert={!available}>{note}</p>
+  <div class="menu__rule"></div>
+
   {#if session !== "none"}
     <!-- what to do with the session already going, above the lengths that
          would replace it -->
@@ -30,7 +36,12 @@
         Pause
       </button>
     {:else}
-      <button class="menu__item menu__item--lead" role="menuitem" onclick={onresume}>
+      <button
+        class="menu__item menu__item--lead"
+        role="menuitem"
+        disabled={!available}
+        onclick={onresume}
+      >
         Resume
       </button>
     {/if}
@@ -41,7 +52,12 @@
   {/if}
 
   {#each DURATIONS as duration (duration.label)}
-    <button class="menu__item" role="menuitem" onclick={() => onpick(duration.seconds)}>
+    <button
+      class="menu__item"
+      role="menuitem"
+      disabled={!available}
+      onclick={() => onpick(duration.seconds)}
+    >
       {duration.label}
     </button>
   {/each}
@@ -92,6 +108,25 @@
 
   .menu__item:hover {
     color: var(--signal);
+  }
+
+  .menu__item:disabled {
+    color: var(--slate);
+    opacity: 0.45;
+  }
+
+  .menu__note {
+    width: 190px;
+    margin: 0;
+    padding: 7px var(--pad-x);
+    color: var(--slate);
+    font-family: var(--font-ui);
+    font-size: var(--fs-meta);
+    line-height: 1.35;
+  }
+
+  .menu__note[data-alert="true"] {
+    color: var(--alert);
   }
 
   .menu__rule {

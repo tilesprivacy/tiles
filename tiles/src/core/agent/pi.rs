@@ -1,5 +1,5 @@
 //! Module that deals with Pi
-use crate::core::agent::types::{Commands, GetStateData, PiResponse};
+use crate::core::agent::types::{CommandType, Commands, GetStateData, PiResponse};
 use crate::core::plugin::{
     installed_extension_entrypoints, installed_skill_dirs, prune_copied_plugin_skills,
 };
@@ -192,7 +192,6 @@ impl PiReader {
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_owned();
-
         self.request_optional(writer, payload)
             .await?
             .ok_or_else(|| anyhow!("Pi returned no data for {}", request_type))
@@ -211,6 +210,9 @@ impl PiReader {
             .and_then(|value| value.as_str())
             .unwrap_or_default()
             .to_owned();
+        let expected_command: CommandType =
+            serde_json::from_value(Value::String(request_type.clone()))
+                .context("Unsupported Pi request type")?;
 
         writer
             .send_to_pi(payload)
@@ -223,7 +225,7 @@ impl PiReader {
                 return Err(anyhow!("Pi closed the connection during {}", request_type));
             };
             match serde_json::from_str::<PiResponse>(&line) {
-                Ok(PiResponse::Response(msg)) => {
+                Ok(PiResponse::Response(msg)) if msg.command == expected_command => {
                     if !msg.success {
                         return Err(anyhow!("Pi answered {} with a failure", request_type));
                     }
