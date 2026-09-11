@@ -53,7 +53,11 @@
     {/snippet}
   </Row>
   <!-- the sub said what the name was, this says what the account is -->
-  <p class="note">This Tiles account is generated and saved locally</p>
+  <p class="note">
+    Your Tiles Account is generated and secured on this device. It is ready for peer-to-peer sync,
+    remote inference, and other local-first features, using DIDs and UCANs for zero-trust
+    authentication and authorization.
+  </p>
 </Zone>
 
 <Zone label="Decentralized ID">
