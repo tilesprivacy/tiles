@@ -1,9 +1,10 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use axum::{
     Json, Router,
     extract::Path,
+    http::header::CONTENT_TYPE,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -31,6 +32,12 @@ pub struct AtLoginReq {
 struct PublicProfile {
     avatar: Option<String>,
 }
+
+/// Keep the status response small enough to render safely inside the WebView.
+const AVATAR_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Formats supported by WebKit and the menubar avatar implementation.
+const AVATAR_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 
 #[derive(Deserialize)]
 pub struct ShareSessionReq {
@@ -138,6 +145,48 @@ pub async fn logout() -> Result<impl IntoResponse, AppError> {
     Ok(ApiResponse::success(json!(resp)))
 }
 
+fn encode_avatar(mime: &str, bytes: &[u8]) -> Option<String> {
+    if !AVATAR_TYPES.contains(&mime) || bytes.len() as u64 > AVATAR_MAX_BYTES {
+        return None;
+    }
+
+    Some(format!(
+        "data:{mime};base64,{}",
+        data_encoding::BASE64.encode(bytes)
+    ))
+}
+
+/// Tauri's WebView intentionally blocks remote image URLs. Download the public
+/// avatar in the daemon and return the same bounded data URI used by the
+/// menubar instead of widening the app's content security policy.
+async fn fetch_avatar(client: &reqwest::Client, url: &str) -> Option<String> {
+    if !url.starts_with("https://") {
+        return None;
+    }
+
+    let response = client.get(url).send().await.ok()?;
+    if !response.status().is_success()
+        || response
+            .content_length()
+            .is_some_and(|len| len > AVATAR_MAX_BYTES)
+    {
+        return None;
+    }
+
+    let mime = response
+        .headers()
+        .get(CONTENT_TYPE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    let bytes = response.bytes().await.ok()?;
+
+    encode_avatar(&mime, &bytes)
+}
+
 pub async fn status() -> Result<impl IntoResponse, AppError> {
     let atproto_user = {
         let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
@@ -151,22 +200,29 @@ pub async fn status() -> Result<impl IntoResponse, AppError> {
         // Profile metadata is public and optional. An offline AppView must not
         // make a valid local login look disconnected.
         let avatar = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
+            .timeout(Duration::from_secs(3))
             .build()
         {
-            Ok(client) => match client
-                .get("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile")
-                .query(&[("actor", atproto_user.key.as_str())])
-                .send()
-                .await
-            {
-                Ok(response) if response.status().is_success() => response
-                    .json::<PublicProfile>()
+            Ok(client) => {
+                let avatar_url = match client
+                    .get("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile")
+                    .query(&[("actor", atproto_user.key.as_str())])
+                    .send()
                     .await
-                    .ok()
-                    .and_then(|profile| profile.avatar),
-                _ => None,
-            },
+                {
+                    Ok(response) if response.status().is_success() => response
+                        .json::<PublicProfile>()
+                        .await
+                        .ok()
+                        .and_then(|profile| profile.avatar),
+                    _ => None,
+                };
+
+                match avatar_url {
+                    Some(url) => fetch_avatar(&client, &url).await,
+                    None => None,
+                }
+            }
             Err(_) => None,
         };
 
@@ -177,5 +233,23 @@ pub async fn status() -> Result<impl IntoResponse, AppError> {
         })))
     } else {
         Err(AppError::NotFound("Not logged-in".to_string()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_avatar;
+
+    #[test]
+    fn avatar_is_encoded_as_a_webview_safe_data_uri() {
+        assert_eq!(
+            encode_avatar("image/png", &[0, 1, 2]),
+            Some("data:image/png;base64,AAEC".to_owned())
+        );
+    }
+
+    #[test]
+    fn non_image_avatar_is_rejected() {
+        assert_eq!(encode_avatar("text/html", b"not an image"), None);
     }
 }
