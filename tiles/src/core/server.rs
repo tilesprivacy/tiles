@@ -25,17 +25,19 @@ pub async fn start_server_daemon() -> Result<String> {
 
     let config_dir = DefaultProvider.get_config_dir()?;
     let data_dir = DefaultProvider.get_data_dir()?;
-    let mut server_dir = DefaultProvider.get_lib_dir()?;
+    let server_dir = DefaultProvider.get_lib_dir()?;
     let pid_file = config_dir.join("server.pid");
-    server_dir = server_dir.join("server");
     let stdout_log = OpenOptions::new()
         .append(true)
         .open(data_dir.join("logs/server.out.log"))?;
     let stderr_log = OpenOptions::new()
         .append(true)
         .open(data_dir.join("logs/server.err.log"))?;
-    let server_path = server_dir.join("stack_export_prod/app-server/bin/python");
-    server_dir.pop();
+    let server_path = if cfg!(debug_assertions) {
+        server_dir.join("server/.venv/bin/python3")
+    } else {
+        server_dir.join("server/stack_export_prod/app-server/bin/python")
+    };
     let child = unsafe {
         Command::new(server_path)
             .args(["-m", "server.main"])

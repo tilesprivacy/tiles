@@ -236,6 +236,8 @@ mod tests {
                 "-c",
                 r#"read request
   printf '{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false}}\n'
+  # A delayed duplicate must not be mistaken for the following get_state reply.
+  printf '{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false}}\n'
     read request
  printf '{"type": "response", "command": "get_state", "success": true, "data": {"sessionId": "session_id", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": true}}\n'
   "#,

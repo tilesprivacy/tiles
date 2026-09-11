@@ -28,6 +28,11 @@ pub struct AtLoginReq {
 }
 
 #[derive(Deserialize)]
+struct PublicProfile {
+    avatar: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct ShareSessionReq {
     /// A private share is encrypted before it goes to the PDS, and the key
     /// rides in the link's fragment rather than in the record
@@ -134,15 +139,41 @@ pub async fn logout() -> Result<impl IntoResponse, AppError> {
 }
 
 pub async fn status() -> Result<impl IntoResponse, AppError> {
-    let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    let atproto_user = {
+        let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
+            .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
-    if let Some(atproto_user) = atproto::fetch_logged_in_data(&user_db_conn)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?
-    {
+        atproto::fetch_logged_in_data(&user_db_conn)
+            .map_err(|e| AppError::CannotProcess(e.to_string()))?
+    };
+
+    if let Some(atproto_user) = atproto_user {
+        // Profile metadata is public and optional. An offline AppView must not
+        // make a valid local login look disconnected.
+        let avatar = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+        {
+            Ok(client) => match client
+                .get("https://public.api.bsky.app/xrpc/app.bsky.actor.getProfile")
+                .query(&[("actor", atproto_user.key.as_str())])
+                .send()
+                .await
+            {
+                Ok(response) if response.status().is_success() => response
+                    .json::<PublicProfile>()
+                    .await
+                    .ok()
+                    .and_then(|profile| profile.avatar),
+                _ => None,
+            },
+            Err(_) => None,
+        };
+
         Ok(ApiResponse::success(json!({
             "handle": atproto_user.handle,
-            "did": atproto_user.key
+            "did": atproto_user.key,
+            "avatar": avatar
         })))
     } else {
         Err(AppError::NotFound("Not logged-in".to_string()))

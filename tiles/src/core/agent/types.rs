@@ -254,7 +254,7 @@ pub struct PiResponseMessage {
     pub success: bool,
     pub data: Option<Value>,
 }
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq, Eq)]
 pub enum CommandType {
     #[serde(rename = "status")]
     Status,
@@ -274,6 +274,10 @@ pub enum CommandType {
     Skills,
     #[serde(rename = "get_commands")]
     GetCommands,
+    #[serde(rename = "get_state")]
+    GetState,
+    #[serde(rename = "new_session")]
+    NewSession,
     /// Pi acks every `prompt` with this.
     #[serde(rename = "prompt")]
     Prompt,
