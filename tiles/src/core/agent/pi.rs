@@ -91,6 +91,7 @@ pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> 
         command
             .env("PI_CODING_AGENT_DIR", pi_agent_dir)
             .env("PI_OFFLINE", "true")
+            .env("PATH", usable_path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .pre_exec(|| {
@@ -120,6 +121,39 @@ pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> 
         },
         writer: PiWriter { stdin: pi_stdin },
     })
+}
+
+/// The PATH Pi's tools run with.
+///
+/// An app launched from Finder inherits launchd's bare
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, where no user-installed tool exists: not
+/// `caldir`, not brew's binaries, not even `tiles`. Pi's bash then answers
+/// `command not found` for tools that are plainly on disk, and the model
+/// wanders the filesystem hunting for them. The shell profile never runs for a
+/// GUI app, so the standard install locations are appended here instead.
+fn usable_path() -> String {
+    let inherited = std::env::var("PATH").unwrap_or_default();
+    let mut path = inherited.clone();
+
+    let mut extras = vec![
+        String::from("/usr/local/bin"),
+        String::from("/opt/homebrew/bin"),
+    ];
+    if let Some(home) = std::env::home_dir() {
+        extras.push(home.join(".local/bin").to_string_lossy().into_owned());
+    }
+
+    for extra in extras {
+        let already = inherited.split(':').any(|entry| entry == extra);
+        if !already {
+            if !path.is_empty() {
+                path.push(':');
+            }
+            path.push_str(&extra);
+        }
+    }
+
+    path
 }
 
 /// Appends today's date to the system prompt.
