@@ -398,4 +398,19 @@ mod tests {
         let tag = get_latest_version(mock_server.uri().as_str()).await;
         assert!(tag.is_err())
     }
+
+    /// The updater once "upgraded" canary builds to the older stable release,
+    /// because canary still carried the last stable's version. The downgraded
+    /// binary then met a database schema from the future and died on every
+    /// start. A canary version must outrank the stable it was cut after, and
+    /// still lose to the release that follows it.
+    #[test]
+    fn a_canary_build_outranks_stable_and_yields_to_the_next_release() {
+        let canary = Version::parse(env!("CARGO_PKG_VERSION")).unwrap();
+        let stable = Version::parse("0.4.19").unwrap();
+        let next = Version::parse("0.4.20").unwrap();
+
+        assert!(canary.cmp_precedence(&stable).is_gt());
+        assert!(next.cmp_precedence(&canary).is_gt());
+    }
 }
