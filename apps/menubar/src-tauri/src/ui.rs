@@ -13,7 +13,9 @@ const SHOW_UI: &str = "TILES_SHOW_UI";
 
 const WIDTH: f64 = 1100.0;
 const HEIGHT: f64 = 760.0;
-const MIN_WIDTH: f64 = 640.0;
+/// the chat ui folds its sidebar into an overlay under 768px, which is a
+/// phone layout, not a window one
+const MIN_WIDTH: f64 = 800.0;
 const MIN_HEIGHT: f64 = 480.0;
 
 /// --void, so the window is never white before the page paints
