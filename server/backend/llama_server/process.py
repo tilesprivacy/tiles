@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -71,6 +73,103 @@ def resolve_llama_server_binary() -> str:
         "server/bin/llama-server, or install llama-server on PATH. "
         "See scripts/fetch_llama_server.sh."
     )
+
+
+# best first; each is a dir next to llama-server with the ggml backend and,
+# for cuda, its runtime libs
+_GPU_VARIANTS = ("cuda_v13", "cuda_v12", "vulkan")
+_DEVICE_LINE = re.compile(r"^\s*(CUDA|Vulkan)\d+:", re.MULTILINE)
+_selected_backend: dict[str, Path | None] = {}
+
+
+def _cuda_driver_version() -> int | None:
+    """CUDA API version of the installed driver (e.g. 13040), None without one."""
+    try:
+        libcuda = ctypes.CDLL("libcuda.so.1")
+    except OSError:
+        return None
+    version = ctypes.c_int()
+    try:
+        if libcuda.cuDriverGetVersion(ctypes.byref(version)) != 0:
+            return None
+    except AttributeError:
+        return None
+    return version.value
+
+
+def _backend_library(variant_dir: Path) -> Path | None:
+    backend = "cuda" if variant_dir.name.startswith("cuda") else variant_dir.name
+    candidate = variant_dir / f"libggml-{backend}.so"
+    return candidate if candidate.is_file() else None
+
+
+def _probe_backend(binary: str, backend_lib: Path) -> bool:
+    """True when llama-server sees a GPU through this backend."""
+    env = os.environ.copy()
+    env["GGML_BACKEND_PATH"] = str(backend_lib)
+    try:
+        result = subprocess.run(
+            [binary, "--list-devices"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Probing %s failed: %s", backend_lib.parent.name, exc)
+        return False
+    return _DEVICE_LINE.search(result.stdout + result.stderr) is not None
+
+
+def select_gpu_backend(binary: str) -> Path | None:
+    """Pick the ggml GPU backend to load, or None for CPU.
+
+    cuda variants need a driver of that major; every candidate is confirmed
+    with --list-devices. TILES_LLAMA_VARIANT forces one, or cpu.
+    """
+    if sys.platform != "linux":
+        return None
+    if binary in _selected_backend:
+        return _selected_backend[binary]
+
+    bin_dir = Path(binary).resolve().parent
+    forced = os.environ.get("TILES_LLAMA_VARIANT", "").strip()
+    if forced == "cpu":
+        logger.info("TILES_LLAMA_VARIANT=cpu: not loading a GPU backend")
+        _selected_backend[binary] = None
+        return None
+    candidates = [forced] if forced else list(_GPU_VARIANTS)
+
+    driver_version: int | None = None
+    driver_checked = False
+    selected: Path | None = None
+    for variant in candidates:
+        backend_lib = _backend_library(bin_dir / variant)
+        if backend_lib is None:
+            if forced:
+                logger.warning("TILES_LLAMA_VARIANT=%s but %s has no backend library", variant, bin_dir / variant)
+            continue
+        if not forced and variant.startswith("cuda_v"):
+            if not driver_checked:
+                driver_version = _cuda_driver_version()
+                driver_checked = True
+            required = int(variant[len("cuda_v"):]) * 1000
+            if driver_version is None or driver_version < required:
+                logger.info(
+                    "Skipping %s: NVIDIA driver supports CUDA %s",
+                    variant,
+                    "none" if driver_version is None else f"{driver_version // 1000}.{driver_version % 1000 // 10}",
+                )
+                continue
+        if _probe_backend(binary, backend_lib):
+            selected = backend_lib
+            break
+        logger.warning("GPU backend %s found no usable device; trying the next one", variant)
+
+    if selected is None and any((bin_dir / v).is_dir() for v in _GPU_VARIANTS):
+        logger.warning("No usable GPU backend; llama-server will run on CPU")
+    _selected_backend[binary] = selected
+    return selected
 
 
 def _config_key(llama_config: dict[str, Any]) -> str:
@@ -333,6 +432,11 @@ def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
         else:
             prev = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{lib_dir}:{prev}" if prev else lib_dir
+            # not on LD_LIBRARY_PATH too, ggml would register the gpu twice
+            backend_lib = select_gpu_backend(binary)
+            if backend_lib is not None:
+                env["GGML_BACKEND_PATH"] = str(backend_lib)
+                logger.info("Using %s GPU backend (%s)", backend_lib.parent.name, backend_lib)
         log_dir = _resolve_log_dir()
         log_dir.mkdir(parents=True, exist_ok=True)
         stdout_log = open(log_dir / "llama-server.out.log", "ab")
