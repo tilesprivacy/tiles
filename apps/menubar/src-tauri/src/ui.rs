@@ -39,11 +39,30 @@ fn url(path: &str) -> Result<WebviewUrl, String> {
     }
 }
 
+/// webkitgtk turns gnome's text scaling into the page's device pixel ratio,
+/// so a window has to grow by the same factor to give the page the width it
+/// gets on macos
+#[cfg(target_os = "linux")]
+fn text_scale() -> f64 {
+    use gtk::prelude::*;
+
+    gtk::Settings::default()
+        .map(|settings| settings.gtk_xft_dpi() as f64 / 1024.0 / 96.0)
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or(1.0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn text_scale() -> f64 {
+    1.0
+}
+
 fn build(app: &AppHandle, path: &str) -> Result<WebviewWindow, String> {
+    let scale = text_scale();
     let window = WebviewWindowBuilder::new(app, LABEL, url(path)?)
         .title("Tiles")
-        .inner_size(WIDTH, HEIGHT)
-        .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
+        .inner_size(WIDTH * scale, HEIGHT * scale)
+        .min_inner_size(MIN_WIDTH * scale, MIN_HEIGHT * scale)
         .background_color(GROUND)
         .visible(false)
         .build()
