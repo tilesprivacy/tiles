@@ -50,9 +50,55 @@ fn build(app: &AppHandle, path: &str) -> Result<WebviewWindow, String> {
         .map_err(|e| e.to_string())?;
 
     follow_active_space(&window);
+    style_titlebar(&window);
 
     Ok(window)
 }
+
+/// gtk draws the title bar itself on wayland. paint it the page's own ground
+/// and drop the title, so it reads as part of the window
+#[cfg(target_os = "linux")]
+fn style_titlebar(window: &WebviewWindow) {
+    use gtk::prelude::*;
+
+    const CSS: &str = "
+        .titlebar, headerbar {
+            background: #111111;
+            color: #d4d4d4;
+            border: none;
+            box-shadow: none;
+            min-height: 38px;
+        }
+        .titlebar .title, headerbar .title { opacity: 0; }
+        .titlebar button, headerbar button {
+            background: transparent;
+            border: none;
+            box-shadow: none;
+            color: #d4d4d4;
+        }
+        .titlebar button:hover, headerbar button:hover { background: rgba(255, 255, 255, 0.08); }
+    ";
+
+    let Ok(gtk_window) = window.gtk_window() else {
+        return;
+    };
+    let Some(screen) = WidgetExt::screen(&gtk_window) else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    if let Err(err) = provider.load_from_data(CSS.as_bytes()) {
+        eprintln!("[ui] title bar css rejected: {err}");
+        return;
+    }
+    gtk::StyleContext::add_provider_for_screen(
+        &screen,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn style_titlebar(_window: &WebviewWindow) {}
 
 /// a window belongs to the space it was made on, so without this the user gets
 /// dragged to it instead of it coming to them.
