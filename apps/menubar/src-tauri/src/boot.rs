@@ -13,12 +13,25 @@ use tauri::AppHandle;
 
 use crate::{daemon, lifeline, paths};
 
-const CLI: &str = "/usr/local/bin/tiles";
 const POLL: Duration = Duration::from_millis(300);
 const GIVE_UP: Duration = Duration::from_secs(20);
 
-fn cli() -> String {
-    std::env::var("TILES_CLI_BIN").unwrap_or_else(|_| CLI.to_owned())
+fn cli() -> PathBuf {
+    if let Some(path) = std::env::var_os("TILES_CLI_BIN") {
+        return PathBuf::from(path);
+    }
+
+    let mut candidates = vec![PathBuf::from("/usr/local/bin/tiles")];
+    if cfg!(target_os = "linux")
+        && let Some(home) = std::env::home_dir()
+    {
+        candidates.insert(0, home.join(".local/bin/tiles"));
+    }
+
+    candidates
+        .into_iter()
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from("tiles"))
 }
 
 /// A daemon that dies during startup is the one that most needs its words

@@ -143,8 +143,15 @@ pub const PY_PORT: u32 = 6969;
 pub const REMOTE_BOUND_PORT: u32 = 9271;
 
 /// Bundled runtime directories under lib_dir removed on default uninstall.
-pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] =
-    &["server", "modelfiles", "pi", "models", "vendor", "plugins"];
+pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &[
+    "server",
+    "modelfiles",
+    "pi",
+    "models",
+    "vendor",
+    "plugins",
+    "ui",
+];
 
 pub trait ConfigProvider {
     fn get_config_dir(&self) -> Result<PathBuf>;

@@ -2,9 +2,6 @@
 
 use tauri::utils::config::Color;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
-use tauri_nspanel::objc2::msg_send;
-use tauri_nspanel::objc2::runtime::AnyObject;
-use tauri_nspanel::objc2_app_kit::NSWindowCollectionBehavior;
 
 use crate::panel;
 
@@ -60,7 +57,12 @@ fn build(app: &AppHandle, path: &str) -> Result<WebviewWindow, String> {
 /// a window belongs to the space it was made on, so without this the user gets
 /// dragged to it instead of it coming to them.
 ///
+#[cfg(target_os = "macos")]
 fn follow_active_space(window: &WebviewWindow) {
+    use tauri_nspanel::objc2::msg_send;
+    use tauri_nspanel::objc2::runtime::AnyObject;
+    use tauri_nspanel::objc2_app_kit::NSWindowCollectionBehavior;
+
     let Ok(ns_window) = window.ns_window() else {
         return;
     };
@@ -72,6 +74,9 @@ fn follow_active_space(window: &WebviewWindow) {
         let _: () = msg_send![ns_window, setCollectionBehavior: behavior];
     }
 }
+
+#[cfg(not(target_os = "macos"))]
+fn follow_active_space(_window: &WebviewWindow) {}
 
 /// deliberately no app activation here. both setActivationPolicy and
 /// activateIgnoringOtherApps send macOS off to whichever space the app counts
@@ -99,9 +104,11 @@ pub fn open(app: &AppHandle, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// the daemon decides whether the window belongs on screen at startup
+/// the daemon decides whether the window belongs on screen at startup. a hand
+/// launch on linux is the ask itself
 pub fn init(app: &AppHandle) {
-    if std::env::var_os(SHOW_UI).is_none() {
+    let hand_launched = cfg!(target_os = "linux") && !crate::lifeline::is_supervised();
+    if std::env::var_os(SHOW_UI).is_none() && !hand_launched {
         return;
     }
 
@@ -112,6 +119,7 @@ pub fn init(app: &AppHandle) {
 
 /// the dock icon was clicked. a window that is merely buried comes forward
 /// where it was left, only a closed one goes back to the start
+#[cfg(target_os = "macos")]
 pub fn reopen(app: &AppHandle) {
     let result = match app.get_webview_window(LABEL) {
         Some(window) => window

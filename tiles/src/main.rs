@@ -180,6 +180,16 @@ enum SystemCommands {
 
     /// Run Tiles in the background from login
     Service(ServiceArgs),
+
+    /// Open the Tiles app, or the chat in your browser
+    Ui(UiArgs),
+}
+
+#[derive(Debug, Args)]
+struct UiArgs {
+    /// Open the chat UI in the default browser instead of the app window
+    #[arg(long)]
+    browser: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -541,6 +551,17 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::Account(account_args))) => {
             commands::run_account_commands(account_args).await?;
+        }
+        Some(Commands::System(SystemCommands::Ui(ui_args))) => {
+            start_cmd(None)
+                .await
+                .inspect_err(|e| eprintln!("Daemon starting failed, reason: {:?}", e))?;
+            if ui_args.browser {
+                println!("Opening {}", core::ui::URL);
+                core::ui::open_in_browser(core::ui::URL)?;
+            } else {
+                core::ui::launch()?;
+            }
         }
         Some(Commands::System(SystemCommands::Update)) => {
             println!("Checking for updates...");

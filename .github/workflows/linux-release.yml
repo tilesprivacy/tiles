@@ -1,6 +1,6 @@
 name: Linux Release
 
-# Builds the Linux (x86_64) tarball whenever any tag is pushed (stable, rc,
+# builds the Linux (x86_64) tarball whenever any tag is pushed (stable, rc,
 # nightly) and attaches it to the tag's GitHub Release. One tarball ships
 # every GPU backend; llama-server picks one at runtime.
 # Can also be run manually (Actions tab -> Run workflow) from a branch
@@ -54,12 +54,21 @@ jobs:
 
       - name: Install native dependencies and tools
         run: |
-          sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config jq
+          sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config jq \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
           # venvstacks 0.8.0 final was never uploaded to PyPI; install from the git tag
           pipx install "venvstacks @ git+https://github.com/lmstudio-ai/venvstacks.git@0.8.0"
 
       - name: Install just
         run: command -v just || cargo install just
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: pnpm/action-setup@v4
+        with:
+          package_manager_cache: false
 
       - name: Fetch Pi linux tarball
         run: |
@@ -97,7 +106,7 @@ jobs:
           sha256sum tiles-v*.tar.gz > checksums.txt
           cat checksums.txt
 
-      # Manual (non-tag) runs: the tarball already lands on the run page from
+      # manual (non-tag) runs: the tarball already lands on the run page from
       # build-linux; only the checksums are unique to this job.
       - name: Upload checksums
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}

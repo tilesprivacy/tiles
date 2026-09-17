@@ -22,10 +22,10 @@ use axum::{
     extract::{Query, State},
     http::StatusCode,
     http::{
-        HeaderValue, Method,
+        HeaderMap, HeaderValue, Method,
         header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE},
     },
-    response::IntoResponse,
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use axum_macros::debug_handler;
@@ -43,6 +43,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
 pub mod account;
 pub mod agent;
@@ -186,8 +187,21 @@ pub async fn start_cmd(port: Option<u32>) -> Result<()> {
 pub async fn stop_cmd() -> Result<()> {
     stop_server(None).await
 }
-async fn root(State(state): State<Arc<AppState>>) -> String {
-    state.vsn.clone()
+/// the version for tools, the chat ui for a browser
+async fn root(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    let wants_html = headers
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"));
+
+    if wants_html && let Some(dir) = ui::web_dir() {
+        match tokio::fs::read(dir.join("index.html")).await {
+            Ok(index) => return Html(index).into_response(),
+            Err(err) => log::warn!("Could not read the chat UI index: {err}"),
+        }
+    }
+
+    state.vsn.clone().into_response()
 }
 
 // allow zombie, since this process is expected to be
@@ -270,8 +284,12 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
 /// since nothing here asks for credentials.
 fn cors_layer() -> CorsLayer {
     let origins = [
-        // Tauri webviews
+        // tauri webviews, macOS then linux
         "tauri://localhost",
+        "http://tauri.localhost",
+        // the chat UI served by the daemon
+        "http://localhost:1729",
+        "http://127.0.0.1:1729",
         // `npm run dev`
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -325,8 +343,19 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
         .merge(session_router())
         .merge(atproto_router())
         // .layer(service)
-        .layer(cors_layer())
-        .with_state(shared_state.clone());
+        .layer(cors_layer());
+
+    // deep links like /chat/<id> fall back to the SPA index
+    let app = match ui::web_dir() {
+        Some(dir) => {
+            info!("Serving the chat UI from {}", dir.display());
+            let index = ServeFile::new(dir.join("index.html"));
+            app.fallback_service(ServeDir::new(dir).fallback(index))
+        }
+        None => app,
+    };
+
+    let app = app.with_state(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
