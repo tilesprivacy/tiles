@@ -1,11 +1,9 @@
-//! where the daemon keeps the user's data, and handing that folder to Finder
+//! where the daemon keeps the user's data, and handing that folder to the file manager
 
 use std::path::PathBuf;
 
 use crate::daemon;
 use tauri::AppHandle;
-use tauri_nspanel::objc2_app_kit::NSWorkspace;
-use tauri_nspanel::objc2_foundation::{NSString, NSURL};
 
 /// `data.path` is blank until the user moves it, and the daemon resolves that
 /// blank against its own dirs without publishing the result anywhere. this is
@@ -52,19 +50,41 @@ pub async fn data_dir() -> Result<String, String> {
         .map_err(|_| "the data path is not utf-8".to_owned())
 }
 
-/// Finder takes focus, so the panel is gone by the time the window opens
+#[cfg(target_os = "macos")]
+fn reveal(path: &str) -> Result<(), String> {
+    use tauri_nspanel::objc2_app_kit::NSWorkspace;
+    use tauri_nspanel::objc2_foundation::{NSString, NSURL};
+
+    let url = NSURL::fileURLWithPath(&NSString::from_str(path));
+    NSWorkspace::sharedWorkspace()
+        .openURL(&url)
+        .then_some(())
+        .ok_or_else(|| "Finder refused the folder".to_owned())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reveal(path: &str) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+
+    Command::new("xdg-open")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(drop)
+        .map_err(|err| format!("xdg-open failed: {err}"))
+}
+
+/// the file manager takes focus, so the panel is gone by the time the window opens
 #[tauri::command]
 pub fn reveal_path(app: AppHandle, path: String) -> Result<(), String> {
     if !std::path::Path::new(&path).is_dir() {
         return Err(format!("{path} is not there"));
     }
 
-    let url = NSURL::fileURLWithPath(&NSString::from_str(&path));
-    let opened = NSWorkspace::sharedWorkspace().openURL(&url);
+    let opened = reveal(&path);
     // the panel hides on blur, but only once something else takes key
     crate::panel::hide(&app);
-
     opened
-        .then_some(())
-        .ok_or_else(|| "Finder refused the folder".to_owned())
 }

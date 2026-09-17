@@ -2,22 +2,60 @@ mod account;
 mod atproto;
 mod awake;
 mod boot;
-mod clipboard;
 mod daemon;
 mod inference;
 mod lifeline;
-mod panel;
 mod paths;
-mod quit;
 mod remote;
 mod sessions;
-mod tray;
 mod ui;
+
+#[cfg(target_os = "macos")]
+mod clipboard;
+#[cfg(target_os = "macos")]
+mod panel;
+#[cfg(target_os = "macos")]
+#[path = "power_macos.rs"]
+mod power;
+#[cfg(target_os = "macos")]
+mod quit;
+#[cfg(target_os = "macos")]
+mod tray;
+
+#[cfg(target_os = "linux")]
+#[path = "clipboard_linux.rs"]
+mod clipboard;
+#[cfg(target_os = "linux")]
+#[path = "panel_linux.rs"]
+mod panel;
+#[cfg(target_os = "linux")]
+#[path = "power_linux.rs"]
+mod power;
+#[cfg(target_os = "linux")]
+#[path = "quit_linux.rs"]
+mod quit;
+#[cfg(target_os = "linux")]
+#[path = "tray_linux.rs"]
+mod tray;
 
 use tauri::{Manager, RunEvent, WindowEvent};
 
+/// webkitgtk's dmabuf renderer trips explicit sync on nvidia under wayland
+/// and the compositor disconnects us. must run before gtk initialises
+#[cfg(target_os = "linux")]
+fn accommodate_nvidia_wayland() {
+    let nvidia = std::path::Path::new("/proc/driver/nvidia").exists();
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    if nvidia && wayland && std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
+    }
+}
+
 fn main() {
-    tauri::Builder::default()
+    #[cfg(target_os = "linux")]
+    accommodate_nvidia_wayland();
+
+    let builder = tauri::Builder::default()
         // has to be registered first, so a second copy exits before it builds a
         // status item of its own. a daemon-owned copy displaces a manual one
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -28,8 +66,12 @@ fn main() {
 
             // launching again is someone asking for the window back
             let _ = ui::open(app, "/");
-        }))
-        .plugin(tauri_nspanel::init())
+        }));
+
+    #[cfg(target_os = "macos")]
+    let builder = builder.plugin(tauri_nspanel::init());
+
+    builder
         .invoke_handler(tauri::generate_handler![
             panel::hide_panel,
             panel::panel_ready,
@@ -59,7 +101,9 @@ fn main() {
             // first, so a daemon that dies mid-setup still takes us with it
             lifeline::init(app.handle());
             panel::init(app.handle())?;
-            tray::init(app.handle())?;
+            if let Err(err) = tray::init(app.handle()) {
+                eprintln!("[tray] no status item: {err}");
+            }
             // before the watcher, its first tick already reports all three
             inference::init(app.handle());
             account::init(app.handle());
