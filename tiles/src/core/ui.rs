@@ -1,4 +1,4 @@
-//! The menu bar app, which the daemon owns for the length of its own life
+//! the desktop app, which the daemon owns for the length of its own life
 //!
 //! The child is spawned with a piped stdin that nothing ever writes to. The app
 //! blocks a thread on reading it, so the pipe closing is what tells the app the
@@ -20,7 +20,12 @@ use tokio::{process::Command, sync::Notify};
 
 use crate::utils::config::{ConfigProvider, DefaultProvider, get_ui_config};
 
+#[cfg(target_os = "macos")]
 const BUNDLE_EXEC: &str = "Tiles.app/Contents/MacOS/tiles-menubar";
+#[cfg(not(target_os = "macos"))]
+const BINARY: &str = "tiles-menubar";
+
+pub const URL: &str = "http://127.0.0.1:1729/";
 
 /// Set on the child so it knows to watch the lifeline. A hand-launched app has
 /// no parent to outlive and leaves the watcher dormant
@@ -60,28 +65,87 @@ impl Ui {
     }
 }
 
-/// Release runs the installed bundle, debug the one `tauri build` leaves in the
+/// release runs the installed app, debug the one a build leaves in the
 /// workspace target. Neither is required to exist
-fn resolve() -> Option<PathBuf> {
+pub fn resolve() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("TILES_MENUBAR_BIN") {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path);
     }
 
-    let installed = PathBuf::from("/Applications").join(BUNDLE_EXEC);
-    if installed.is_file() {
-        return Some(installed);
-    }
+    #[cfg(target_os = "macos")]
+    let candidates = [
+        Some(PathBuf::from("/Applications").join(BUNDLE_EXEC)),
+        cfg!(debug_assertions)
+            .then(|| std::env::current_dir().ok())
+            .flatten()
+            .map(|dir| dir.join("target/debug/bundle/macos").join(BUNDLE_EXEC)),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let candidates = [
+        DefaultProvider
+            .get_lib_dir()
+            .ok()
+            .map(|dir| dir.join(BINARY)),
+        cfg!(debug_assertions)
+            .then(|| std::env::current_dir().ok())
+            .flatten()
+            .map(|dir| dir.join("target/debug").join(BINARY)),
+    ];
 
-    if cfg!(debug_assertions) {
-        let built = std::env::current_dir()
-            .ok()?
-            .join("target/debug/bundle/macos")
-            .join(BUNDLE_EXEC);
-        return built.is_file().then_some(built);
-    }
+    candidates.into_iter().flatten().find(|path| path.is_file())
+}
 
-    None
+/// the chat ui's static build, for serving to a browser
+pub fn web_dir() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var_os("TILES_UI_DIR").map(PathBuf::from),
+        DefaultProvider.get_lib_dir().ok().map(|dir| dir.join("ui")),
+        cfg!(debug_assertions)
+            .then(|| std::env::current_dir().ok())
+            .flatten()
+            .map(|dir| dir.join("apps/menubar/dist")),
+    ];
+
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|dir| dir.join("index.html").is_file())
+}
+
+fn has_display() -> bool {
+    !cfg!(target_os = "linux")
+        || std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var_os("DISPLAY").is_some()
+}
+
+pub fn open_in_browser(url: &str) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(opener)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("Failed to open {url} with {opener}"))?;
+    Ok(())
+}
+
+/// a running copy takes the argv through its single-instance lock and shows
+/// its window
+pub fn launch() -> Result<()> {
+    let bin = resolve().context("The Tiles app is not installed")?;
+    std::process::Command::new(&bin)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .with_context(|| format!("Failed to start {}", bin.display()))?;
+    Ok(())
 }
 
 /// Off by default in debug, where a stale bundle would win the app's
@@ -124,11 +188,12 @@ fn spawn(bin: &PathBuf, show_ui: bool) -> Result<tokio::process::Child> {
 
 /// Nothing here is fatal to the daemon, a headless daemon is a working daemon
 pub fn start(ui: Arc<Ui>, show_ui: bool) {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
     if !enabled_by_config() {
         log::info!("Menu bar app disabled by config");
+        return;
+    }
+    if !has_display() {
+        log::info!("No display, running headless");
         return;
     }
     let Some(bin) = resolve() else {

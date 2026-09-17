@@ -173,6 +173,7 @@ MODELFILE_DIR="${LIB_DIR}/modelfiles"  # Modelfile server folder
 PI_DIR="${LIB_DIR}/pi"
 VENDOR_DIR="${LIB_DIR}/vendor"        # Vendored node packages for Pi extensions
 PLUGINS_DIR="${LIB_DIR}/plugins"      # First-party plugins shipped with Tiles
+UI_DIR="${LIB_DIR}/ui"                # Chat UI, served by the daemon to a browser
 
 TMPDIR="$(mktemp -d)"
 RELEASE_TAG="${VERSION}"
@@ -261,6 +262,39 @@ if [ -d "${TMPDIR}/plugins" ] && [ -n "$(ls -A "${TMPDIR}/plugins" 2>/dev/null)"
   cp -r "${TMPDIR}/plugins"/* "${PLUGINS_DIR}/"
 fi
 
+
+if [[ "${OS}" == "linux" && -f "${TMPDIR}/tiles-menubar" ]]; then
+  log "Installing the desktop app ..."
+
+  install -m 755 "${TMPDIR}/tiles-menubar" "${LIB_DIR}/tiles-menubar"
+
+  rm -rf "${UI_DIR}"
+  mkdir -p "${UI_DIR}"
+  cp -r "${TMPDIR}/ui"/* "${UI_DIR}/"
+
+  # a launcher entry, so the app shows up in the desktop's app grid
+  if [[ "$(id -u)" != "0" ]]; then
+    APPS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
+    ICONS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/icons/hicolor/128x128/apps"
+  else
+    APPS_DIR="/usr/local/share/applications"
+    ICONS_DIR="/usr/local/share/icons/hicolor/128x128/apps"
+  fi
+  mkdir -p "${APPS_DIR}" "${ICONS_DIR}"
+  install -m 644 "${TMPDIR}/tiles.png" "${ICONS_DIR}/tiles.png"
+  cat > "${APPS_DIR}/tiles.desktop" <<DESKTOP
+[Desktop Entry]
+Type=Application
+Name=Tiles
+Comment=A local-first, collaborative AI assistant
+Exec=${LIB_DIR}/tiles-menubar
+Icon=tiles
+Terminal=false
+Categories=Utility;Chat;
+StartupWMClass=tiles-menubar
+DESKTOP
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "${APPS_DIR}" 2>/dev/null || true
+fi
 
 log "📦 Installing Python server to ${SERVER_DIR}..."
 rm -rf "${SERVER_DIR}"
