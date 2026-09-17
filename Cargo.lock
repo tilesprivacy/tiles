@@ -8124,6 +8124,7 @@ dependencies = [
  "arboard",
  "core-foundation 0.10.1",
  "data-encoding",
+ "gtk",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
