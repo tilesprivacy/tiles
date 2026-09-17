@@ -405,3 +405,188 @@ def test_log_dir_prefers_the_dev_layout(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
 
     assert _resolve_log_dir() == dev_logs
+
+
+# gpu backend selection, with the driver and the --list-devices probe faked
+
+
+def _variant_layout(tmp_path: Path, *variants: str) -> str:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    binary = bin_dir / "llama-server"
+    binary.write_bytes(b"x")
+    for variant in variants:
+        backend = "cuda" if variant.startswith("cuda") else variant
+        (bin_dir / variant).mkdir()
+        (bin_dir / variant / f"libggml-{backend}.so").write_bytes(b"x")
+    return str(binary)
+
+
+def _select(binary: str, driver: int | None, probe_ok=lambda lib: True, monkeypatch=None):
+    process._selected_backend.clear()
+    with (
+        patch("server.backend.llama_server.process.sys.platform", "linux"),
+        patch("server.backend.llama_server.process._cuda_driver_version", return_value=driver),
+        patch("server.backend.llama_server.process._probe_backend", side_effect=lambda b, lib: probe_ok(lib)) as probe,
+    ):
+        selected = process.select_gpu_backend(binary)
+    return selected, probe
+
+
+def test_select_prefers_cuda13_on_a_cuda13_driver(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TILES_LLAMA_VARIANT", raising=False)
+    binary = _variant_layout(tmp_path, "cuda_v12", "cuda_v13", "vulkan")
+
+    selected, probe = _select(binary, driver=13040)
+
+    assert selected == tmp_path / "bin" / "cuda_v13" / "libggml-cuda.so"
+    assert probe.call_count == 1
+
+
+def test_select_skips_cuda13_on_a_cuda12_driver_without_probing(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TILES_LLAMA_VARIANT", raising=False)
+    binary = _variant_layout(tmp_path, "cuda_v12", "cuda_v13", "vulkan")
+
+    selected, probe = _select(binary, driver=12080)
+
+    assert selected == tmp_path / "bin" / "cuda_v12" / "libggml-cuda.so"
+    probed = [call.args[1].parent.name for call in probe.call_args_list]
+    assert probed == ["cuda_v12"]
+
+
+def test_select_falls_back_to_vulkan_without_an_nvidia_driver(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TILES_LLAMA_VARIANT", raising=False)
+    binary = _variant_layout(tmp_path, "cuda_v12", "cuda_v13", "vulkan")
+
+    selected, probe = _select(binary, driver=None)
+
+    assert selected == tmp_path / "bin" / "vulkan" / "libggml-vulkan.so"
+    assert probe.call_count == 1
+
+
+def test_select_falls_through_when_the_probe_sees_no_device(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TILES_LLAMA_VARIANT", raising=False)
+    binary = _variant_layout(tmp_path, "cuda_v12", "cuda_v13", "vulkan")
+
+    selected, probe = _select(
+        binary, driver=13040, probe_ok=lambda lib: lib.parent.name != "cuda_v13"
+    )
+
+    assert selected == tmp_path / "bin" / "cuda_v12" / "libggml-cuda.so"
+    assert [c.args[1].parent.name for c in probe.call_args_list] == ["cuda_v13", "cuda_v12"]
+
+
+def test_select_returns_none_when_nothing_works(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TILES_LLAMA_VARIANT", raising=False)
+    binary = _variant_layout(tmp_path, "cuda_v12", "cuda_v13", "vulkan")
+
+    selected, _ = _select(binary, driver=13040, probe_ok=lambda lib: False)
+
+    assert selected is None
+
+
+def test_select_without_variant_dirs_is_a_cpu_layout(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TILES_LLAMA_VARIANT", raising=False)
+    binary = _variant_layout(tmp_path)
+
+    process._selected_backend.clear()
+    with (
+        patch("server.backend.llama_server.process.sys.platform", "linux"),
+        patch("server.backend.llama_server.process._cuda_driver_version") as driver,
+        patch("server.backend.llama_server.process._probe_backend") as probe,
+    ):
+        assert process.select_gpu_backend(binary) is None
+    assert not driver.called
+    assert not probe.called
+
+
+def test_select_honours_forced_variant(tmp_path: Path, monkeypatch):
+    binary = _variant_layout(tmp_path, "cuda_v12", "cuda_v13", "vulkan")
+
+    monkeypatch.setenv("TILES_LLAMA_VARIANT", "vulkan")
+    selected, probe = _select(binary, driver=13040)
+    assert selected == tmp_path / "bin" / "vulkan" / "libggml-vulkan.so"
+    assert probe.call_count == 1
+
+    monkeypatch.setenv("TILES_LLAMA_VARIANT", "cuda_v13")
+    selected, _ = _select(binary, driver=None)
+    assert selected == tmp_path / "bin" / "cuda_v13" / "libggml-cuda.so"
+
+    monkeypatch.setenv("TILES_LLAMA_VARIANT", "cpu")
+    selected, probe = _select(binary, driver=13040)
+    assert selected is None
+    assert not probe.called
+
+
+def test_select_is_cached_per_binary(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("TILES_LLAMA_VARIANT", raising=False)
+    binary = _variant_layout(tmp_path, "cuda_v13")
+
+    process._selected_backend.clear()
+    with (
+        patch("server.backend.llama_server.process.sys.platform", "linux"),
+        patch("server.backend.llama_server.process._cuda_driver_version", return_value=13040),
+        patch("server.backend.llama_server.process._probe_backend", return_value=True) as probe,
+    ):
+        first = process.select_gpu_backend(binary)
+        second = process.select_gpu_backend(binary)
+    assert first == second
+    assert probe.call_count == 1
+
+
+def test_probe_parses_list_devices_output(tmp_path: Path):
+    lib = tmp_path / "cuda_v13" / "libggml-cuda.so"
+    with_gpu = Mock(stdout="Available devices:\n  CUDA0: NVIDIA GeForce RTX 5060 Ti (15918 MiB, 14430 MiB free)\n", stderr="")
+    no_gpu = Mock(stdout="Available devices:\n", stderr="ggml_cuda_init: failed to initialize CUDA\n")
+
+    with patch("server.backend.llama_server.process.subprocess.run", return_value=with_gpu) as run:
+        assert process._probe_backend("llama-server", lib) is True
+    assert run.call_args.kwargs["env"]["GGML_BACKEND_PATH"] == str(lib)
+    assert run.call_args.args[0] == ["llama-server", "--list-devices"]
+
+    with patch("server.backend.llama_server.process.subprocess.run", return_value=no_gpu):
+        assert process._probe_backend("llama-server", lib) is False
+
+
+def test_ensure_running_points_ggml_at_the_selected_backend(tmp_path: Path, monkeypatch):
+    _reset_process_state()
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+    backend = tmp_path / "bin" / "cuda_v13" / "libggml-cuda.so"
+
+    fake_proc = Mock()
+    fake_proc.poll.return_value = None
+
+    with (
+        patch("server.backend.llama_server.process.sys.platform", "linux"),
+        patch("server.backend.llama_server.process.subprocess.Popen", return_value=fake_proc) as popen,
+        patch("server.backend.llama_server.process.is_server_ready", return_value=True),
+        patch("server.backend.llama_server.process.resolve_llama_server_binary", return_value=str(tmp_path / "bin" / "llama-server")),
+        patch("server.backend.llama_server.process.select_gpu_backend", return_value=backend),
+    ):
+        ensure_running(gguf, {})
+
+    env = popen.call_args.kwargs["env"]
+    assert env["GGML_BACKEND_PATH"] == str(backend)
+    assert str(backend.parent) not in env["LD_LIBRARY_PATH"].split(":")
+
+
+def test_ensure_running_leaves_ggml_alone_on_cpu(tmp_path: Path, monkeypatch):
+    _reset_process_state()
+    monkeypatch.delenv("GGML_BACKEND_PATH", raising=False)
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+
+    fake_proc = Mock()
+    fake_proc.poll.return_value = None
+
+    with (
+        patch("server.backend.llama_server.process.sys.platform", "linux"),
+        patch("server.backend.llama_server.process.subprocess.Popen", return_value=fake_proc) as popen,
+        patch("server.backend.llama_server.process.is_server_ready", return_value=True),
+        patch("server.backend.llama_server.process.resolve_llama_server_binary", return_value="llama-server"),
+        patch("server.backend.llama_server.process.select_gpu_backend", return_value=None),
+    ):
+        ensure_running(gguf, {})
+
+    assert "GGML_BACKEND_PATH" not in popen.call_args.kwargs["env"]

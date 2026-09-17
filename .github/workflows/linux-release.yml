@@ -1,8 +1,8 @@
 name: Linux Release
 
-# Builds the Linux (x86_64) CUDA and Vulkan tarballs whenever any tag is pushed
-# (stable, rc, nightly) and attaches them to the tag's GitHub Release.
-# Vulkan assets add a -vulkan suffix to the existing Linux filename.
+# Builds the Linux (x86_64) tarball whenever any tag is pushed (stable, rc,
+# nightly) and attaches it to the tag's GitHub Release. One tarball ships
+# every GPU backend; llama-server picks one at runtime.
 # Can also be run manually (Actions tab -> Run workflow) from a branch
 # (artifacts land on the run page) or from a tag ref (uploads into the
 # release for that tag, e.g. re-publishing into an existing 0.4.17).
@@ -30,11 +30,6 @@ env:
 jobs:
   build-linux:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        backend: [cuda, vulkan]
-    env:
-      TILES_LLAMA_BACKEND: ${{ matrix.backend }}
     steps:
       # persist-credentials: false — nothing here pushes git changes, so the
       # write-capable token has no business sitting in .git/config for the
@@ -82,7 +77,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: linux-${{ matrix.backend }}-tarball
+          name: linux-tarball
           path: dist/tiles-v*.tar.gz
           if-no-files-found: error
 
@@ -93,9 +88,8 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: linux-*-tarball
+          name: linux-tarball
           path: dist
-          merge-multiple: true
 
       - name: Generate checksums
         run: |
@@ -103,8 +97,8 @@ jobs:
           sha256sum tiles-v*.tar.gz > checksums.txt
           cat checksums.txt
 
-      # Manual (non-tag) runs: the per-backend tarballs already land on the run
-      # page from build-linux; only the checksums are unique to this job.
+      # Manual (non-tag) runs: the tarball already lands on the run page from
+      # build-linux; only the checksums are unique to this job.
       - name: Upload checksums
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         uses: actions/upload-artifact@v4
