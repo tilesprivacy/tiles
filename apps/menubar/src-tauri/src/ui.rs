@@ -13,7 +13,9 @@ const SHOW_UI: &str = "TILES_SHOW_UI";
 
 const WIDTH: f64 = 1100.0;
 const HEIGHT: f64 = 760.0;
-const MIN_WIDTH: f64 = 640.0;
+/// the chat ui folds its sidebar into an overlay under 768px, which is a
+/// phone layout, not a window one
+const MIN_WIDTH: f64 = 800.0;
 const MIN_HEIGHT: f64 = 480.0;
 
 /// --void, so the window is never white before the page paints
@@ -39,20 +41,85 @@ fn url(path: &str) -> Result<WebviewUrl, String> {
     }
 }
 
+/// webkitgtk turns gnome's text scaling into the page's device pixel ratio,
+/// so a window has to grow by the same factor to give the page the width it
+/// gets on macos
+#[cfg(target_os = "linux")]
+fn text_scale() -> f64 {
+    use gtk::prelude::*;
+
+    gtk::Settings::default()
+        .map(|settings| settings.gtk_xft_dpi() as f64 / 1024.0 / 96.0)
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or(1.0)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn text_scale() -> f64 {
+    1.0
+}
+
 fn build(app: &AppHandle, path: &str) -> Result<WebviewWindow, String> {
+    let scale = text_scale();
     let window = WebviewWindowBuilder::new(app, LABEL, url(path)?)
         .title("Tiles")
-        .inner_size(WIDTH, HEIGHT)
-        .min_inner_size(MIN_WIDTH, MIN_HEIGHT)
+        .inner_size(WIDTH * scale, HEIGHT * scale)
+        .min_inner_size(MIN_WIDTH * scale, MIN_HEIGHT * scale)
         .background_color(GROUND)
         .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
 
     follow_active_space(&window);
+    style_titlebar(&window);
 
     Ok(window)
 }
+
+/// gtk draws the title bar itself on wayland. paint it the page's own ground
+/// and drop the title, so it reads as part of the window
+#[cfg(target_os = "linux")]
+fn style_titlebar(window: &WebviewWindow) {
+    use gtk::prelude::*;
+
+    const CSS: &str = "
+        .titlebar, headerbar {
+            background: #111111;
+            color: #d4d4d4;
+            border: none;
+            box-shadow: none;
+            min-height: 38px;
+        }
+        .titlebar .title, headerbar .title { opacity: 0; }
+        .titlebar button, headerbar button {
+            background: transparent;
+            border: none;
+            box-shadow: none;
+            color: #d4d4d4;
+        }
+        .titlebar button:hover, headerbar button:hover { background: rgba(255, 255, 255, 0.08); }
+    ";
+
+    let Ok(gtk_window) = window.gtk_window() else {
+        return;
+    };
+    let Some(screen) = WidgetExt::screen(&gtk_window) else {
+        return;
+    };
+    let provider = gtk::CssProvider::new();
+    if let Err(err) = provider.load_from_data(CSS.as_bytes()) {
+        eprintln!("[ui] title bar css rejected: {err}");
+        return;
+    }
+    gtk::StyleContext::add_provider_for_screen(
+        &screen,
+        &provider,
+        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn style_titlebar(_window: &WebviewWindow) {}
 
 /// a window belongs to the space it was made on, so without this the user gets
 /// dragged to it instead of it coming to them.

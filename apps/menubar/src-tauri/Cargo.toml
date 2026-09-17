@@ -6,6 +6,10 @@ edition = "2024"
 rust-version = "1.95"
 publish = false
 
+[features]
+# the tauri cli turns this on for `tauri build`; without it the app loads devUrl
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -29,3 +33,4 @@ core-foundation = "0.10"
 [target.'cfg(target_os = "linux")'.dependencies]
 tauri = { version = "2.11", features = ["tray-icon", "image-png"] }
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+gtk = "0.18"
