@@ -48,6 +48,7 @@ use tower_http::services::{ServeDir, ServeFile};
 pub mod account;
 pub mod agent;
 pub mod atproto;
+pub mod diagnostics;
 pub mod modelfile;
 pub mod server;
 pub mod session;
@@ -351,6 +352,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
         .merge(account_router())
         .merge(session_router())
         .merge(atproto_router())
+        .merge(diagnostics::diagnostics_router())
         // .layer(service)
         .layer(cors_layer());
 
