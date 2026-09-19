@@ -29,24 +29,26 @@ pub fn diagnostics_router() -> Router<Arc<AppState>> {
 /// rather than failed: a fresh install has no llama log yet, and a report
 /// with partial context beats no report.
 async fn log_tails() -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let data_dir = DefaultProvider
+    // Two log homes, two accessors. boot.log lives under the user data dir
+    // (`<root>/data/logs`, where the app-boot spawn writes); the daemon,
+    // python server and llama-server log under the root's own `logs/`
+    // (`get_data_dir`, which despite the name is the tiles root).
+    let boot_logs = DefaultProvider
+        .get_user_data_dir()
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        .join("logs");
+    let root_logs = DefaultProvider
         .get_data_dir()
-        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-    // the daemon logs under data/logs; the python server logs llama-server
-    // into the sibling logs dir. Both matter to a report.
-    let daemon_logs = data_dir.join("logs");
-    let server_logs = data_dir
-        .parent()
-        .map(|parent| parent.join("logs"))
-        .unwrap_or_else(|| daemon_logs.clone());
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        .join("logs");
 
     let mut lines: Vec<String> = Vec::new();
 
     for (dir, name) in [
-        (&daemon_logs, "boot.log"),
-        (&daemon_logs, "daemon.err.log"),
-        (&server_logs, "server.err.log"),
-        (&server_logs, "llama-server.err.log"),
+        (&boot_logs, "boot.log"),
+        (&root_logs, "daemon.err.log"),
+        (&root_logs, "server.err.log"),
+        (&root_logs, "llama-server.err.log"),
     ] {
         let tail = tail_of(&dir.join(name));
         if tail.is_empty() {
