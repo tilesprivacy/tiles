@@ -541,7 +541,9 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                     handle_pi_message_update(msg_update);
                 }
                 PiResponse::AgentEnd(agent_end_event) => {
-                    info!("agent end - {}", &line);
+                    // the event is the whole turn, conversation included, so
+                    // only its size belongs in a log
+                    info!("agent end - {} bytes", line.len());
                     process_pi_agent_end_event(
                         &mut repl_session,
                         agent_end_event,
@@ -607,7 +609,7 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                     continue;
                 }
                 PiResponse::Unknown => {
-                    info!("Unsupported response {}", &line);
+                    info!("Unsupported response, {} bytes", line.len());
                     continue;
                 }
                 _ => (),

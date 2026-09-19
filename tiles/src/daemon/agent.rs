@@ -387,7 +387,9 @@ async fn read_from_pi(
         let response = if let Ok(response) = serde_json::from_str::<PiResponse>(&line) {
             response
         } else {
-            let err_str = format!("Failed to parse pi response, response {:?}", &line);
+            // the raw line stays out of the error: it can carry conversation
+            // text, and this string is exactly what an error report would hold
+            let err_str = format!("Failed to parse a {} byte pi response", line.len());
 
             handle_pi_errors(err_str.to_owned(), tx).await;
             return ended;

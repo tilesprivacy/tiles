@@ -1,0 +1,3 @@
+# the report links name /report; the page is index.html. A 200 rewrite, not a
+# 3xx: fragments survive either, but the URL the person sees should not change.
+/report / 200
