@@ -38,10 +38,10 @@ hickory-resolver = "0.26.1"
 atrium-common = "0.1.4"
 atrium-api = "0.25.8"
 ctrlc = "3.5.2"
-dialog-ucan = { git = "https://github.com/dialog-db/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-ucan"}
-dialog-credentials = { git = "https://github.com/dialog-db/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-credentials"}
+dialog-ucan = { git = "https://github.com/tilesprivacy/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-ucan"}
+dialog-credentials = { git = "https://github.com/tilesprivacy/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-credentials"}
 chacha20poly1305 = { version = "0.10" }
-dialog-varsig= { git = "https://github.com/dialog-db/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-varsig"}
+dialog-varsig= { git = "https://github.com/tilesprivacy/dialog-db", rev = "af442cac90d72c9da8be9c71799f497bddc62f0b", package = "dialog-varsig"}
 
 serde_ipld_dagcbor = "0.6.4"
 cid = "0.11.3"
