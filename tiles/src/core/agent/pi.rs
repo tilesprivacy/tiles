@@ -266,9 +266,20 @@ impl PiReader {
                     return Ok(msg.data);
                 }
                 _ => {
+                    // the type only: a skipped event can be a message_update
+                    // carrying conversation text, which has no place in a log
+                    let event_type = serde_json::from_str::<serde_json::Value>(&line)
+                        .ok()
+                        .and_then(|event| {
+                            event
+                                .get("type")
+                                .and_then(|t| t.as_str())
+                                .map(str::to_owned)
+                        })
+                        .unwrap_or_else(|| String::from("unparseable"));
                     info!(
                         "skipping event while waiting for {}: {}",
-                        request_type, line
+                        request_type, event_type
                     );
                     continue;
                 }
