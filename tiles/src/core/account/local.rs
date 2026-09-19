@@ -33,7 +33,10 @@ use crate::{
         storage::db::{DBTYPE, Dbconn, get_db_conn},
     },
     utils::{
-        config::{DefaultProvider, get_app_name, get_or_create_config, save_config},
+        config::{
+            ConfigProvider, DefaultProvider, get_app_name, get_or_create_config,
+            save_config_with_provider,
+        },
         get_unix_time_now,
     },
 };
@@ -240,12 +243,20 @@ pub async fn create_root_account(config: &Table, nickname: Option<String>) -> Re
 ///
 /// - config: A `Table` type of entire config.toml file
 /// - root_user_config: A `Table` type of root user
-pub fn save_root_account(mut config: Table, root_user_config: &Table) -> Result<()> {
+pub fn save_root_account(config: Table, root_user_config: &Table) -> Result<()> {
+    save_root_account_with_provider(config, root_user_config, DefaultProvider)
+}
+
+pub fn save_root_account_with_provider(
+    mut config: Table,
+    root_user_config: &Table,
+    provider: impl ConfigProvider,
+) -> Result<()> {
     config.insert(
         String::from(ROOT_USER_CONFIG_KEY),
         toml::Value::Table(root_user_config.clone()),
     );
-    save_config(&config)
+    save_config_with_provider(&config, provider)
 }
 
 /// Sets nickname for the root account

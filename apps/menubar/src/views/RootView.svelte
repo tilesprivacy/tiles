@@ -7,16 +7,26 @@
   import Chip from "../lib/Chip.svelte";
   import CopyMark from "../lib/CopyMark.svelte";
   import Footer from "../lib/Footer.svelte";
+  import HandleField from "../lib/HandleField.svelte";
   import Masthead, { type Mode } from "../lib/Masthead.svelte";
   import ProviderMark from "../lib/ProviderMark.svelte";
   import Row from "../lib/Row.svelte";
-  import Switch from "../lib/Switch.svelte";
   import SessionList from "../lib/SessionList.svelte";
+  import Switch from "../lib/Switch.svelte";
   import Zone from "../lib/Zone.svelte";
   import { Copier } from "../lib/copy.svelte";
   import { contextLabel, describe } from "../lib/model";
   import { nav } from "../nav.svelte";
-  import { account, health, inference, remote, sessions, truncateMiddle } from "../state.svelte";
+  import {
+    account,
+    atproto,
+    health,
+    held,
+    inference,
+    remote,
+    sessions,
+    truncateMiddle,
+  } from "../state.svelte";
 
   /** how many fit under the masthead before the panel gets tall */
   const PREVIEW = 3;
@@ -83,6 +93,78 @@
         return { name: "?", title: "—", sub: "" };
     }
   });
+
+  const kept = held(
+    () => atproto.value,
+    (at) => (at.state === "session" ? at : null),
+  );
+
+  const atmosphere = $derived.by(() => {
+    if (atproto.value.state === "pending") {
+      return {
+        name: atproto.value.handle,
+        title: `@${atproto.value.handle}`,
+        sub: "Waiting for your browser",
+        avatar: null,
+      };
+    }
+
+    const session = atproto.value.state === "none" ? null : kept.value;
+    if (session === null) {
+      return { name: "?", title: "Not connected", sub: "", avatar: null };
+    }
+
+    const name = session.displayName?.trim() || null;
+    return {
+      name: name ?? session.handle,
+      title: name ?? `@${session.handle}`,
+      sub: name ? `@${session.handle}` : truncateMiddle(session.did, 16, 6),
+      avatar: session.avatar ?? null,
+    };
+  });
+
+  const signedOut = $derived(atproto.value.state === "none");
+  const signingIn = $derived(atproto.value.state === "pending");
+  const signedIn = $derived(!signedOut && !signingIn && kept.value !== null);
+  const waiting = $derived(!signedOut && !signingIn && kept.value === null);
+
+  const enterAtmosphere = $derived(
+    signedOut ? askForHandle : signedIn ? () => nav.push("atmosphere") : undefined,
+  );
+
+  let drawer = $state(false);
+  let signInError = $state<string | null>(null);
+  // plain, not state: it only decides whether a settled login still owns the drawer
+  let attempt = 0;
+
+  $effect(() => {
+    if (atproto.value.state === "session") closeDrawer();
+  });
+
+  function askForHandle() {
+    if (drawer) {
+      closeDrawer();
+      return;
+    }
+    drawer = true;
+  }
+
+  function closeDrawer() {
+    drawer = false;
+    signInError = null;
+    attempt += 1;
+  }
+
+  async function signIn(handle: string) {
+    signInError = null;
+    const mine = attempt;
+    try {
+      await invoke("atproto_login", { handle });
+      if (mine === attempt) drawer = false;
+    } catch (err) {
+      if (mine === attempt) signInError = String(err);
+    }
+  }
 
   const recent = $derived(sessions.value.state === "ready" ? sessions.value.sessions : []);
   // pushing would show exactly what is already on screen
@@ -170,7 +252,8 @@
 
 <Masthead {mode} {on} pending={busy} disabled={health.value.state !== "up"} ontoggle={toggle} />
 
-<Zone label="Tiles Account">
+<Zone label="Accounts">
+  <h3 class="account">Tiles</h3>
   <Row
     size="large"
     title={identity.title}
@@ -186,6 +269,41 @@
       {#if account.value.state === "local"}<Chevron />{/if}
     {/snippet}
   </Row>
+
+  <h3 class="account">Atmosphere</h3>
+  <Row
+    size="large"
+    title={atmosphere.title}
+    sub={atmosphere.sub}
+    submono={signedIn}
+    dimmed={waiting}
+    onselect={enterAtmosphere}
+  >
+    {#snippet leading()}
+      <Avatar nickname={atmosphere.name} src={atmosphere.avatar} />
+    {/snippet}
+    {#snippet trailing()}
+      {#if signedOut}
+        <span class="signin" data-open={drawer}>Sign in</span>
+      {:else if signedIn}
+        <Chevron />
+      {/if}
+    {/snippet}
+  </Row>
+
+  <div class="drawer" data-open={drawer || signingIn}>
+    <div class="drawer__clip" inert={!drawer && !signingIn}>
+      <div class="drawer__body">
+        <HandleField
+          open={drawer && !signingIn}
+          pending={signingIn}
+          onsubmit={signIn}
+          oncancel={closeDrawer}
+        />
+        {#if signInError}<p class="drawer__error" role="alert">{signInError}</p>{/if}
+      </div>
+    </div>
+  </div>
 </Zone>
 
 <Zone label="Model" dimmed={!canShare}>
@@ -267,6 +385,78 @@
 <Footer {note} alert={health.value.state === "down"} />
 
 <style>
+  .account {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-bottom: 5px;
+    padding: 0 var(--pad-x);
+    color: var(--slate);
+    font-size: var(--fs-chip);
+    font-weight: 500;
+    letter-spacing: var(--tracking-chip);
+    opacity: 0.8;
+  }
+
+  .account::after {
+    content: "";
+    flex: 1;
+    height: var(--hairline);
+    background: var(--rule);
+  }
+
+  .account:not(:first-of-type) {
+    margin-top: 9px;
+  }
+
+  .account:first-of-type {
+    margin-top: 4px;
+  }
+
+  .signin {
+    flex: none;
+    --cut: 3px;
+    clip-path: var(--clip-cut);
+    padding: 3px 7px;
+    background: var(--steel);
+    color: var(--row-mark, var(--ash));
+    font-size: var(--fs-label);
+    font-weight: 500;
+    transition:
+      background var(--dur-state) ease-out,
+      color var(--dur-state) ease-out;
+  }
+
+  .signin[data-open="true"] {
+    background: var(--signal);
+    color: var(--void);
+  }
+
+  .drawer {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows var(--dur-push) var(--ease-push);
+  }
+
+  .drawer[data-open="true"] {
+    grid-template-rows: 1fr;
+  }
+
+  .drawer__clip {
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .drawer__body {
+    padding: 3px var(--pad-x) 5px;
+  }
+
+  .drawer__error {
+    padding-top: 5px;
+    color: var(--alert);
+    font-size: var(--fs-label);
+  }
+
   /* the ticket's own line, at the width the truncated one lands on */
   .ticket-skeleton {
     width: 186px;

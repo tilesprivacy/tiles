@@ -79,6 +79,7 @@
 <style>
   .row {
     --row-mark: var(--slate);
+    --mark-frame: rgba(255, 255, 255, 0.22);
 
     position: relative;
     display: flex;
@@ -110,6 +111,7 @@
 
   .row[data-active="true"] {
     --row-mark: var(--signal);
+    --mark-frame: rgba(247, 255, 97, 0.8);
   }
 
   .row[data-active="true"]::before {

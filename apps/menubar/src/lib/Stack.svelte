@@ -76,6 +76,7 @@
       data-anim={leaving.dir === "push" ? "out-to-left" : "out-to-right"}
       data-running={running}
       aria-hidden="true"
+      inert
     >
       {@render view(leaving.id)}
     </div>

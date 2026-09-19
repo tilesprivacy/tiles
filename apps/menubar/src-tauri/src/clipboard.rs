@@ -12,11 +12,12 @@ use tauri_nspanel::objc2_foundation::NSString;
 pub fn copy_text(text: String) -> Result<(), String> {
     let pasteboard = NSPasteboard::generalPasteboard();
 
+    // extern static
+    let kind = unsafe { NSPasteboardTypeString };
+
     // clearContents first, else the write lands behind whatever is there
-    let wrote = unsafe {
-        pasteboard.clearContents();
-        pasteboard.setString_forType(&NSString::from_str(&text), NSPasteboardTypeString)
-    };
+    pasteboard.clearContents();
+    let wrote = pasteboard.setString_forType(&NSString::from_str(&text), kind);
 
     wrote
         .then_some(())

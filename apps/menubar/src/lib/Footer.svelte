@@ -1,6 +1,11 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
 
+  import AwakeMenu from "./AwakeMenu.svelte";
+  import Chevron from "./Chevron.svelte";
+  import CupMark from "./CupMark.svelte";
+  import { awake } from "../state.svelte";
+
   interface Props {
     /** the daemon's version, or why there is no version to show */
     note: string;
@@ -9,10 +14,103 @@
   }
 
   let { note, alert = false }: Props = $props();
+
+  let menu = $state(false);
+
+  let now = $state(Date.now());
+
+  $effect(() => {
+    if (!awake.value.active || awake.value.paused) return;
+    now = Date.now();
+    const timer = setInterval(() => (now = Date.now()), 1000);
+    return () => clearInterval(timer);
+  });
+
+  function clock(total: number): string {
+    const pad = (value: number) => String(value).padStart(2, "0");
+    const hours = Math.floor(total / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+
+    return hours > 0
+      ? `${hours}:${pad(minutes)}:${pad(total % 60)}`
+      : `${pad(minutes)}:${pad(total % 60)}`;
+  }
+
+  const session: "none" | "running" | "paused" = $derived(
+    awake.value.paused ? "paused" : awake.value.active ? "running" : "none",
+  );
+
+  const reading = $derived.by(() => {
+    const { paused, since, until, frozen } = awake.value;
+    if (paused) return frozen === null ? "" : clock(Math.round(frozen / 1000));
+    if (until !== null) return clock(Math.ceil(Math.max(0, until - now) / 1000));
+    if (since !== null) return clock(Math.floor(Math.max(0, now - since) / 1000));
+    return "";
+  });
+
+  function pick(seconds: number | null) {
+    menu = false;
+    void invoke("awake_start", { seconds }).catch(() => {});
+  }
+
+  function run(command: "awake_pause" | "awake_resume" | "awake_stop") {
+    menu = false;
+    void invoke(command).catch(() => {});
+  }
+
+  // capture, or the panel's handler pops the view out from under the menu
+  function onkeydowncapture(event: KeyboardEvent) {
+    if (!menu || event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    menu = false;
+  }
 </script>
+
+<svelte:window {onkeydowncapture} />
 
 <footer class="footer">
   <span class="footer__note" data-alert={alert}>{note}</span>
+
+  <div class="footer__cupwrap">
+    {#if menu}
+      <button
+        class="footer__scrim"
+        tabindex="-1"
+        aria-label="Close"
+        onclick={() => (menu = false)}
+      ></button>
+      <AwakeMenu
+        {session}
+        onpick={pick}
+        onpause={() => run("awake_pause")}
+        onresume={() => run("awake_resume")}
+        onstop={() => run("awake_stop")}
+      />
+    {/if}
+
+    <button
+      class="footer__cup"
+      data-state={session}
+      disabled={!awake.value.ac}
+      aria-label={awake.value.ac ? "Keep this Mac awake" : "Keeping awake needs mains power"}
+      aria-haspopup="menu"
+      aria-expanded={menu}
+      onclick={() => (menu = !menu)}
+    >
+      <CupMark active={session === "running"} />
+      {#if session !== "none"}
+        <span class="footer__count">{reading}</span>
+      {:else if awake.value.ac}
+        <span>Keep awake</span>
+      {:else}
+        <span>Needs mains</span>
+      {/if}
+
+      <Chevron dir="up" />
+    </button>
+  </div>
+
   <button class="footer__quit" onclick={() => void invoke("quit_app").catch(() => {})}>
     Quit
   </button>
@@ -20,6 +118,8 @@
 
 <style>
   .footer {
+    --h-plate: 22px;
+
     position: relative;
     display: flex;
     align-items: center;
@@ -47,7 +147,7 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: var(--font-mono);
-    font-size: var(--fs-mono);
+    font-size: var(--fs-body);
     font-variant-numeric: tabular-nums;
     color: var(--slate);
   }
@@ -56,25 +156,75 @@
     color: var(--alert);
   }
 
+  .footer__count {
+    min-width: 7ch;
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+  }
+
+  .footer__cupwrap {
+    position: relative;
+    flex: none;
+    display: flex;
+  }
+
+  .footer__scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    border: none;
+    background: transparent;
+  }
+
+  .footer__cup,
   .footer__quit {
     flex: none;
-    clip-path: polygon(
-      0 0,
-      100% 0,
-      100% calc(100% - var(--cut)),
-      calc(100% - var(--cut)) 100%,
-      0 100%
-    );
-    padding: 4px 9px;
+    display: flex;
+    align-items: center;
+    height: var(--h-plate);
+    padding: 0 9px;
+    clip-path: var(--clip-cut);
     border: none;
     background: var(--steel);
     color: var(--ash);
     font-family: var(--font-ui);
-    font-size: var(--fs-label);
+    font-size: var(--fs-body);
     line-height: 1;
     transition:
       background var(--dur-state) ease-out,
       color var(--dur-state) ease-out;
+  }
+
+  .footer__cup {
+    --row-mark: currentColor;
+
+    gap: 6px;
+    position: relative;
+    z-index: 2;
+  }
+
+  .footer__cup[data-state="none"]:hover:not(:disabled) {
+    color: var(--bone);
+  }
+
+  .footer__cup[data-state="running"] {
+    background: var(--signal);
+    color: var(--void);
+  }
+
+  .footer__cup[data-state="running"]:hover:not(:disabled) {
+    background: rgba(247, 255, 97, 0.8);
+  }
+
+  .footer__cup[data-state="paused"] {
+    color: var(--signal);
+  }
+
+  .footer__cup:disabled {
+    background: var(--steel);
+    color: var(--slate);
+    opacity: 0.5;
   }
 
   .footer__quit:hover {

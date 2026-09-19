@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
+use dispatch2::MainThreadBound;
 use tauri::{AppHandle, Manager};
 use tauri_nspanel::objc2::rc::Retained;
 use tauri_nspanel::objc2::runtime::{AnyObject, Sel};
@@ -40,14 +41,9 @@ const PEEK_HOLD: Duration = Duration::from_millis(150);
 
 // the menu is built once, so the toggles are found by tag to be re-checked
 
-/// main thread only, where AppKit requires it and every caller below runs
-struct StatusItem(Retained<NSStatusItem>);
-unsafe impl Send for StatusItem {}
-unsafe impl Sync for StatusItem {}
-
-struct StatusMenu(Retained<NSMenu>);
-unsafe impl Send for StatusMenu {}
-unsafe impl Sync for StatusMenu {}
+/// main-thread-only; MainThreadBound is Send + Sync without asserting it
+struct StatusItem(MainThreadBound<Retained<NSStatusItem>>);
+struct StatusMenu(MainThreadBound<Retained<NSMenu>>);
 
 #[derive(Default)]
 struct ClickState {
@@ -126,8 +122,11 @@ define_class!(
                 return;
             };
 
+            // an NSView subclass, so this is always the main thread
+            let mtm = MainThreadOnly::mtm(self);
             let below = NSPoint::new(0.0, self.bounds().size.height + MENU_GAP);
             menu.0
+                .get(mtm)
                 .popUpMenuPositioningItem_atLocation_inView(None, below, Some(self));
         }
 
@@ -181,8 +180,11 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     button.addSubview(&target);
 
     app.manage(ClickState::default());
-    app.manage(StatusMenu(build_menu(mtm, &target)));
-    app.manage(StatusItem(item));
+    app.manage(StatusMenu(MainThreadBound::new(
+        build_menu(mtm, &target),
+        mtm,
+    )));
+    app.manage(StatusItem(MainThreadBound::new(item, mtm)));
 
     Ok(())
 }
@@ -222,6 +224,7 @@ pub fn pointer_over_item(app: &AppHandle) -> bool {
     };
     let Some(frame) = item
         .0
+        .get(mtm)
         .button(mtm)
         .and_then(|b| b.window())
         .map(|w| w.frame())
@@ -240,7 +243,7 @@ pub fn set_live(app: &AppHandle, live: bool) {
     let (Some(item), Some(mtm)) = (app.try_state::<StatusItem>(), MainThreadMarker::new()) else {
         return;
     };
-    if let Some(button) = item.0.button(mtm) {
+    if let Some(button) = item.0.get(mtm).button(mtm) {
         button.setAlphaValue(if live {
             ICON_ALPHA_LIVE
         } else {
@@ -254,7 +257,7 @@ pub fn set_highlighted(app: &AppHandle, on: bool) {
     let (Some(item), Some(mtm)) = (app.try_state::<StatusItem>(), MainThreadMarker::new()) else {
         return;
     };
-    if let Some(button) = item.0.button(mtm) {
+    if let Some(button) = item.0.get(mtm).button(mtm) {
         button.highlight(on);
     }
 }
