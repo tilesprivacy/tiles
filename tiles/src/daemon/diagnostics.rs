@@ -29,15 +29,26 @@ pub fn diagnostics_router() -> Router<Arc<AppState>> {
 /// rather than failed: a fresh install has no llama log yet, and a report
 /// with partial context beats no report.
 async fn log_tails() -> Result<Json<ApiResponse<serde_json::Value>>, AppError> {
-    let logs_dir = DefaultProvider
+    let data_dir = DefaultProvider
         .get_data_dir()
-        .map_err(|e| AppError::InternalServerError(e.to_string()))?
-        .join("logs");
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    // the daemon logs under data/logs; the python server logs llama-server
+    // into the sibling logs dir. Both matter to a report.
+    let daemon_logs = data_dir.join("logs");
+    let server_logs = data_dir
+        .parent()
+        .map(|parent| parent.join("logs"))
+        .unwrap_or_else(|| daemon_logs.clone());
 
     let mut lines: Vec<String> = Vec::new();
 
-    for name in ["boot.log", "daemon.err.log", "llama-server.err.log"] {
-        let tail = tail_of(&logs_dir.join(name));
+    for (dir, name) in [
+        (&daemon_logs, "boot.log"),
+        (&daemon_logs, "daemon.err.log"),
+        (&server_logs, "server.err.log"),
+        (&server_logs, "llama-server.err.log"),
+    ] {
+        let tail = tail_of(&dir.join(name));
         if tail.is_empty() {
             continue;
         }
