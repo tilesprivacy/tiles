@@ -300,7 +300,16 @@ fn cors_layer() -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::PATCH])
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::DELETE,
+            Method::PATCH,
+            // the modelfile save is a PUT, and it is the only one: without
+            // this the packaged app's editor fails its preflight while the
+            // dev server, being same-origin behind the vite proxy, works
+            Method::PUT,
+        ])
         .allow_headers([CONTENT_TYPE, ACCEPT, AUTHORIZATION])
 }
 
