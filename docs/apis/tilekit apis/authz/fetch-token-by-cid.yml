@@ -1,0 +1,24 @@
+info:
+  name: fetch-token-by-cid
+  type: http
+  seq: 3
+
+http:
+  method: GET
+  url: "{{tilekit_base_url}}/authz/token-info/{cid}"
+  body:
+    type: json
+    data: |-
+      {
+        "delegated_token": "glhAsUJUntfCyna/eszYpI2oSuVr5lhIx+HApdsOAmI+6CjBUFTzcghNgYhrC3uUPHh8EMcBDrB4Nc9N00545FtFBaJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4OGRpZDprZXk6ejZNa3AxRjdpSmZVYWo4WXA5bkJORXZMM3BDejQyUUJIdHphVjRKUXczeGpuNXd3Y2NtZGEvY2V4cBp9e7+JY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUJgoF7ZV+neyqVaDDTsGXJU=",
+        "token_type": "Sync",
+        "nickname": "optional"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

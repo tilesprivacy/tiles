@@ -44,8 +44,9 @@ use crate::core::{
     account::{
         self, get_did_from_public_key, get_public_key_from_did, get_random_bytes,
         local::{
-            create_invocation_token, fetch_token, get_app_secret_key, get_current_user,
-            get_user_info, save_peer_account_db, verify_invocation,
+            add_token, create_invocation_token, create_token, fetch_token, fetch_token_by_aud,
+            get_app_secret_key, get_current_user, get_user_info, save_peer_account_db,
+            verify_invocation,
         },
     },
     chats::{SyncOp, create_db_sync_channel},
@@ -102,6 +103,8 @@ enum MessageBody {
     SyncStart {
         last_row_counter: Option<i64>,
         invocation_token: String,
+        reverse_delegation_token: String,
+        sender_nickname: String,
     },
     SyncSendDeltaInfo {
         blob_ticket: String,
@@ -359,6 +362,8 @@ async fn sync_subscribe_loop(
                 MessageBody::SyncStart {
                     last_row_counter: _,
                     invocation_token: _,
+                    reverse_delegation_token: _,
+                    sender_nickname: _,
                 } => {
                     info!("Received sync start event...");
                     let senders: (
@@ -462,22 +467,43 @@ pub async fn sync(did: Option<String>) -> Result<()> {
             return Ok(());
         }
 
-        let invocation_token = if is_online {
+        let (invocation_token, rev_delegated_token) = if is_online {
             let token_delegated = if let Ok(token_resp) = fetch_token(
                 &receiver_did,
                 &user_db_conn,
                 account::local::TokenType::Sync,
             ) && let Some(token) = token_resp
             {
+                // fetch token delegated to receiver, if not create one
+
                 token
             } else {
                 eprintln!("No sync authorization token found for {}", receiver_did);
                 return Ok(());
             };
-            create_invocation_token(&token_delegated.token, &user_db_conn).await?
+            let rev_token_resp = fetch_token_by_aud(
+                &receiver_did,
+                &user_db_conn,
+                account::local::TokenType::Sync,
+            )?;
+            let rev_delegated_token = if let Some(rev_token) = rev_token_resp {
+                rev_token.token
+            } else {
+                // create a token
+                create_token(
+                    &receiver_did,
+                    Some(&receiver_did),
+                    account::local::TokenType::Sync,
+                )
+                .await?
+            };
+            (
+                create_invocation_token(&token_delegated.token, &user_db_conn).await?,
+                rev_delegated_token,
+            )
         } else {
             // We don't use invocation token in offline, so providing a dummy
-            String::from("offline token")
+            (String::from("offline token"), String::from("no token"))
         };
 
         let receiver_pub_key = get_public_key_from_did(&receiver_did)?;
@@ -514,6 +540,8 @@ pub async fn sync(did: Option<String>) -> Result<()> {
             MessageBody::SyncStart {
                 last_row_counter: Some(receiver_last_row_counter),
                 invocation_token,
+                reverse_delegation_token: rev_delegated_token,
+                sender_nickname: user.username.clone(),
             },
         );
         network_sender
@@ -721,6 +749,8 @@ async fn on_sync_start_event(
     if let MessageBody::SyncStart {
         last_row_counter: lrc,
         invocation_token: token,
+        reverse_delegation_token: rev_del_token,
+        sender_nickname: nickname,
     } = &msg.body
     {
         if msg.is_online
@@ -742,6 +772,17 @@ async fn on_sync_start_event(
             sync_main_sender.send(0).await?;
             return Err(anyhow!("Verification failed for invocation token"));
         }
+        if msg.is_online {
+            //TODO: revist this, if we need a new conn here
+            let conn = get_db_conn(&DBTYPE::COMMON)?;
+            add_token(
+                rev_del_token,
+                &conn,
+                Some(&nickname),
+                account::local::TokenType::Sync,
+            )?;
+        }
+
         let sender_did = get_did_from_public_key(delivered_from.as_bytes())?;
         let ticket = fetch_encoded_delta_ticket(
             &user.user_id,

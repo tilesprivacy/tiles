@@ -367,10 +367,15 @@ pub fn unlink_peer(db_conn: &Dbconn, user_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn create_link(aud_did: Option<String>, db_conn: &Dbconn) -> Result<()> {
+pub async fn create_link(aud_did: Option<String>) -> Result<()> {
     if let Some(audience_did) = aud_did {
         // aud_did is there, so definitely trying online syncing
-        let token = create_token(&audience_did, db_conn).await?;
+        let token = create_token(
+            &audience_did,
+            None,
+            tiles::core::account::local::TokenType::Sync,
+        )
+        .await?;
         println!(
             "\nHere's the UCAN token:\n\n{}\n\nPlease share this with {} out-of-band",
             token, audience_did
@@ -387,7 +392,12 @@ pub async fn add_link(token: String, db_conn: &Dbconn) -> Result<()> {
     if token.len() == 8 {
         link(Some(token)).await?;
     } else if is_valid_delegation(&token).is_ok() {
-        let token = add_token(&token, db_conn)?;
+        let token = add_token(
+            &token,
+            &db_conn.common,
+            None,
+            tiles::core::account::local::TokenType::Sync,
+        )?;
         println!("Added the token from DID={}", token.did);
     } else {
         eprintln!("Invalid token")

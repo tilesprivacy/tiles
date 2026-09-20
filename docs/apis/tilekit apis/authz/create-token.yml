@@ -1,0 +1,24 @@
+info:
+  name: create-token
+  type: http
+  seq: 1
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/authz/create-token"
+  body:
+    type: json
+    data: |-
+      {
+        "aud_did": "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
+        "token_type": "Sync",
+        "nickname": "optional"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

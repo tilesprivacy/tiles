@@ -1,5 +1,4 @@
-use crate::core::account::atproto::{fetch_logged_in_data, login, share_session};
-use crate::core::account::local::get_current_user;
+use crate::core::account::atproto::{fetch_logged_in_data, login, share_session}; use crate::core::account::local::get_current_user;
 use crate::core::agent::pi::{PiAgent, PiWriter};
 use crate::core::agent::types::{
     CommandType, Commands, PiAgentEndEvent, PiMsgContent, PiResponse, PiResponseMessage,
@@ -79,8 +78,7 @@ pub struct ChatResponse {
     pub session_id: String,
     pub role: Role,
     pub parent_chat_id: Option<String>,
-    pub metrics: Option<BenchmarkMetrics>,
-    pub model_used: String,
+    pub metrics: Option<BenchmarkMetrics>, pub model_used: String,
 }
 
 enum InputCommandResponse {

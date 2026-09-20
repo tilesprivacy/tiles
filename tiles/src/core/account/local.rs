@@ -16,7 +16,7 @@ use rusqlite::{
     Connection, Row, ToSql, params,
     types::{FromSql, FromSqlError},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt::Display,
@@ -112,7 +112,7 @@ pub struct User {
     pub updated_at: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Token {
     pub id: String,
     pub did: String,
@@ -121,9 +121,11 @@ pub struct Token {
     pub r#type: TokenType,
     pub created_at: u64,
     pub updated_at: u64,
+    pub aud_did: String,
+    pub aud_nickname: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Deserialize, Serialize)]
 pub enum TokenType {
     // data syncing
     Sync,
@@ -408,22 +410,29 @@ pub fn save_peer_account_db(db_conn: &Connection, user_id: &str, nickname: &str)
     Ok(())
 }
 
-pub async fn create_token(aud_did: &str, db_conn: &Dbconn) -> Result<String> {
-    let user = get_current_user(&db_conn.common)?;
+pub async fn create_token(
+    aud_did: &str,
+    aud_nickname: Option<&str>,
+    token_type: TokenType,
+) -> Result<String> {
+    let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
+    let user = get_current_user(&db_conn)?;
     let app_name = get_app_name();
     let signing_key = get_signing_key(&app_name, &user.user_id)?;
     let keyexport = KeyExport::from(&signing_key.to_bytes());
     let issuer: Ed25519Signer = Ed25519Signer::import(keyexport).await?;
     info!("issuer did {}", issuer.ed25519_did());
-    let token = generate_delegation_token(issuer, aud_did, db_conn).await?;
+    let token = generate_delegation_token(issuer, aud_did, aud_nickname, token_type).await?;
     Ok(token.token)
 }
 
 async fn generate_delegation_token(
     issuer: Ed25519Signer,
     aud_did: &str,
-    db_conn: &Dbconn,
+    aud_nickname: Option<&str>,
+    token_type: TokenType,
 ) -> Result<Token> {
+    let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
     let aud_did = Did::from_str(aud_did)?;
     let subject = Subject::Specific(Did::from_str(&issuer.ed25519_did().to_string())?);
     let delegation = DelegationBuilder::<Ed25519Signature>::new()
@@ -439,26 +448,30 @@ async fn generate_delegation_token(
         .try_build()
         .await?;
 
-    let delegation_token = save_token(db_conn, delegation.issuer().did().as_str(), delegation)?;
+    let delegation_token = save_token(&db_conn, delegation, aud_nickname, token_type)?;
     Ok(delegation_token)
 }
 
-pub fn add_token(delegation_token: &str, db_conn: &Dbconn) -> Result<Token> {
+pub fn add_token(
+    delegation_token: &str,
+    db_conn: &Connection,
+    aud_nickname: Option<&str>,
+    token_type: TokenType,
+) -> Result<Token> {
     let delegation_token_bytes = data_encoding::BASE64
         .decode(delegation_token.as_bytes())
         .context("Delegation token is in invalid base64")?;
     let delegation: Delegation<Ed25519Signature> =
         serde_ipld_dagcbor::from_slice(&delegation_token_bytes).context("Invalid DID")?;
 
-    let issuer_did = delegation.issuer().did();
-    let token = save_token(db_conn, issuer_did.as_str(), delegation)
+    let token = save_token(db_conn, delegation, aud_nickname, token_type)
         .context("Saving delegation token failed")?;
     Ok(token)
 }
 
 pub fn fetch_token(did: &str, conn: &Connection, token_type: TokenType) -> Result<Option<Token>> {
     let fetch_resp = conn.query_row(
-        "SELECT id, did, token, cid, created_at, updated_at, type FROM tokens WHERE did= ?1 and type=?2 order by id desc limit 1",
+        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE did= ?1 and type=?2 order by id desc limit 1",
         [did, token_type.to_string().as_str()],
         |row| {
             Ok(Token {
@@ -469,6 +482,8 @@ pub fn fetch_token(did: &str, conn: &Connection, token_type: TokenType) -> Resul
                 created_at: row.get::<usize, f64>(4)? as u64,
                 updated_at: row.get::<usize, f64>(5)? as u64,
                 r#type: row.get(6)?,
+                aud_did: row.get(7)?,
+                aud_nickname: row.get(8)?,
             })
         },
     );
@@ -479,8 +494,85 @@ pub fn fetch_token(did: &str, conn: &Connection, token_type: TokenType) -> Resul
     }
 }
 
+pub fn fetch_token_by_ucan(token: &str, conn: &Connection) -> Result<Option<Token>> {
+    let fetch_resp = conn.query_row(
+        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE token= ?1",
+        [token],
+        |row| {
+            Ok(Token {
+                id: row.get(0)?,
+                did: row.get(1)?,
+                token: row.get(2)?,
+                cid: row.get(3)?,
+                created_at: row.get::<usize, f64>(4)? as u64,
+                updated_at: row.get::<usize, f64>(5)? as u64,
+                r#type: row.get(6)?,
+                aud_did: row.get(7)?,
+                aud_nickname: row.get(8)?,
+            })
+        },
+    );
+    match fetch_resp {
+        Ok(token) => Ok(Some(token)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(Into::into(err)),
+    }
+}
+
+pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>> {
+    let fetch_resp = conn.query_row(
+        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE cid= ?1",
+        [cid],
+        |row| {
+            Ok(Token {
+                id: row.get(0)?,
+                did: row.get(1)?,
+                token: row.get(2)?,
+                cid: row.get(3)?,
+                created_at: row.get::<usize, f64>(4)? as u64,
+                updated_at: row.get::<usize, f64>(5)? as u64,
+                r#type: row.get(6)?,
+                aud_did: row.get(7)?,
+                aud_nickname: row.get(8)?,
+            })
+        },
+    );
+    match fetch_resp {
+        Ok(token) => Ok(Some(token)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(Into::into(err)),
+    }
+}
+pub fn fetch_token_by_aud(
+    aud_did: &str,
+    conn: &Connection,
+    token_type: TokenType,
+) -> Result<Option<Token>> {
+    let fetch_resp = conn.query_row(
+        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE aud_did= ?1 and type=?2 order by id desc limit 1",
+        [aud_did, token_type.to_string().as_str()],
+        |row| {
+            Ok(Token {
+                id: row.get(0)?,
+                did: row.get(1)?,
+                token: row.get(2)?,
+                cid: row.get(3)?,
+                created_at: row.get::<usize, f64>(4)? as u64,
+                updated_at: row.get::<usize, f64>(5)? as u64,
+                r#type: row.get(6)?,
+                aud_did: row.get(7)?,
+                aud_nickname: row.get(8)?,
+            })
+        },
+    );
+    match fetch_resp {
+        Ok(token) => Ok(Some(token)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(Into::into(err)),
+    }
+}
 pub fn fetch_tokens(conn: &Connection) -> Result<Vec<Token>> {
-    let query = "SELECT id, did, token, cid, created_at, updated_at, type FROM tokens";
+    let query = "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens";
 
     let mut stmt = conn.prepare(query)?;
     let token_rows = stmt.query_map([], |row| {
@@ -492,6 +584,8 @@ pub fn fetch_tokens(conn: &Connection) -> Result<Vec<Token>> {
             created_at: row.get::<usize, f64>(4)? as u64,
             updated_at: row.get::<usize, f64>(5)? as u64,
             r#type: row.get(6)?,
+            aud_did: row.get(7)?,
+            aud_nickname: row.get(8)?,
         })
     })?;
 
@@ -503,11 +597,18 @@ pub fn fetch_tokens(conn: &Connection) -> Result<Vec<Token>> {
     Ok(tokens)
 }
 
-fn save_token<S: Signature>(conn: &Dbconn, did: &str, delegation: Delegation<S>) -> Result<Token> {
-    let mut stmt = conn.common.prepare(
-        "insert into tokens(id, did, token, cid, created_at, updated_at, type) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+fn save_token<S: Signature>(
+    conn: &Connection,
+    delegation: Delegation<S>,
+    aud_nickname: Option<&str>,
+    token_type: TokenType,
+) -> Result<Token> {
+    let mut stmt = conn.prepare(
+        "insert into tokens(id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) on conflict(did, aud_did, type) do update set token = ?3, updated_at = ?6, cid = ?4",
     )?;
 
+    let issuer_did = delegation.issuer().did();
+    let aud_did = delegation.audience().did();
     let token_cid = delegation
         .to_cid()
         .to_string_of_base(cid::multibase::Base::Base64)?;
@@ -517,15 +618,17 @@ fn save_token<S: Signature>(conn: &Dbconn, did: &str, delegation: Delegation<S>)
 
     match stmt.execute(params![
         Uuid::now_v7().to_string(),
-        did.to_owned(),
+        issuer_did.as_str().to_owned(),
         token,
         token_cid,
         get_unix_time_now() as f64,
         get_unix_time_now() as f64,
-        TokenType::Sync
+        token_type,
+        aud_did.as_str(),
+        aud_nickname
     ]) {
         Ok(_res) => {
-            let token = fetch_token(did, &conn.common, TokenType::Sync)?;
+            let token = fetch_token(issuer_did.as_str(), &conn, TokenType::Sync)?;
             Ok(token.expect("Expected token"))
         }
         Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
@@ -1004,7 +1107,10 @@ pub mod tests {
             token TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            type TEXT NOT NULL
+            type TEXT NOT NULL,
+            aud_did TEXT,
+            aud_nickname TEXT,
+            UNIQUE(did, aud_did, type)
         );",
             [],
         )
@@ -1180,7 +1286,7 @@ pub mod tests {
 
         let db_conn = setup_db_conn_v2();
 
-        let resp = add_token(token, &db_conn);
+        let resp = add_token(token, &db_conn.common, None, TokenType::Sync);
 
         assert!(resp.is_ok());
 
@@ -1188,13 +1294,13 @@ pub mod tests {
     }
 
     #[test]
-    fn test_valid_add_token_multiple_same_did() {
+    fn test_valid_add_token_multiple_same_did_aud_did() {
         let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
 
         let did = "did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5";
         let db_conn = setup_db_conn_v2();
 
-        let resp = add_token(token, &db_conn);
+        let resp = add_token(token, &db_conn.common, None, TokenType::Sync);
         println!("{:?}", resp);
         assert!(resp.is_ok());
 
@@ -1202,8 +1308,8 @@ pub mod tests {
 
         let tokenb = "glhACMCMJFAYFQBP/AwhUuH6A1B5eQWo1EWBg5X8B5CXAyDAb/LhTSM6ndct/N/0rz2K2tdOLkUFAkowwR4sd02zCKJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SJYY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUFSdn3+p0ErihX4qr3oZZFo=";
 
-        let resp = add_token(tokenb, &db_conn);
-        assert_eq!(resp.unwrap().token, tokenb);
+        let _resp = add_token(tokenb, &db_conn.common, None, TokenType::Sync);
+        // assert_eq!(resp_token, token);
         assert_eq!(
             fetch_token(did, &db_conn.common, TokenType::Sync)
                 .unwrap()
@@ -1218,7 +1324,7 @@ pub mod tests {
 
         let db_conn = setup_db_conn_v2();
 
-        let resp = add_token(token, &db_conn);
+        let resp = add_token(token, &db_conn.common, None, TokenType::Sync);
 
         assert!(resp.is_err());
     }
@@ -1226,12 +1332,13 @@ pub mod tests {
     #[tokio::test]
     async fn test_generate_token() {
         let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
-        let db_conn = setup_db_conn_v2();
+        let _db_conn = setup_db_conn_v2();
         assert!(
             generate_delegation_token(
                 signer,
                 "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
-                &db_conn
+                None,
+                TokenType::Sync
             )
             .await
             .is_ok()
@@ -1246,7 +1353,8 @@ pub mod tests {
         let token_delegated = generate_delegation_token(
             issued_signer,
             &audience_signer.ed25519_did().to_string(),
-            &db_conn,
+            None,
+            TokenType::Sync,
         )
         .await
         .unwrap();

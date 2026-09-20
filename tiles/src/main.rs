@@ -594,7 +594,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 show_peers(&db_conn)?;
             }
             LinkCommands::Create { peer_did } => {
-                create_link(peer_did, &db_conn).await?;
+                create_link(peer_did).await?;
             }
             LinkCommands::Add { token } => {
                 add_link(token, &db_conn).await?;
