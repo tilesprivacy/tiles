@@ -277,6 +277,7 @@ fn install_plugin_root(plugin_root: &Path) -> Result<Installed, PluginError> {
         let _ = remove_dir_all(&installed_root);
         return Err(err.into());
     }
+    info!("Installed plugin {}", manifest.name);
 
     Ok(Installed {
         name: manifest.name,
@@ -667,6 +668,17 @@ pub fn uninstall(plugin_name: &str) -> Result<String, PluginError> {
 
     remove_dir_all(&plugin_root)
         .with_context(|| format!("Failed to uninstall plugin {}", plugin_name))?;
+    info!("Uninstalled plugin {}", plugin_name);
+
+    // a disabled entry would switch a later reinstall off. a bundled plugin of
+    // the same name is still there and keeps it
+    let still_present = all_plugin_roots()
+        .iter()
+        .any(|root| plugin_name_of(root).as_deref() == Some(plugin_name));
+    if !still_present {
+        set_plugin_disabled(plugin_name, false)?;
+    }
+
     Ok(format!("Uninstalled plugin {} successfully", plugin_name))
 }
 
@@ -910,6 +922,13 @@ pub fn set_enabled(plugin_name: &str, enabled: bool) -> Result<EnabledChange, Pl
     }
 
     let changed = set_plugin_disabled(plugin_name, !enabled)?;
+    if changed {
+        info!(
+            "Plugin {} {}",
+            plugin_name,
+            if enabled { "enabled" } else { "disabled" }
+        );
+    }
     Ok(EnabledChange {
         name: plugin_name.to_owned(),
         enabled,

@@ -292,4 +292,48 @@ mod tests {
         let (status, _) = call("DELETE", &format!("/v1/tilekit/plugin/{name}"), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    #[serial_test::serial(plugins_dir)]
+    async fn test_a_reinstall_does_not_inherit_the_old_disabled_state() {
+        let name = "api-reinstall-test";
+        let source = tempfile::tempdir().unwrap();
+        let root = source.path().join(name);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(
+            root.join("plugin.json"),
+            json!({
+                "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+                "name": name
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let install = || {
+            call(
+                "POST",
+                "/v1/tilekit/plugin/install",
+                Some(json!({"source": root})),
+            )
+        };
+        let enabled = |body: Value| {
+            body["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|plugin| plugin["name"] == name)
+                .map(|plugin| plugin["enabled"] == true)
+        };
+
+        install().await;
+        call("POST", &format!("/v1/tilekit/plugin/{name}/disable"), None).await;
+        call("DELETE", &format!("/v1/tilekit/plugin/{name}"), None).await;
+        assert!(!crate::utils::config::get_disabled_plugins().contains(&name.to_owned()));
+
+        install().await;
+        let (_, body) = call("GET", "/v1/tilekit/plugin/list", None).await;
+        assert_eq!(enabled(body), Some(true));
+
+        call("DELETE", &format!("/v1/tilekit/plugin/{name}"), None).await;
+    }
 }

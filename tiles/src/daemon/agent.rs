@@ -170,6 +170,7 @@ async fn reload_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
     let pi_agent = pi::new(&modelname, &system_prompt, PY_PORT)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     *agent = Some(pi_agent);
+    log::info!("Reloaded the agent");
     // a fresh Pi holds a conversation no session owns yet
     *state.active_session.lock().await = None;
 
