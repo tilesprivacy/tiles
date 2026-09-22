@@ -28,6 +28,7 @@ from ..commons import (
     _sse,
 )
 from ...schemas import OutputItemDeltaModel, ResponsesRequest
+from . import prefill
 from .client import stream_chat_completions
 
 logger = logging.getLogger("app")
@@ -237,6 +238,7 @@ async def generate_response_chat_stream(
     effort = request.reasoning.effort if request.reasoning else None
     effort_value = getattr(effort, "value", effort)
     body["chat_template_kwargs"] = _reasoning_template_kwargs(effort_value)
+    prefill.remember(request.model, body)
 
     answer_text = ""
     content_index = 0
