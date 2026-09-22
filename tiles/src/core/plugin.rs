@@ -151,7 +151,7 @@ impl fmt::Display for EnabledChange {
         if !self.changed {
             return write!(f, "Plugin {} is already {}", self.name, state);
         }
-        write!(f, "Plugin {} {}. Restart Tiles to apply.", self.name, state)
+        write!(f, "Plugin {} {}", self.name, state)
     }
 }
 

@@ -17,7 +17,7 @@ use crate::{
 // use async_stream::stream;
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Query, State},
     response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
 };
@@ -152,13 +152,26 @@ pub fn get_agent_start_params(provider: impl ConfigProvider) -> Result<(String, 
     Ok((modelname, system_prompt))
 }
 
-/// Drop the running agent and start a fresh one. The modelfile is only read at
-/// start, so this is what applies an edited one without restarting the daemon.
-async fn reload_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+/// What a reload did to the running agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reload {
+    Done,
+    /// a reply was streaming; the reload runs as soon as it finishes
+    Deferred,
+    /// no agent yet, and the next one starts with the change anyway
+    NotRunning,
+    /// nothing changed, so there was nothing to reload
+    Skipped,
+    Failed,
+}
+
+/// Replace the agent in `agent` with a fresh one. Only the model and prompt
+/// are read at start, and Pi reads plugins at start too, so this is what
+/// applies either. The inference server is untouched, the model stays loaded.
+async fn respawn(state: &AppState, agent: &mut Option<PiAgent>) -> Result<(), AppError> {
     // before taking the old one down, so a bad modelfile leaves it running
     let (modelname, system_prompt) = get_agent_start_params(DefaultProvider)?;
-
-    let mut agent = state.agent.lock().await;
 
     // pi is setsid into its own session and PiAgent has no Drop, so letting the
     // handle go would leave the process behind
@@ -167,14 +180,68 @@ async fn reload_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
         let _ = process.kill().await;
     }
 
-    let pi_agent = pi::new(&modelname, &system_prompt, PY_PORT)
-        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-    *agent = Some(pi_agent);
+    *agent = Some(
+        pi::new(&modelname, &system_prompt, PY_PORT)
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?,
+    );
     log::info!("Reloaded the agent");
-    // a fresh Pi holds a conversation no session owns yet
+    // a fresh Pi holds a conversation no session owns yet; the next prompt
+    // replays the stored history of whichever session it is for
     *state.active_session.lock().await = None;
+    Ok(())
+}
 
-    Ok(ApiResponse::success(json!({"message": "reloaded agent"})))
+/// Reload the agent if one is running, without making the caller wait on a
+/// reply in flight: a prompt holds the agent for its whole turn, so a busy
+/// agent is reloaded right after it.
+pub async fn reload_if_running(state: Arc<AppState>) -> (Reload, Option<String>) {
+    let Ok(mut agent) = state.agent.try_lock() else {
+        tokio::spawn(async move {
+            let mut agent = state.agent.lock().await;
+            if agent.is_some()
+                && let Err(err) = respawn(&state, &mut agent).await
+            {
+                log::warn!("Deferred agent reload failed: {err:?}");
+            }
+        });
+        return (Reload::Deferred, None);
+    };
+
+    if agent.is_none() {
+        return (Reload::NotRunning, None);
+    }
+    match respawn(&state, &mut agent).await {
+        Ok(()) => (Reload::Done, None),
+        Err(err) => (Reload::Failed, Some(err.reason())),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReloadParams {
+    /// leave a daemon with no agent alone rather than starting one
+    #[serde(default)]
+    if_running: bool,
+}
+
+/// Drop the running agent and start a fresh one, so an edited modelfile or a
+/// plugin change takes effect without restarting the daemon.
+async fn reload_agent(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ReloadParams>,
+) -> Result<impl IntoResponse, AppError> {
+    if params.if_running {
+        let (reload, error) = reload_if_running(state).await;
+        if let Some(error) = error {
+            return Err(AppError::InternalServerError(error));
+        }
+        return Ok(ApiResponse::success(json!({ "reload": reload })));
+    }
+
+    let mut agent = state.agent.lock().await;
+    respawn(&state, &mut agent).await?;
+    Ok(ApiResponse::success(
+        json!({"message": "reloaded agent", "reload": Reload::Done}),
+    ))
 }
 
 #[debug_handler]
@@ -477,6 +544,24 @@ mod tests {
     use serde_json::json;
     use tokio::sync::Mutex as AsyncMutex;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn test_reload_without_an_agent_leaves_it_to_the_next_start() {
+        let state = std::sync::Arc::new(AppState::for_tests());
+        let (reload, error) = super::reload_if_running(state).await;
+        assert_eq!(reload, super::Reload::NotRunning);
+        assert!(error.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reload_waits_for_a_reply_in_flight() {
+        let state = std::sync::Arc::new(AppState::for_tests());
+        // a prompt holds the agent for its whole turn
+        let turn = state.agent.lock().await;
+        let (reload, _) = super::reload_if_running(state.clone()).await;
+        assert_eq!(reload, super::Reload::Deferred);
+        drop(turn);
+    }
     #[tokio::test]
     async fn test_process_chat_prompt_success_ok() {
         let state = AppState::for_tests();
