@@ -92,6 +92,10 @@ class StartRequest(BaseModel):
     model_cache_path: str
 
 
+class WarmupRequest(BaseModel):
+    model: str
+
+
 class downloadRequest(BaseModel):
     model: str
 

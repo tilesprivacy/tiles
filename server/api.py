@@ -6,10 +6,12 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from . import runtime
+from .backend.llama_server import prefill
 from .schemas import (
     ChatMessage,
     ResponsesRequest,
     StartRequest,
+    WarmupRequest,
 )
 
 logger = logging.getLogger("app")
@@ -68,6 +70,26 @@ async def passthrough_log_raw(reader):
     async for chunk in reader:
         logger.info("stream chunk: %r\n", chunk)  # logs raw bytes/str repr
         yield chunk
+
+
+@app.post("/v1/warmup")
+async def warmup(request: WarmupRequest):
+    """Load the model and prefill the agent's system prompt, before anyone asks.
+
+    The first message after a cold start otherwise waits for both. Safe to
+    repeat: a loaded model is not reloaded, a warm prefix is a cache hit.
+    """
+    runner = await asyncio.to_thread(runtime.backend.get_or_load_model, request.model)
+    prefilled = False
+    try:
+        prefilled = await prefill.warm(request.model)
+    except Exception as exc:  # a failed prefill must not look like a failed load
+        logger.warning("Prefill failed for %s: %s", request.model, exc)
+    return {
+        "message": "Model loaded",
+        "prefilled": prefilled,
+        "warnings": getattr(runner, "warnings", []),
+    }
 
 
 @app.post("/v1/responses")

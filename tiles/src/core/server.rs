@@ -105,3 +105,28 @@ pub async fn ping() -> Result<String> {
         _ => Ok("pong".to_owned()),
     }
 }
+
+/// Load the model and prefill the agent's system prompt before the first
+/// message needs either. Waits for a just-spawned server to start listening.
+/// Returns whether a prompt was prefilled, which needs one earlier request.
+pub async fn warm_up(model: &str) -> Result<bool> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while ping().await.is_err() {
+        if std::time::Instant::now() > deadline {
+            return Err(anyhow!("the inference server did not come up"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let answer: serde_json::Value = Client::builder()
+        .timeout(std::time::Duration::from_secs(600))
+        .build()?
+        .post(format!("http://127.0.0.1:{}/v1/warmup", PY_PORT))
+        .json(&serde_json::json!({ "model": model }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    Ok(answer["prefilled"].as_bool().unwrap_or(false))
+}

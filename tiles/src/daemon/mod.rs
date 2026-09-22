@@ -402,7 +402,10 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
     if show_ui && autostart_inference() {
         tokio::spawn(async {
             match crate::core::server::start_server_daemon().await {
-                Ok(msg) => info!("Inference server: {msg}"),
+                Ok(msg) => {
+                    info!("Inference server: {msg}");
+                    server::warm_up_current_model();
+                }
                 // the daemon is useful without it, and the menu bar offers a retry
                 Err(err) => log::warn!("Could not start the inference server: {err:?}"),
             }
