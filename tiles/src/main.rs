@@ -12,7 +12,8 @@ use tiles::{
         service,
     },
     daemon::{
-        remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
+        agent::Reload, reload_running_agent, remote_status, share_remote_link, start_cmd,
+        start_server, stop_cmd, unshare_remote_link,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
@@ -605,24 +606,26 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                         println!("Downloading plugin from {}..", path);
                     }
                     match install(&path).await {
-                        Ok(installed) => println!("{}", installed),
+                        Ok(installed) => {
+                            println!("{}", installed);
+                            if !installed.unchanged {
+                                apply_to_running_agent().await;
+                            }
+                        }
                         Err(err) => eprintln!("Plugin failed to install due to {}", err),
                     }
                 }
                 PluginCommands::Uninstall { name } => match uninstall(&name) {
-                    Ok(resp) => println!("{}", resp),
+                    Ok(resp) => {
+                        println!("{}", resp);
+                        apply_to_running_agent().await;
+                    }
                     // Show the real reason: it explains bundled plugins and
                     // points at `disable`.
                     Err(err) => eprintln!("{}", err),
                 },
-                PluginCommands::Disable { name } => match plugin::set_enabled(&name, false) {
-                    Ok(resp) => println!("{}", resp),
-                    Err(err) => eprintln!("{}", err),
-                },
-                PluginCommands::Enable { name } => match plugin::set_enabled(&name, true) {
-                    Ok(resp) => println!("{}", resp),
-                    Err(err) => eprintln!("{}", err),
-                },
+                PluginCommands::Disable { name } => set_plugin_enabled(&name, false).await,
+                PluginCommands::Enable { name } => set_plugin_enabled(&name, true).await,
             }
         }
         Some(Commands::Sync(SyncCommands::Link(link_args))) => match link_args.command {
@@ -686,5 +689,32 @@ fn build_logger() {
             env_logger::Env::default().default_filter_or("error,iroh=off,tracing=off"),
         )
         .init()
+    }
+}
+
+async fn set_plugin_enabled(name: &str, enabled: bool) {
+    match plugin::set_enabled(name, enabled) {
+        Ok(change) => {
+            println!("{}", change);
+            if change.changed {
+                apply_to_running_agent().await;
+            }
+        }
+        Err(err) => eprintln!("{}", err),
+    }
+}
+
+/// Pi reads plugins at start, so a running app only sees a change once its
+/// agent reloads. Nothing to do without a daemon: the next one starts fresh.
+async fn apply_to_running_agent() {
+    match reload_running_agent().await {
+        None | Some(Ok(Reload::NotRunning | Reload::Skipped)) => {}
+        Some(Ok(Reload::Done)) => println!("Applied to the running agent"),
+        Some(Ok(Reload::Deferred)) => {
+            println!("Applies to the running agent once its current reply finishes")
+        }
+        Some(Ok(Reload::Failed)) | Some(Err(_)) => eprintln!(
+            "Saved, but the running agent could not reload. It applies the next time Tiles starts."
+        ),
     }
 }

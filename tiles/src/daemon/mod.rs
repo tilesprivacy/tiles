@@ -109,6 +109,21 @@ pub enum AppError {
     CannotProcess(String),
     BadGateway(String),
 }
+impl AppError {
+    /// The human-readable reason, as a client would receive it.
+    pub fn reason(&self) -> String {
+        match self {
+            Self::NotFound(e)
+            | Self::InternalServerError(e)
+            | Self::BadRequest(e)
+            | Self::AlreadyExists(e)
+            | Self::CannotProcess(e)
+            | Self::BadGateway(e) => e.clone(),
+            Self::RequestTimeout => "request timedout".to_string(),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
         let (status, reason) = match self {
@@ -572,6 +587,39 @@ pub async fn ping(port: Option<u32>) -> anyhow::Result<String> {
         Err(err) => Err(anyhow!(format!("Pong failed:  {:?}", err))),
         Ok(resp) => resp.text().await.map_err(Into::into),
     }
+}
+
+/// Asks a running daemon to reload its agent, if it has one, so a change made
+/// outside it reaches the app. None when no daemon is answering.
+pub async fn reload_running_agent() -> Option<Result<agent::Reload>> {
+    #[derive(serde::Deserialize)]
+    struct Answer {
+        data: ReloadAnswer,
+    }
+    #[derive(serde::Deserialize)]
+    struct ReloadAnswer {
+        reload: agent::Reload,
+    }
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .ok()?;
+    let base = format!("http://127.0.0.1:{}", get_port(None));
+    client.get(&base).send().await.ok()?;
+
+    let result = async {
+        let answer: Answer = client
+            .get(format!("{base}/v1/tilekit/agent/reload?if_running=true"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        Ok(answer.data.reload)
+    }
+    .await;
+    Some(result)
 }
 
 async fn wait_until_server_is_up(port: Option<u32>) -> Result<()> {
