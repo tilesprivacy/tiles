@@ -1,21 +1,25 @@
 //! Listing, installing and switching plugins
 //!
-//! Pi reads plugins only when it starts, so nothing here touches a running
-//! agent. Every change answers with `reload_required`, and the client decides
-//! when to call `/v1/tilekit/agent/reload`, which would cut off a chat in flight.
+//! Pi reads plugins only when it starts, so a change that did something
+//! reloads the agent. That is safe to do unasked: a reply in flight finishes
+//! first, the next prompt replays the session's history, and the model stays
+//! loaded in the inference server. `reload` in each answer says what happened.
 
 use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::Path,
+    extract::{Path, State},
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::{
     core::plugin::{self, EnabledChange, Installed, PluginError, PluginSummary},
-    daemon::{ApiResponse, AppError, AppState},
+    daemon::{
+        ApiResponse, AppError, AppState,
+        agent::{Reload, reload_if_running},
+    },
 };
 
 #[derive(Deserialize)]
@@ -29,15 +33,28 @@ struct Change<T> {
     #[serde(flatten)]
     change: T,
     message: String,
-    reload_required: bool,
+    reload: Reload,
+    /// why the agent could not be reloaded; the change itself still stands
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reload_error: Option<String>,
 }
 
-impl<T: std::fmt::Display> Change<T> {
-    fn new(change: T, reload_required: bool) -> Self {
+impl<T> Change<T> {
+    /// Reloads the agent when the change did something.
+    async fn applied(state: Arc<AppState>, change: T, message: String, changed: bool) -> Self {
+        let (reload, reload_error) = if changed {
+            reload_if_running(state).await
+        } else {
+            (Reload::Skipped, None)
+        };
+        if let Some(error) = &reload_error {
+            log::warn!("Plugin change saved but the agent did not reload: {error}");
+        }
         Self {
-            message: change.to_string(),
             change,
-            reload_required,
+            message,
+            reload,
+            reload_error,
         }
     }
 }
@@ -84,6 +101,7 @@ async fn list_plugins() -> Result<Json<ApiResponse<Vec<PluginSummary>>>, AppErro
 }
 
 async fn install_plugin(
+    State(state): State<Arc<AppState>>,
     Json(payload): Json<InstallRequest>,
 ) -> Result<Json<ApiResponse<Change<Installed>>>, AppError> {
     let source = payload.source.trim().to_owned();
@@ -99,14 +117,14 @@ async fn install_plugin(
     .await
     .map_err(|err| AppError::InternalServerError(err.to_string()))??;
 
-    let reload_required = !installed.unchanged;
-    Ok(ApiResponse::success(Change::new(
-        installed,
-        reload_required,
-    )))
+    let (message, changed) = (installed.to_string(), !installed.unchanged);
+    Ok(ApiResponse::success(
+        Change::applied(state, installed, message, changed).await,
+    ))
 }
 
 async fn uninstall_plugin(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<Change<Uninstalled>>>, AppError> {
     let message = blocking({
@@ -115,32 +133,35 @@ async fn uninstall_plugin(
     })
     .await?;
 
-    Ok(ApiResponse::success(Change {
-        change: Uninstalled { name },
-        message,
-        reload_required: true,
-    }))
+    Ok(ApiResponse::success(
+        Change::applied(state, Uninstalled { name }, message, true).await,
+    ))
 }
 
 async fn enable_plugin(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<Change<EnabledChange>>>, AppError> {
-    set_enabled(name, true).await
+    set_enabled(state, name, true).await
 }
 
 async fn disable_plugin(
+    State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
 ) -> Result<Json<ApiResponse<Change<EnabledChange>>>, AppError> {
-    set_enabled(name, false).await
+    set_enabled(state, name, false).await
 }
 
 async fn set_enabled(
+    state: Arc<AppState>,
     name: String,
     enabled: bool,
 ) -> Result<Json<ApiResponse<Change<EnabledChange>>>, AppError> {
     let change = blocking(move || plugin::set_enabled(&name, enabled)).await?;
-    let reload_required = change.changed;
-    Ok(ApiResponse::success(Change::new(change, reload_required)))
+    let (message, changed) = (change.to_string(), change.changed);
+    Ok(ApiResponse::success(
+        Change::applied(state, change, message, changed).await,
+    ))
 }
 
 #[cfg(test)]
@@ -258,7 +279,8 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["data"]["name"], name);
-        assert_eq!(body["data"]["reload_required"], true);
+        // the test state has no agent, and the next one starts with the plugin
+        assert_eq!(body["data"]["reload"], "not_running");
 
         let (_, body) = call("GET", "/v1/tilekit/plugin/list", None).await;
         let listed = body["data"]
@@ -276,18 +298,18 @@ mod tests {
         let (_, body) = call("POST", &disable, None).await;
         assert_eq!(body["data"]["enabled"], false);
         assert_eq!(body["data"]["changed"], true);
-        assert_eq!(body["data"]["reload_required"], true);
+        assert_eq!(body["data"]["reload"], "not_running");
 
         let (_, body) = call("POST", &disable, None).await;
         assert_eq!(body["data"]["changed"], false);
-        assert_eq!(body["data"]["reload_required"], false);
+        assert_eq!(body["data"]["reload"], "skipped");
 
         let (_, body) = call("POST", &format!("/v1/tilekit/plugin/{name}/enable"), None).await;
         assert_eq!(body["data"]["enabled"], true);
 
         let (status, body) = call("DELETE", &format!("/v1/tilekit/plugin/{name}"), None).await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        assert_eq!(body["data"]["reload_required"], true);
+        assert_eq!(body["data"]["reload"], "not_running");
 
         let (status, _) = call("DELETE", &format!("/v1/tilekit/plugin/{name}"), None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
