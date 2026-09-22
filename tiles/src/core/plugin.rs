@@ -18,7 +18,7 @@
 
 use std::{
     collections::BTreeMap,
-    env,
+    fmt,
     fs::{File, remove_dir_all},
     io::{Read, Write},
     path::{Component, Path, PathBuf},
@@ -30,6 +30,7 @@ use std::{
 use anyhow::{Context, Result, anyhow};
 use log::info;
 use reqwest::Client;
+use serde::Serialize;
 use tempfile::{TempDir, tempdir};
 
 use crate::core::agent::types::Commands;
@@ -69,61 +70,156 @@ pub struct AgentPluginManifest {
     pub mcp_dormant: bool,
 }
 
-pub async fn install(path: String) -> Result<String> {
-    if let Ok(url) = reqwest::Url::parse(&path)
-        && matches!(url.scheme(), "http" | "https")
-    {
-        info!("Online Plugin");
+/// Why a plugin operation failed, so a caller can tell the person's mistake
+/// from ours.
+#[derive(Debug)]
+pub enum PluginError {
+    /// No plugin by that name.
+    NotFound(String),
+    /// Shipped with Tiles, so it can be disabled but not removed.
+    Bundled(String),
+    /// The source is not a usable plugin.
+    Invalid(String),
+    /// The url could not be fetched.
+    Download(String),
+    Other(anyhow::Error),
+}
 
-        // No extension check on the url. Hosts commonly serve an archive from a
-        // path with no extension, or pick the format from a query parameter, so
-        // the downloaded bytes decide the format instead.
-        let client = Client::builder().timeout(Duration::from_secs(60)).build()?;
-
-        println!("Downloading plugin from {}..", url);
-
-        let response = client
-            .get(url)
-            .send()
-            .await
-            .map_err(|err| anyhow!("Failed to download the plugin due to {:?}", err))?
-            .error_for_status()
-            .map_err(|err| anyhow!("Failed to download the plugin: {}", err))?;
-
-        let mut tmp_path = env::temp_dir();
-        tmp_path.push("tiles-plugin-download");
-        let mut plugin_file = File::create(&tmp_path)?;
-        plugin_file.write_all(&response.bytes().await?)?;
-        info!("Wrote the plugin to tmp path {:?}", tmp_path);
-        install_from_local_source(tmp_path)
-    } else {
-        info!("Local Plugin");
-        let local_path = PathBuf::from_str(&path).context("Invalid local path")?;
-        install_from_local_source(local_path)
+impl fmt::Display for PluginError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotFound(reason)
+            | Self::Bundled(reason)
+            | Self::Invalid(reason)
+            | Self::Download(reason) => f.write_str(reason),
+            Self::Other(err) => write!(f, "{err:#}"),
+        }
     }
 }
 
-fn install_from_local_source(local_path: PathBuf) -> Result<String> {
+impl std::error::Error for PluginError {}
+
+impl From<anyhow::Error> for PluginError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Other(err)
+    }
+}
+
+impl PluginError {
+    fn invalid(err: impl fmt::Display) -> Self {
+        Self::Invalid(err.to_string())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct Installed {
+    pub name: String,
+    /// targets a spec version the bundled adapter cannot read yet
+    pub mcp_dormant: bool,
+    /// the source already was the installed copy, so nothing was written
+    pub unchanged: bool,
+}
+
+impl fmt::Display for Installed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.unchanged {
+            return write!(f, "Plugin {} is already installed here", self.name);
+        }
+        write!(f, "Successfully installed plugin {}", self.name)?;
+        if self.mcp_dormant {
+            f.write_str(
+                "\nNote: this plugin targets Agent Plugins 1.1.0. Skills and \
+                 extensions work, but its MCP servers stay dormant until the \
+                 bundled adapter supports 1.1.0.",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnabledChange {
+    pub name: String,
+    pub enabled: bool,
+    /// false when the plugin already was in that state
+    pub changed: bool,
+}
+
+impl fmt::Display for EnabledChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = if self.enabled { "enabled" } else { "disabled" };
+        if !self.changed {
+            return write!(f, "Plugin {} is already {}", self.name, state);
+        }
+        write!(f, "Plugin {} {}. Restart Tiles to apply.", self.name, state)
+    }
+}
+
+/// True for a url `install` downloads rather than a local path.
+pub fn is_url(source: &str) -> bool {
+    reqwest::Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+pub async fn install(source: &str) -> Result<Installed, PluginError> {
+    if !is_url(source) {
+        info!("Local Plugin");
+        let local_path = PathBuf::from_str(source).map_err(PluginError::invalid)?;
+        return install_from_local_source(local_path);
+    }
+
+    info!("Online Plugin");
+    // No extension check on the url. Hosts commonly serve an archive from a
+    // path with no extension, or pick the format from a query parameter, so
+    // the downloaded bytes decide the format instead.
+    let client = Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(anyhow::Error::from)?;
+    let bytes = client
+        .get(source)
+        .send()
+        .await
+        .and_then(|response| response.error_for_status())
+        .map_err(|err| PluginError::Download(format!("Failed to download the plugin: {err}")))?
+        .bytes()
+        .await
+        .map_err(|err| PluginError::Download(format!("Failed to download the plugin: {err}")))?;
+
+    // its own dir, so two installs at once cannot overwrite each other
+    let download_dir = tempdir().context("Failed to create tmp dir")?;
+    let download = download_dir.path().join("download");
+    File::create(&download)
+        .and_then(|mut file| file.write_all(&bytes))
+        .context("Failed to save the downloaded plugin")?;
+    info!("Wrote the plugin to tmp path {:?}", download);
+    install_from_local_source(download)
+}
+
+fn install_from_local_source(local_path: PathBuf) -> Result<Installed, PluginError> {
     if !matches!(local_path.try_exists(), Ok(true)) {
-        return Err(anyhow!("{:?} does not exist", local_path));
+        return Err(PluginError::Invalid(format!(
+            "{:?} does not exist",
+            local_path
+        )));
     }
 
     // A plugin is just a folder, so take one directly. No archive step means a
     // person or an agent can read a plugin in place with ordinary file tools.
     if local_path.is_dir() {
         if !is_plugin_folder(&local_path) {
-            return Err(anyhow!(
+            return Err(PluginError::Invalid(format!(
                 "{:?} has no plugin.json, so it is not a plugin folder. See https://agent-plugins.org/",
                 local_path
-            ));
+            )));
         }
         return install_plugin_root(&local_path);
     }
 
-    let kind = ArchiveKind::detect(&local_path)?;
+    let kind = ArchiveKind::detect(&local_path).map_err(PluginError::invalid)?;
 
     // `_tmp_dir` must outlive the copy, so bind it here
-    let (_tmp_dir, plugin_root) = unpack_archive(&local_path, kind)?;
+    let (_tmp_dir, plugin_root) =
+        unpack_archive(&local_path, kind).map_err(PluginError::invalid)?;
     install_plugin_root(&plugin_root)
 }
 
@@ -154,8 +250,8 @@ fn unpack_archive(local_path: &Path, kind: ArchiveKind) -> Result<(TempDir, Path
 }
 
 /// Validates a plugin folder and copies it into the installed plugins dir.
-fn install_plugin_root(plugin_root: &Path) -> Result<String> {
-    let manifest = read_manifest(plugin_root)?;
+fn install_plugin_root(plugin_root: &Path) -> Result<Installed, PluginError> {
+    let manifest = read_manifest(plugin_root).map_err(PluginError::invalid)?;
     let installed_root = plugins_dir()?.join(&manifest.name);
 
     // Installing a folder over itself would delete it before the copy.
@@ -164,10 +260,11 @@ fn install_plugin_root(plugin_root: &Path) -> Result<String> {
         .zip(std::fs::canonicalize(&installed_root).ok())
         .is_some_and(|(from, to)| from == to);
     if same_place {
-        return Ok(format!(
-            "Plugin {} is already installed here",
-            manifest.name
-        ));
+        return Ok(Installed {
+            name: manifest.name,
+            mcp_dormant: manifest.mcp_dormant,
+            unchanged: true,
+        });
     }
 
     if installed_root.exists() {
@@ -178,18 +275,14 @@ fn install_plugin_root(plugin_root: &Path) -> Result<String> {
     // A half-copied plugin is worse than none, so undo on any failure.
     if let Err(err) = copy_recursive(plugin_root, &installed_root) {
         let _ = remove_dir_all(&installed_root);
-        return Err(err);
+        return Err(err.into());
     }
 
-    let mut message = format!("Successfully installed plugin {}", manifest.name);
-    if manifest.mcp_dormant {
-        message.push_str(
-            "\nNote: this plugin targets Agent Plugins 1.1.0. Skills and \
-             extensions work, but its MCP servers stay dormant until the \
-             bundled adapter supports 1.1.0.",
-        );
-    }
-    Ok(message)
+    Ok(Installed {
+        name: manifest.name,
+        mcp_dormant: manifest.mcp_dormant,
+        unchanged: false,
+    })
 }
 
 /// Removes skills that older versions copied into the shared skills dir.
@@ -543,22 +636,33 @@ pub fn installed_extension_entrypoints() -> Vec<PathBuf> {
     entrypoints
 }
 
-pub fn uninstall(plugin_name: &str) -> Result<String> {
+/// A name from outside must never become a path out of the plugins dir.
+fn checked_name(plugin_name: &str) -> Result<(), PluginError> {
+    if is_valid_plugin_name(plugin_name) {
+        return Ok(());
+    }
+    Err(PluginError::NotFound(format!(
+        "No plugin named {}. Run `tiles plugin list` to see what is available.",
+        plugin_name
+    )))
+}
+
+pub fn uninstall(plugin_name: &str) -> Result<String, PluginError> {
+    checked_name(plugin_name)?;
     let plugin_root = plugins_dir()?.join(plugin_name);
     if !plugin_root.join("plugin.json").is_file() {
         // Shipped plugins live in the read-only lib dir and would come back on
         // the next upgrade, so point at the switch that actually sticks.
         if bundled_plugins_dir().is_some_and(|dir| dir.join(plugin_name).is_dir()) {
-            return Err(anyhow!(
+            return Err(PluginError::Bundled(format!(
                 "{} ships with Tiles and cannot be uninstalled. Use `tiles plugin disable {}` instead.",
-                plugin_name,
-                plugin_name
-            ));
+                plugin_name, plugin_name
+            )));
         }
-        return Err(anyhow!(
+        return Err(PluginError::NotFound(format!(
             "Plugin {} is not installed. Run `tiles plugin list` to see what is.",
             plugin_name
-        ));
+        )));
     }
 
     remove_dir_all(&plugin_root)
@@ -568,6 +672,7 @@ pub fn uninstall(plugin_name: &str) -> Result<String> {
 
 /// One row of `tiles plugin list`, describing what a plugin is for rather
 /// than how it works.
+#[derive(Debug, Serialize)]
 pub struct PluginSummary {
     pub name: String,
     pub description: String,
@@ -791,27 +896,25 @@ pub fn list() -> Result<()> {
 }
 
 /// Turns a plugin on or off without touching its files.
-pub fn set_enabled(plugin_name: &str, enabled: bool) -> Result<String> {
+pub fn set_enabled(plugin_name: &str, enabled: bool) -> Result<EnabledChange, PluginError> {
+    checked_name(plugin_name)?;
     let known = all_plugin_roots()
         .iter()
         .filter_map(|root| plugin_name_of(root))
         .any(|name| name == plugin_name);
     if !known {
-        return Err(anyhow!(
+        return Err(PluginError::NotFound(format!(
             "No plugin named {}. Run `tiles plugin list` to see what is available.",
             plugin_name
-        ));
+        )));
     }
 
     let changed = set_plugin_disabled(plugin_name, !enabled)?;
-    let state = if enabled { "enabled" } else { "disabled" };
-    if !changed {
-        return Ok(format!("Plugin {} is already {}", plugin_name, state));
-    }
-    Ok(format!(
-        "Plugin {} {}. Restart Tiles to apply.",
-        plugin_name, state
-    ))
+    Ok(EnabledChange {
+        name: plugin_name.to_owned(),
+        enabled,
+        changed,
+    })
 }
 
 #[cfg(test)]

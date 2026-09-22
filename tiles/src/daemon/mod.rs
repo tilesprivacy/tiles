@@ -50,6 +50,7 @@ pub mod agent;
 pub mod atproto;
 pub mod diagnostics;
 pub mod modelfile;
+pub mod plugin;
 pub mod server;
 pub mod session;
 use crate::{
@@ -106,6 +107,7 @@ pub enum AppError {
     BadRequest(String),
     AlreadyExists(String),
     CannotProcess(String),
+    BadGateway(String),
 }
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -116,6 +118,7 @@ impl IntoResponse for AppError {
             Self::BadRequest(e) => (StatusCode::BAD_REQUEST, e),
             Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
             Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
+            Self::BadGateway(e) => (StatusCode::BAD_GATEWAY, e),
         };
 
         let body = Json(json!({
@@ -352,6 +355,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
         .merge(account_router())
         .merge(session_router())
         .merge(atproto_router())
+        .merge(plugin::plugin_router())
         .merge(diagnostics::diagnostics_router())
         // .layer(service)
         .layer(cors_layer());

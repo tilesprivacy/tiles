@@ -600,10 +600,15 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 PluginCommands::List => {
                     plugin::list()?;
                 }
-                PluginCommands::Install { path } => match install(path).await {
-                    Ok(resp) => println!("{}", resp),
-                    Err(err) => eprintln!("Plugin failed to install due to {:?}", err),
-                },
+                PluginCommands::Install { path } => {
+                    if plugin::is_url(&path) {
+                        println!("Downloading plugin from {}..", path);
+                    }
+                    match install(&path).await {
+                        Ok(installed) => println!("{}", installed),
+                        Err(err) => eprintln!("Plugin failed to install due to {}", err),
+                    }
+                }
                 PluginCommands::Uninstall { name } => match uninstall(&name) {
                     Ok(resp) => println!("{}", resp),
                     // Show the real reason: it explains bundled plugins and
