@@ -1007,6 +1007,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(plugins_dir)]
     fn test_mcp_config_keeps_user_servers_and_settings() {
         // mcp.json is where users add servers by hand, so rewriting it must
         // not disturb anything except agentPluginPaths.
@@ -1032,6 +1033,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(plugins_dir)]
     fn test_mcp_config_turns_direct_tools_on_by_default() {
         // Without this the model only sees the generic `mcp` gateway.
         let tmp = tempdir().expect("created tmp dir");
@@ -1046,6 +1048,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(plugins_dir)]
     fn test_mcp_config_respects_direct_tools_turned_off() {
         // it is a default, not something Tiles forces on every start
         let tmp = tempdir().expect("created tmp dir");
@@ -1064,6 +1067,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(plugins_dir)]
     fn test_mcp_config_drops_tool_cache_when_plugin_set_changes() {
         // The adapter only re-probes servers when this cache is gone, so a
         // changed plugin set has to remove it.
@@ -1086,6 +1090,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(plugins_dir)]
     fn test_mcp_config_keeps_tool_cache_when_unchanged() {
         let tmp = tempdir().expect("created tmp dir");
         let mcp_path = tmp.path().join("mcp.json");
@@ -1110,6 +1115,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial(plugins_dir)]
     fn test_mcp_config_not_created_when_nothing_to_write() {
         let tmp = tempdir().expect("created tmp dir");
         let mcp_path = tmp.path().join("mcp.json");
