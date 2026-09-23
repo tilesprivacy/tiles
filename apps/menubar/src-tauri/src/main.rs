@@ -110,7 +110,6 @@ fn main() {
             atproto::init(app.handle());
             sessions::init(app.handle());
             remote::init(app.handle());
-            // before the watcher, whose every pass reconciles it
             awake::init(app.handle());
             daemon::init(app.handle());
 

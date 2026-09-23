@@ -43,7 +43,6 @@ export type Atproto =
 export type Session = { id: string; name: string; createdAt: number };
 export type Sessions = { state: "unknown" } | { state: "ready"; sessions: Session[] };
 
-/** the power assertion, held by the menubar and not the daemon */
 export type Awake = {
   active: boolean;
   paused: boolean;
@@ -131,6 +130,18 @@ export function connect(): () => void {
     connected = false;
     listeners.forEach((listener) => void listener.then((unlisten) => unlisten()));
   };
+}
+
+/** keeps the last answer that named an identity */
+export function held<T, L>(read: () => T, live: (value: T) => L | null): { value: L | null } {
+  const kept = $state<{ value: L | null }>({ value: live(read()) });
+
+  $effect(() => {
+    const next = live(read());
+    if (next !== null) kept.value = next;
+  });
+
+  return kept;
 }
 
 /** both ends carry the meaning, the middle is a base32 blur at 380px */

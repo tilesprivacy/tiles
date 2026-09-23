@@ -11,8 +11,8 @@
   import Masthead, { type Mode } from "../lib/Masthead.svelte";
   import ProviderMark from "../lib/ProviderMark.svelte";
   import Row from "../lib/Row.svelte";
-  import Switch from "../lib/Switch.svelte";
   import SessionList from "../lib/SessionList.svelte";
+  import Switch from "../lib/Switch.svelte";
   import Zone from "../lib/Zone.svelte";
   import { Copier } from "../lib/copy.svelte";
   import { contextLabel, describe } from "../lib/model";
@@ -21,6 +21,7 @@
     account,
     atproto,
     health,
+    held,
     inference,
     remote,
     sessions,
@@ -93,64 +94,75 @@
     }
   });
 
+  const kept = held(
+    () => atproto.value,
+    (at) => (at.state === "session" ? at : null),
+  );
+
   const atmosphere = $derived.by(() => {
-    switch (atproto.value.state) {
-      case "session": {
-        // the name takes the title when there is one, and the handle carries
-        // the did off the row when it does
-        const name = atproto.value.displayName?.trim() || null;
-        return {
-          name: name ?? atproto.value.handle,
-          title: name ?? `@${atproto.value.handle}`,
-          sub: name ? `@${atproto.value.handle}` : truncateMiddle(atproto.value.did, 16, 6),
-          avatar: atproto.value.avatar ?? null,
-        };
-      }
-      case "pending":
-        return {
-          name: atproto.value.handle,
-          title: `@${atproto.value.handle}`,
-          sub: "Waiting for your browser",
-          avatar: null,
-        };
-      default:
-        return { name: "?", title: "Not connected", sub: "", avatar: null };
+    if (atproto.value.state === "pending") {
+      return {
+        name: atproto.value.handle,
+        title: `@${atproto.value.handle}`,
+        sub: "Waiting for your browser",
+        avatar: null,
+      };
     }
+
+    const session = atproto.value.state === "none" ? null : kept.value;
+    if (session === null) {
+      return { name: "?", title: "Not connected", sub: "", avatar: null };
+    }
+
+    const name = session.displayName?.trim() || null;
+    return {
+      name: name ?? session.handle,
+      title: name ?? `@${session.handle}`,
+      sub: name ? `@${session.handle}` : truncateMiddle(session.did, 16, 6),
+      avatar: session.avatar ?? null,
+    };
   });
 
   const signedOut = $derived(atproto.value.state === "none");
   const signingIn = $derived(atproto.value.state === "pending");
-  const signedIn = $derived(atproto.value.state === "session");
+  const signedIn = $derived(!signedOut && !signingIn && kept.value !== null);
+  const waiting = $derived(!signedOut && !signingIn && kept.value === null);
 
-  // signed out the row opens the drawer, signed in it pushes, and mid-login it
-  // is neither
   const enterAtmosphere = $derived(
     signedOut ? askForHandle : signedIn ? () => nav.push("atmosphere") : undefined,
   );
 
   let drawer = $state(false);
   let signInError = $state<string | null>(null);
+  // plain, not state: it only decides whether a settled login still owns the drawer
+  let attempt = 0;
 
-  // the browser takes key off the panel, so the drawer would come back open
-  // over an account that is already signed in
   $effect(() => {
-    if (atproto.value.state === "session") drawer = false;
+    if (atproto.value.state === "session") closeDrawer();
   });
 
   function askForHandle() {
-    drawer = !drawer;
-    if (!drawer) signInError = null;
+    if (drawer) {
+      closeDrawer();
+      return;
+    }
+    drawer = true;
   }
 
-  // the daemon holds this open for the whole browser round trip, so the await
-  // outlives the panel being on screen
+  function closeDrawer() {
+    drawer = false;
+    signInError = null;
+    attempt += 1;
+  }
+
   async function signIn(handle: string) {
     signInError = null;
+    const mine = attempt;
     try {
       await invoke("atproto_login", { handle });
-      drawer = false;
+      if (mine === attempt) drawer = false;
     } catch (err) {
-      signInError = String(err);
+      if (mine === attempt) signInError = String(err);
     }
   }
 
@@ -263,8 +275,8 @@
     size="large"
     title={atmosphere.title}
     sub={atmosphere.sub}
-    submono={atproto.value.state === "session"}
-    dimmed={atproto.value.state === "unknown"}
+    submono={signedIn}
+    dimmed={waiting}
     onselect={enterAtmosphere}
   >
     {#snippet leading()}
@@ -279,8 +291,6 @@
     {/snippet}
   </Row>
 
-  <!-- the panel's height follows its content, so opening this grows the window
-       with it, one resize per frame the way a push does -->
   <div class="drawer" data-open={drawer || signingIn}>
     <div class="drawer__clip" inert={!drawer && !signingIn}>
       <div class="drawer__body">
@@ -288,9 +298,9 @@
           open={drawer && !signingIn}
           pending={signingIn}
           onsubmit={signIn}
-          oncancel={() => (drawer = false)}
+          oncancel={closeDrawer}
         />
-        {#if signInError}<p class="drawer__error">{signInError}</p>{/if}
+        {#if signInError}<p class="drawer__error" role="alert">{signInError}</p>{/if}
       </div>
     </div>
   </div>
@@ -375,8 +385,6 @@
 <Footer {note} alert={health.value.state === "down"} />
 
 <style>
-  /* the zone's rule runs full bleed and carries a zone label, so a rule that
-     is inset and interrupted by its own name is the level under it */
   .account {
     display: flex;
     align-items: center;
@@ -401,17 +409,14 @@
     margin-top: 9px;
   }
 
-  /* the zone label carries 5 of the 9 this wants, and a label under a label
-     needs the same step everything else separates on */
   .account:first-of-type {
     margin-top: 4px;
   }
 
-  /* the row is the button, so this is a span. two buttons in one row is one
-     too many, and the rail already says which row is live */
   .signin {
     flex: none;
-    clip-path: polygon(0 0, 100% 0, 100% calc(100% - 3px), calc(100% - 3px) 100%, 0 100%);
+    --cut: 3px;
+    clip-path: var(--clip-cut);
     padding: 3px 7px;
     background: var(--steel);
     color: var(--row-mark, var(--ash));
@@ -437,7 +442,6 @@
     grid-template-rows: 1fr;
   }
 
-  /* the padding rides inside the clip, so a shut drawer is exactly zero */
   .drawer__clip {
     min-height: 0;
     overflow: hidden;

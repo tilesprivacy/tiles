@@ -23,6 +23,13 @@
 
   /* the chamfer, one cut on every chip */
   --cut: 4px;
+  --clip-cut: polygon(
+    0 0,
+    100% 0,
+    100% calc(100% - var(--cut)),
+    calc(100% - var(--cut)) 100%,
+    0 100%
+  );
 
   --dur-push: 180ms;
   --dur-state: 140ms;
@@ -51,8 +58,13 @@
   --slate: #8f8f9a;
   --steel: #1d1d1d;
   --rule: rgba(255, 255, 255, 0.1);
+  --frame-rest: rgba(255, 255, 255, 0.22);
+  --frame-live: rgba(247, 255, 97, 0.5);
+  --cell-fg: #5c5c64;
   /* the daemon being down, and nothing else. yellow already means live */
   --alert: #ff5f52;
+
+  --lift: 0 6px 18px rgba(0, 0, 0, 0.55);
 }
 
 /* turns every push and every state flip into a swap without a second code path */

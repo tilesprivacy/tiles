@@ -1,8 +1,6 @@
 <script lang="ts">
   interface Props {
-    /** the drawer is open, rather than sitting shut at zero height */
     open: boolean;
-    /** the request is out and the browser has not come back */
     pending: boolean;
     onsubmit: (handle: string) => void;
     oncancel: () => void;
@@ -13,27 +11,23 @@
   let value = $state("");
   let input = $state<HTMLInputElement | null>(null);
 
-  const ready = $derived(value.trim().length > 0);
+  const handle = $derived(value.trim().replace(/^@+/, ""));
+  const ready = $derived(handle.length > 0);
 
-  // the field stays mounted so the drawer can animate shut, so the caret has
-  // to follow the drawer rather than the mount
   $effect(() => {
     if (open) {
       input?.focus();
     } else {
       input?.blur();
-      // a failed sign-in comes back here, and retyping a handle you already
-      // typed is the wrong thing to ask for
       if (!pending) value = "";
     }
   });
 
   function submit() {
     if (!ready || pending) return;
-    onsubmit(value);
+    onsubmit(handle);
   }
 
-  // escape belongs to the field while it is open, the panel takes it back after
   function key(event: KeyboardEvent) {
     if (event.key === "Escape") {
       event.stopPropagation();
@@ -49,8 +43,6 @@
   }
 </script>
 
-<!-- the switch's construction, one frame with cells inset into it, so this
-     reads as a sibling of the toggle rather than as a web form -->
 <div class="field" data-ready={ready} data-pending={pending}>
   <span class="field__cell">
     <span class="field__at">@</span>
@@ -69,19 +61,22 @@
       onkeydown={key}
     />
   </span>
-  <button
-    class="field__go"
-    disabled={!ready || pending}
-    aria-label="Sign in"
-    onclick={submit}
-  >
-    ↵
+  <button class="field__go" disabled={!ready || pending} aria-label="Sign in" onclick={submit}>
+    <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
+      <path
+        d="M10 2.5v4h-7M5 4.5l-2 2 2 2"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.2"
+        stroke-linecap="square"
+      />
+    </svg>
   </button>
 </div>
 
 <style>
   .field {
-    --frame: rgba(255, 255, 255, 0.22);
+    --frame: var(--frame-rest);
 
     position: relative;
     display: flex;
@@ -89,20 +84,13 @@
     height: 26px;
     padding: 1px;
     background: var(--frame);
-    clip-path: polygon(
-      0 0,
-      100% 0,
-      100% calc(100% - var(--cut)),
-      calc(100% - var(--cut)) 100%,
-      0 100%
-    );
+    clip-path: var(--clip-cut);
     transition: background var(--dur-state) ease-out;
   }
 
-  /* the switch lights its frame when it is on, this lights it when it is yours */
   .field:focus-within,
   .field[data-pending="true"] {
-    --frame: rgba(247, 255, 97, 0.5);
+    --frame: var(--frame-live);
   }
 
   .field__cell {
@@ -115,7 +103,6 @@
     background: var(--steel);
   }
 
-  /* the handle is typed without it, so the field carries it */
   .field__at {
     flex: none;
     color: var(--signal);
@@ -139,15 +126,16 @@
     opacity: 0.6;
   }
 
-  /* the switch's lit cell doing the same job it does there, the half that is
-     live. the cut is one shorter so it stays parallel to the frame's */
   .field__go {
     flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 34px;
     border: none;
     padding: 0;
     background: var(--steel);
-    color: #5c5c64;
+    color: var(--cell-fg);
     clip-path: polygon(
       0 0,
       100% 0,
@@ -163,13 +151,20 @@
       color var(--dur-state) ease-out;
   }
 
-  .field[data-ready="true"] .field__go {
+  .field[data-ready="true"] .field__go:not(:disabled) {
     background: var(--signal);
     color: var(--void);
   }
 
-  /* the switch runs its light around the whole frame, there is only room for
-     one edge here */
+  .field__go:not(:disabled):hover {
+    color: var(--bone);
+  }
+
+  .field[data-ready="true"] .field__go:not(:disabled):hover {
+    background: var(--bone);
+    color: var(--void);
+  }
+
   .field[data-pending="true"]::after {
     content: "";
     position: absolute;
