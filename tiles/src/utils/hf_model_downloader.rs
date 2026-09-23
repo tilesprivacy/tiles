@@ -122,8 +122,17 @@ impl RepoFile {
 
 /// the files a pull of this model fetches, read off the hub's listing
 pub async fn repo_files(modelname: &str, quant: Option<&str>) -> Result<Vec<RepoFile>> {
+    Ok(repo_snapshot(modelname, quant).await?.1)
+}
+
+/// the commit the hub is serving, and the files a pull fetches from it
+pub async fn repo_snapshot(
+    modelname: &str,
+    quant: Option<&str>,
+) -> Result<(String, Vec<RepoFile>)> {
     #[derive(Deserialize)]
     struct Listing {
+        sha: String,
         siblings: Vec<File>,
     }
     #[derive(Deserialize)]
@@ -154,7 +163,7 @@ pub async fn repo_files(modelname: &str, quant: Option<&str>) -> Result<Vec<Repo
         .await?;
 
     let quant_gguf = quant_gguf(quant);
-    Ok(listing
+    let files = listing
         .siblings
         .into_iter()
         .filter(|file| wanted(&file.rfilename, &quant_gguf))
@@ -167,7 +176,14 @@ pub async fn repo_files(modelname: &str, quant: Option<&str>) -> Result<Vec<Repo
                 .unwrap_or_default(),
             name: file.rfilename,
         })
-        .collect())
+        .collect();
+    Ok((listing.sha, files))
+}
+
+/// where hf-hub keeps a model: `blobs/`, `snapshots/<commit>/` and `refs/`
+pub fn repo_dir(modelname: &str) -> Result<std::path::PathBuf> {
+    Ok(get_or_create_model_download_path()?
+        .join(format!("models--{}", modelname.replace('/', "--"))))
 }
 
 /// bytes a pull of this model would fetch
@@ -192,10 +208,7 @@ pub struct Downloaded {
 /// it is written, and renames it to `<blob>` once done, so both are readable
 /// without having to track anything ourselves.
 pub fn downloaded(modelname: &str, files: &[RepoFile]) -> Result<Downloaded> {
-    let blobs = get_or_create_model_download_path()?
-        .join(format!("models--{}", modelname.replace('/', "--")))
-        .join("blobs");
-    Ok(downloaded_in(&blobs, files))
+    Ok(downloaded_in(&repo_dir(modelname)?.join("blobs"), files))
 }
 
 fn downloaded_in(blobs: &Path, files: &[RepoFile]) -> Downloaded {
@@ -213,7 +226,8 @@ fn downloaded_in(blobs: &Path, files: &[RepoFile]) -> Downloaded {
     Downloaded { bytes, complete }
 }
 
-fn committed(part: &Path, size: u64) -> Option<u64> {
+/// bytes of `part` already written, from the marker in its last 8 bytes
+pub fn committed(part: &Path, size: u64) -> Option<u64> {
     let mut file = std::fs::File::open(part).ok()?;
     if file.metadata().ok()?.len() != size + 8 {
         return None;
