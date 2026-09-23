@@ -9,6 +9,8 @@ pub struct Candidate {
     pub label: &'static str,
     pub repo: &'static str,
     pub quant: &'static str,
+    /// the shipped modelfile that runs it, under the lib dir's `modelfiles/`
+    pub modelfile: &'static str,
 }
 
 impl Candidate {
@@ -25,32 +27,47 @@ pub const LINEUP: [Candidate; 5] = [
         label: "Gemma 4 E2B",
         repo: "unsloth/gemma-4-E2B-it-GGUF",
         quant: "Q4_K_M",
+        modelfile: "gemma-4-e2b-gguf",
     },
     Candidate {
         id: "gemma-4-e4b",
         label: "Gemma 4 E4B",
         repo: "unsloth/gemma-4-E4B-it-GGUF",
         quant: "Q4_K_M",
+        modelfile: "gemma-4-e4b-gguf",
     },
     Candidate {
         id: "gemma-4-12b",
         label: "Gemma 4 12B",
         repo: "unsloth/gemma-4-12b-it-GGUF",
         quant: "Q4_K_M",
+        modelfile: "gemma-4-12b-gguf",
     },
     Candidate {
         id: "gemma-4-26b-a4b",
         label: "Gemma 4 26B-A4B",
         repo: "unsloth/gemma-4-26B-A4B-it-GGUF",
         quant: "UD-Q4_K_M",
+        modelfile: "gemma-4-26b-a4b-gguf",
     },
     Candidate {
         id: "gemma-4-31b",
         label: "Gemma 4 31B",
         repo: "unsloth/gemma-4-31B-it-GGUF",
         quant: "Q4_K_M",
+        modelfile: "gemma-4-31b-gguf",
     },
 ];
+
+pub fn by_id(id: &str) -> Option<&'static Candidate> {
+    LINEUP.iter().find(|candidate| candidate.id == id)
+}
+
+/// True when the user's modelfile holds edits of their own, rather than one
+/// of the shipped modelfiles a switch would put back.
+pub fn is_edited(user: Option<&str>, shipped: &[String]) -> bool {
+    user.is_some_and(|text| !shipped.iter().any(|shipped| shipped.trim() == text.trim()))
+}
 
 /// Headroom kept free on the device for whatever else is using it.
 const BUDGET_SHARE: f64 = 0.9;
@@ -156,6 +173,30 @@ mod tests {
         assert_eq!(LINEUP[recommend(&fits_on(3.0))].id, "gemma-4-e2b");
         // nothing fits and there is no moe to fall back on
         assert_eq!(LINEUP[recommend(&fits_on(0.5))].id, "gemma-4-e2b");
+    }
+
+    #[test]
+    fn only_a_hand_edited_modelfile_counts_as_edited() {
+        let shipped = vec!["FROM a\nSYSTEM x\n".to_owned(), "FROM b\n".to_owned()];
+        assert!(!is_edited(None, &shipped));
+        assert!(!is_edited(Some("FROM b\n\n"), &shipped));
+        assert!(is_edited(Some("FROM a\nSYSTEM mine\n"), &shipped));
+    }
+
+    #[test]
+    fn every_lineup_model_has_a_shipped_modelfile_that_runs_it() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../modelfiles");
+        for candidate in LINEUP {
+            let text = std::fs::read_to_string(dir.join(candidate.modelfile))
+                .unwrap_or_else(|_| panic!("{} has no modelfile", candidate.id));
+            let modelfile = tilekit::modelfile::parse(&text).unwrap();
+            let from = modelfile.from.unwrap();
+            let spec = match modelfile.quant {
+                Some(quant) => format!("{from}:{quant}"),
+                None => from,
+            };
+            assert_eq!(spec, candidate.spec(), "{}", candidate.modelfile);
+        }
     }
 
     #[test]

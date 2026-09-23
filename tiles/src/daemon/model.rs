@@ -12,6 +12,7 @@ use std::{
 
 use axum::{
     Json, Router,
+    extract::State,
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive},
@@ -27,12 +28,19 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     core::{
         download::{self, Progress},
-        models::{Candidate, Fit, LINEUP, Need, fit, recommend},
+        models::{Candidate, Fit, LINEUP, Need, by_id, fit, is_edited, recommend},
         server,
     },
-    daemon::{ApiResponse, AppError, AppState},
+    daemon::{
+        ApiResponse, AppError, AppState,
+        agent::{Reload, reload_if_running},
+        server::warm_up_current_model,
+    },
+    repl::{resolve_gguf_path, user_modelfile_path},
     utils::{
-        config::get_config_json,
+        config::{
+            ConfigProvider, DefaultProvider, get_config_json, get_model_cache, update_current_model,
+        },
         disk::model_volume_space,
         hf_model_downloader::{Downloaded, downloaded, repo_files},
     },
@@ -40,7 +48,7 @@ use crate::{
 
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
-enum State {
+enum DiskState {
     Ready,
     Partial,
     Missing,
@@ -53,7 +61,7 @@ struct ModelEntry {
     id: &'static str,
     label: &'static str,
     spec: String,
-    state: State,
+    state: DiskState,
     download_bytes: Option<u64>,
     downloaded_bytes: u64,
     vram_bytes: Option<u64>,
@@ -92,6 +100,92 @@ pub fn model_router() -> Router<Arc<AppState>> {
                 .post(start_download)
                 .delete(cancel_download),
         )
+        .route(
+            "/v1/tilekit/model/select",
+            axum::routing::post(select_model),
+        )
+}
+
+#[derive(Deserialize)]
+struct SelectRequest {
+    id: String,
+    /// switch even though the user's modelfile holds edits of their own,
+    /// which the switch replaces
+    #[serde(default)]
+    replace_edited: bool,
+}
+
+#[derive(Serialize)]
+struct Selected {
+    id: &'static str,
+    spec: String,
+    reload: Reload,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reload_error: Option<String>,
+}
+
+fn internal(err: impl std::fmt::Display) -> AppError {
+    AppError::InternalServerError(err.to_string())
+}
+
+/// Makes a downloaded lineup model the one Tiles runs: its shipped modelfile
+/// becomes the user's, the agent reloads onto it, and the model loads and
+/// warms in the background.
+async fn select_model(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<SelectRequest>,
+) -> Result<Json<ApiResponse<Selected>>, AppError> {
+    let candidate = by_id(&request.id)
+        .ok_or_else(|| AppError::NotFound(format!("No model {} to switch to", request.id)))?;
+
+    let on_disk = get_model_cache(candidate.repo)
+        .ok()
+        .is_some_and(|path| resolve_gguf_path(&path, Some(candidate.quant)).is_ok());
+    if !on_disk {
+        return Err(AppError::CannotProcess(format!(
+            "{} is not downloaded yet",
+            candidate.label
+        )));
+    }
+
+    let shipped_dir = DefaultProvider
+        .get_lib_dir()
+        .map_err(internal)?
+        .join("modelfiles");
+    let modelfile = std::fs::read_to_string(shipped_dir.join(candidate.modelfile))
+        .map_err(|err| internal(format!("{} is missing: {err}", candidate.modelfile)))?;
+    let shipped: Vec<String> = std::fs::read_dir(&shipped_dir)
+        .map_err(internal)?
+        .filter_map(|entry| std::fs::read_to_string(entry.ok()?.path()).ok())
+        .collect();
+
+    let user_path = user_modelfile_path(&DefaultProvider).map_err(internal)?;
+    let user = std::fs::read_to_string(&user_path).ok();
+    if is_edited(user.as_deref(), &shipped) && !request.replace_edited {
+        return Err(AppError::AlreadyExists(
+            "Your modelfile has edits of your own, and switching models replaces it".to_owned(),
+        ));
+    }
+
+    if let Some(parent) = user_path.parent() {
+        std::fs::create_dir_all(parent).map_err(internal)?;
+    }
+    let tmp = user_path.with_extension("tmp");
+    std::fs::write(&tmp, &modelfile)
+        .and_then(|()| std::fs::rename(&tmp, &user_path))
+        .map_err(internal)?;
+    update_current_model(&candidate.spec()).map_err(internal)?;
+    log::info!("Switched to {}", candidate.spec());
+
+    let (reload, reload_error) = reload_if_running(state).await;
+    warm_up_current_model();
+
+    Ok(ApiResponse::success(Selected {
+        id: candidate.id,
+        spec: candidate.spec(),
+        reload,
+        reload_error,
+    }))
 }
 
 struct Job {
@@ -226,7 +320,7 @@ fn best_device(hardware: &serde_json::Value) -> (Option<Device>, u64) {
 
 /// what the hub and the inference server say about one candidate
 struct Probe {
-    state: State,
+    state: DiskState,
     download_bytes: Option<u64>,
     downloaded_bytes: u64,
     need: Option<Need>,
@@ -235,7 +329,7 @@ struct Probe {
 async fn probe(candidate: &Candidate) -> Probe {
     let Ok(files) = repo_files(candidate.repo, Some(candidate.quant)).await else {
         return Probe {
-            state: State::Unknown,
+            state: DiskState::Unknown,
             download_bytes: None,
             downloaded_bytes: 0,
             need: None,
@@ -247,9 +341,9 @@ async fn probe(candidate: &Candidate) -> Probe {
         complete: false,
     });
     let state = match (complete, bytes) {
-        (true, _) => State::Ready,
-        (false, 0) => State::Missing,
-        (false, _) => State::Partial,
+        (true, _) => DiskState::Ready,
+        (false, 0) => DiskState::Missing,
+        (false, _) => DiskState::Partial,
     };
 
     let need = match files.iter().find(|file| file.is_main_gguf()) {

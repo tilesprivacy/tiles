@@ -808,7 +808,10 @@ pub fn model_spec(modelfile: &Modelfile) -> Result<String> {
     })
 }
 
-fn resolve_gguf_path(model_cache_path: &PathBuf, quant: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn resolve_gguf_path(
+    model_cache_path: &PathBuf,
+    quant: Option<&str>,
+) -> Result<PathBuf> {
     let Some(quant) = quant else {
         return Ok(model_cache_path.clone());
     };
