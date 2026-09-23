@@ -2,7 +2,7 @@
 
 use crate::{
     core::account::local::{
-        RootUser, create_root_account, get_root_user_details, save_root_account,
+        RootUser, create_root_account, get_root_user_details, save_root_account_with_provider,
     },
     daemon::{ApiResponse, AppError, AppState},
     utils::config::{ConfigProvider, DefaultProvider, get_or_create_config},
@@ -52,12 +52,12 @@ async fn create_account(Json(payload): Json<CreateAccount>) -> Result<impl IntoR
 }
 
 async fn do_create_account(
-    provider: impl ConfigProvider,
+    provider: impl ConfigProvider + Clone,
     payload: CreateAccount,
 ) -> Result<impl IntoResponse, AppError> {
     println!("{:?}", provider.get_config_dir().unwrap());
-    let config =
-        get_or_create_config(provider).map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    let config = get_or_create_config(provider.clone())
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     let root_user_details =
         get_root_user_details(&config).map_err(|e| AppError::BadRequest(e.to_string()))?;
@@ -74,7 +74,7 @@ async fn do_create_account(
         )
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-        save_root_account(config, &root_user_config.to_table())
+        save_root_account_with_provider(config, &root_user_config.to_table(), provider)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         Ok(ApiResponse::success(root_user_config))
     }

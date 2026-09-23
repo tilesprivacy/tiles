@@ -11,7 +11,7 @@
 
 <div class="navbar">
   <button class="navbar__back" aria-label="Back" onclick={onback}>
-    <Chevron back />
+    <Chevron dir="back" />
   </button>
   <span class="navbar__title">{title}</span>
 </div>

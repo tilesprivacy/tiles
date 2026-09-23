@@ -170,7 +170,7 @@ const MAX_TOKENS: u32 = 30_000;
 // Hard default MIN_TOKENS passed to Pi, incase configured with something way less
 const MIN_TOKENS: u32 = 4_096;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultProvider;
 
 impl ConfigProvider for DefaultProvider {
@@ -440,7 +440,11 @@ fn get_or_create_root_config() -> Result<RootConfig> {
 }
 /// Saves the root config toml `Table` type
 pub fn save_config(config: &Table) -> Result<()> {
-    let tiles_config_dir = DefaultProvider.get_config_dir()?;
+    save_config_with_provider(config, DefaultProvider)
+}
+
+pub fn save_config_with_provider(config: &Table, provider: impl ConfigProvider) -> Result<()> {
+    let tiles_config_dir = provider.get_config_dir()?;
     let config_path = tiles_config_dir.join("config.toml");
     let tmp_path = tiles_config_dir.join("config.tmp.toml");
     fs::write(&tmp_path, config.to_string())?;

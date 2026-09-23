@@ -13,6 +13,9 @@ mod ui;
 #[cfg(target_os = "macos")]
 mod clipboard;
 #[cfg(target_os = "macos")]
+#[path = "lid_macos.rs"]
+mod lid;
+#[cfg(target_os = "macos")]
 mod panel;
 #[cfg(target_os = "macos")]
 #[path = "power_macos.rs"]
@@ -25,6 +28,9 @@ mod tray;
 #[cfg(target_os = "linux")]
 #[path = "clipboard_linux.rs"]
 mod clipboard;
+#[cfg(target_os = "linux")]
+#[path = "lid_linux.rs"]
+mod lid;
 #[cfg(target_os = "linux")]
 #[path = "panel_linux.rs"]
 mod panel;
@@ -110,7 +116,6 @@ fn main() {
             atproto::init(app.handle());
             sessions::init(app.handle());
             remote::init(app.handle());
-            // before the watcher, whose every pass reconciles it
             awake::init(app.handle());
             daemon::init(app.handle());
 
@@ -151,6 +156,8 @@ fn main() {
             // brings it back, the tray item aside
             #[cfg(target_os = "macos")]
             RunEvent::Reopen { .. } => ui::reopen(app),
+            // the lifeline and a daemon quit both end here
+            RunEvent::Exit => awake::shutdown(app),
             _ => {}
         });
 }

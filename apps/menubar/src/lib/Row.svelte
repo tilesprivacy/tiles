@@ -79,7 +79,6 @@
 <style>
   .row {
     --row-mark: var(--slate);
-    /* the frame around the mark, the handle field's resting value */
     --mark-frame: rgba(255, 255, 255, 0.22);
 
     position: relative;
@@ -112,8 +111,6 @@
 
   .row[data-active="true"] {
     --row-mark: var(--signal);
-    /* just under full, the accent without the glare. much below this and the
-       void underneath turns it olive rather than dimming it */
     --mark-frame: rgba(247, 255, 97, 0.8);
   }
 
