@@ -166,17 +166,32 @@ pub async fn prepare_model(run_args: &RunArgs) -> Result<bool> {
         .from
         .clone()
         .ok_or_else(|| anyhow!("Modelfile missing FROM instruction"))?;
-    // a partial download is load_model's to resume, as before
-    if get_model_cache(&model_name).is_ok() {
+    let quant = modelfile.quant.as_deref();
+    // the folder exists as soon as a download starts, so look for the model
+    // file itself
+    let on_disk = get_model_cache(&model_name)
+        .ok()
+        .is_some_and(|path| resolve_gguf_path(&path, quant).is_ok());
+    if on_disk {
         return Ok(true);
     }
 
-    let quant = modelfile.quant.as_deref();
-    let size = download_size(&model_name, quant)
+    let files = repo_files(&model_name, quant)
         .await
         .context("Could not look up the model's download size")?;
+    let size: u64 = files.iter().map(|file| file.size).sum();
+    let have = downloaded(&model_name, &files).map_or(0, |state| state.bytes);
 
-    println!("Tiles needs to download {} ({})", spec, human_bytes(size));
+    if have > 0 {
+        println!(
+            "Tiles has {} of {} for {}",
+            human_bytes(have),
+            human_bytes(size),
+            spec
+        );
+    } else {
+        println!("Tiles needs to download {} ({})", spec, human_bytes(size));
+    }
     if let Some((free, total)) = crate::utils::disk::model_volume_space() {
         println!(
             "Disk: {} free of {} ({} used)",
@@ -191,7 +206,12 @@ pub async fn prepare_model(run_args: &RunArgs) -> Result<bool> {
             );
         }
     }
-    println!("{}", "Download now? (Y/n)".green());
+    let ask = if have > 0 {
+        "Continue the download? (Y/n)"
+    } else {
+        "Download now? (Y/n)"
+    };
+    println!("{}", ask.green());
 
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
@@ -200,9 +220,106 @@ pub async fn prepare_model(run_args: &RunArgs) -> Result<bool> {
         return Ok(false);
     }
 
-    download_model(&model_name, quant).await?;
+    match download_with_daemon(&spec).await {
+        Ok(true) => {}
+        Ok(false) => {
+            println!("\nDownload paused. Run `tiles` again to continue from here.");
+            return Ok(false);
+        }
+        // nothing to share a download with, so fetch it here as before
+        Err(err) => {
+            log::warn!("Downloading through the daemon failed, falling back: {err:#}");
+            download_model(&model_name, quant).await?;
+        }
+    }
     update_current_model(&spec).context("Failed to update current model in config.toml")?;
     Ok(true)
+}
+
+/// Has the daemon download `spec`, so the app sees the same download and its
+/// progress, and draws that progress here. `false` when paused with ctrl-c.
+async fn download_with_daemon(spec: &str) -> Result<bool> {
+    crate::daemon::start_cmd(None).await?;
+    let base = "http://127.0.0.1:1729/v1/tilekit/model/download";
+    let client = Client::new();
+    let response = client
+        .post(base)
+        .json(&serde_json::json!({ "spec": spec }))
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        let reason = response.text().await.unwrap_or_default();
+        return Err(anyhow!("the daemon refused the download: {reason}"));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    loop {
+        let chunk = tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                let _ = client.delete(base).send().await;
+                return Ok(false);
+            }
+            chunk = futures_util::StreamExt::next(&mut stream) => chunk,
+        };
+        let Some(chunk) = chunk else {
+            return Err(anyhow!("the daemon stopped reporting the download"));
+        };
+        buffer.push_str(&String::from_utf8_lossy(&chunk?));
+        while let Some(end) = buffer.find("\n\n") {
+            let event: String = buffer.drain(..end + 2).collect();
+            let Some(data) = event.lines().find_map(|line| line.strip_prefix("data:")) else {
+                continue;
+            };
+            let state: serde_json::Value = serde_json::from_str(data.trim())?;
+            match state["phase"].as_str() {
+                Some("done") => {
+                    draw_progress(&state);
+                    println!();
+                    return Ok(true);
+                }
+                Some("failed") => {
+                    println!();
+                    let error = state["error"].as_str().unwrap_or("unknown error");
+                    return Err(anyhow!(error.to_owned()));
+                }
+                Some("cancelled") => return Ok(false),
+                _ => draw_progress(&state),
+            }
+        }
+    }
+}
+
+fn draw_progress(state: &serde_json::Value) {
+    const WIDTH: usize = 24;
+    let done = state["done_bytes"].as_u64().unwrap_or(0);
+    let total = state["total_bytes"].as_u64().unwrap_or(0).max(1);
+    let rate = state["bytes_per_sec"].as_u64().unwrap_or(0);
+    let filled = (done as f64 / total as f64 * WIDTH as f64) as usize;
+    let bar = format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(WIDTH - filled.min(WIDTH))
+    );
+    let eta = total
+        .saturating_sub(done)
+        .checked_div(rate)
+        .map(|secs| format!(" · {}m{:02}s left", secs / 60, secs % 60))
+        .unwrap_or_default();
+    let speed = if rate > 0 {
+        format!(" · {}/s", human_bytes(rate))
+    } else {
+        String::new()
+    };
+    print!(
+        "\r  {} {}/{}{}{}\x1b[K",
+        bar.green(),
+        human_bytes(done),
+        human_bytes(total),
+        speed,
+        eta
+    );
+    io::Write::flush(&mut io::stdout()).ok();
 }
 
 struct TilesHinter;
