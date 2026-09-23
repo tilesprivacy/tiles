@@ -1,17 +1,32 @@
-//! Which models onboarding can offer, how far each is downloaded, and which
-//! one fits this machine
+//! Which models onboarding can offer, how far each is downloaded, which one
+//! fits this machine, and downloading one
 //!
 //! Sizes and file hashes come from the hub, memory needs and free device
 //! memory from the inference server, download progress straight off disk.
+//! One download runs at a time; asking for the same model again joins it.
 
-use std::sync::Arc;
+use std::{
+    convert::Infallible,
+    sync::{Arc, LazyLock},
+};
 
-use axum::{Json, Router, routing::get};
-use futures_util::future::join_all;
-use serde::Serialize;
+use axum::{
+    Json, Router,
+    response::{
+        IntoResponse, Sse,
+        sse::{Event, KeepAlive},
+    },
+    routing::get,
+};
+use futures_util::{StreamExt, future::join_all};
+use serde::{Deserialize, Serialize};
+use tokio::sync::{Mutex, watch};
+use tokio_stream::wrappers::WatchStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     core::{
+        download::{self, Progress},
         models::{Candidate, Fit, LINEUP, Need, fit, recommend},
         server,
     },
@@ -69,7 +84,113 @@ struct Status {
 }
 
 pub fn model_router() -> Router<Arc<AppState>> {
-    Router::new().route("/v1/tilekit/model/status", get(model_status))
+    Router::new()
+        .route("/v1/tilekit/model/status", get(model_status))
+        .route(
+            "/v1/tilekit/model/download",
+            get(download_state)
+                .post(start_download)
+                .delete(cancel_download),
+        )
+}
+
+struct Job {
+    progress: watch::Receiver<Progress>,
+    cancel: CancellationToken,
+}
+
+impl Job {
+    fn running(&self) -> bool {
+        !self.progress.borrow().phase.is_final()
+    }
+}
+
+static JOB: LazyLock<Mutex<Option<Job>>> = LazyLock::new(|| Mutex::new(None));
+
+#[derive(Deserialize)]
+struct DownloadRequest {
+    /// `repo:quant`, as in a modelfile's FROM
+    spec: String,
+}
+
+/// Starts downloading `spec`, or joins the download already running for it,
+/// and streams its progress until it is done, cancelled or failed.
+async fn start_download(
+    Json(request): Json<DownloadRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let spec = request.spec.trim().to_owned();
+    let (repo, quant) = tilekit::modelfile::split_model_spec(&spec);
+    if !repo.contains('/') {
+        return Err(AppError::BadRequest(format!(
+            "{spec} is not a hugging face repo:quant"
+        )));
+    }
+
+    let mut job = JOB.lock().await;
+    let progress = match job.as_ref() {
+        Some(current) if current.running() => {
+            let running = current.progress.borrow().spec.clone();
+            if running != spec {
+                return Err(AppError::AlreadyExists(format!(
+                    "{running} is downloading. Cancel it first."
+                )));
+            }
+            current.progress.clone()
+        }
+        _ => {
+            let (tx, rx) = watch::channel(Progress::new(&spec));
+            let cancel = CancellationToken::new();
+            let (repo, quant, token) = (repo.to_owned(), quant.map(str::to_owned), cancel.clone());
+            tokio::spawn(async move {
+                download::download(&repo, quant.as_deref(), tx, token).await;
+            });
+            log::info!("Downloading {spec}");
+            *job = Some(Job {
+                progress: rx.clone(),
+                cancel,
+            });
+            rx
+        }
+    };
+    drop(job);
+
+    // the watch only holds the latest state, so a slow reader skips ahead
+    // rather than falling behind; the final state is always delivered
+    let events = WatchStream::new(progress)
+        .scan(false, |ended, state| {
+            let send = !*ended;
+            *ended = state.phase.is_final();
+            futures_util::future::ready(send.then_some(state))
+        })
+        .map(|state| {
+            if state.phase.is_final() {
+                log::info!("Download of {} ended: {:?}", state.spec, state.phase);
+            }
+            Ok::<_, Infallible>(Event::default().json_data(state).unwrap_or_default())
+        });
+    Ok(Sse::new(events).keep_alive(KeepAlive::default()))
+}
+
+/// Where the current or last download is, for a client that was not watching.
+async fn download_state() -> Json<ApiResponse<Option<Progress>>> {
+    let job = JOB.lock().await;
+    ApiResponse::success(job.as_ref().map(|job| job.progress.borrow().clone()))
+}
+
+/// Stops the running download. What arrived stays on disk and a later
+/// download of the same model continues from there.
+async fn cancel_download() -> Result<Json<ApiResponse<Progress>>, AppError> {
+    let guard = JOB.lock().await;
+    let Some(job) = guard.as_ref().filter(|job| job.running()) else {
+        return Err(AppError::NotFound("No download is running".to_owned()));
+    };
+    job.cancel.cancel();
+    let mut progress = job.progress.clone();
+    // not held while waiting, a new download may start meanwhile
+    drop(guard);
+    let _ = progress.wait_for(|state| state.phase.is_final()).await;
+    let state = progress.borrow().clone();
+    Ok(ApiResponse::success(state))
 }
 
 /// the gpu with the most free memory, leaving out integrated ones whose "free"
