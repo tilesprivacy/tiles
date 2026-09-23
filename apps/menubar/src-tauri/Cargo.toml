@@ -15,7 +15,9 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2.11", features = [] }
-tauri-plugin-single-instance = "2"
+# deep-link forwards a second launch's argv links, which is how linux delivers them
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+tauri-plugin-deep-link = "2"
 
 reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
 data-encoding = "2"

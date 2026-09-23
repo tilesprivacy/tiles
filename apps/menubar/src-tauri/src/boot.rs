@@ -102,7 +102,7 @@ pub fn init(app: &AppHandle) {
     });
 }
 
-async fn ping(client: &reqwest::Client) -> bool {
+pub async fn ping(client: &reqwest::Client) -> bool {
     client
         .get(daemon::url("/"))
         .timeout(Duration::from_secs(1))
