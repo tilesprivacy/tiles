@@ -96,6 +96,11 @@ class WarmupRequest(BaseModel):
     model: str
 
 
+class EstimateRequest(BaseModel):
+    url: str
+    size: int
+
+
 class downloadRequest(BaseModel):
     model: str
 

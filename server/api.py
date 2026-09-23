@@ -6,9 +6,11 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from . import runtime
-from .backend.llama_server import prefill
+from .backend.llama_server import estimate, hardware, prefill
+from .config import get_llama_config
 from .schemas import (
     ChatMessage,
+    EstimateRequest,
     ResponsesRequest,
     StartRequest,
     WarmupRequest,
@@ -90,6 +92,22 @@ async def warmup(request: WarmupRequest):
         "prefilled": prefilled,
         "warnings": getattr(runner, "warnings", []),
     }
+
+
+@app.get("/v1/hardware")
+async def get_hardware():
+    """Devices llama-server can run on, with their free memory, and system ram."""
+    return await asyncio.to_thread(hardware.hardware)
+
+
+@app.post("/v1/estimate")
+async def estimate_model(request: EstimateRequest):
+    """Memory a GGUF needs at the configured context, read from its header."""
+    context = get_llama_config().get("context_length") or estimate.DEFAULT_CONTEXT
+    try:
+        return await estimate.estimate(request.url, request.size, int(context))
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not read the model's header: {exc}") from exc
 
 
 @app.post("/v1/responses")
