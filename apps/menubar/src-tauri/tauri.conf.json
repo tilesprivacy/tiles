@@ -40,6 +40,9 @@
       "icons/icon.icns",
       "icons/icon.png"
     ],
+    "resources": {
+      "sounds/lid-closed.mov": "sounds/lid-closed.mov"
+    },
     "macOS": {
       "minimumSystemVersion": "13.0"
     }

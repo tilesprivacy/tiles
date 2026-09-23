@@ -50,6 +50,8 @@ export type Awake = {
   until: number | null;
   frozen: number | null;
   power: DevicePower;
+  /** whether a running session survives the lid closing, null where there is no such mode */
+  lid: boolean | null;
 };
 
 export type DevicePower = { pluggedIn: boolean; batteryPercent: number | null };
@@ -75,6 +77,7 @@ export const awake = $state<{ value: Awake }>({
     until: null,
     frozen: null,
     power: { pluggedIn: false, batteryPercent: null },
+    lid: null,
   },
 });
 

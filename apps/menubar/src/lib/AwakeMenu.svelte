@@ -4,13 +4,14 @@
     /** new or resumed sessions need mains or enough battery */
     available: boolean;
     note: string;
+    alert: boolean;
     onpick: (seconds: number | null) => void;
     onpause: () => void;
     onresume: () => void;
     onstop: () => void;
   }
 
-  let { session, available, note, onpick, onpause, onresume, onstop }: Props = $props();
+  let { session, available, note, alert, onpick, onpause, onresume, onstop }: Props = $props();
 
   const DURATIONS: { label: string; seconds: number | null }[] = [
     { label: "15 minutes", seconds: 15 * 60 },
@@ -27,7 +28,7 @@
   <span class="menu__halo"></span>
 
   <div class="menu__list" role="menu">
-    <p class="menu__note" data-alert={!available}>{note}</p>
+    <p class="menu__note" data-alert={alert}>{note}</p>
     <div class="menu__rule"></div>
 
     {#if session !== "none"}

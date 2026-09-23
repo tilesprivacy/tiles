@@ -28,6 +28,17 @@ const PKG_RECEIPT_IDS: &[&str] = &[
 #[cfg(target_os = "macos")]
 const PKGUTIL_PATH: &str = "/usr/sbin/pkgutil";
 
+/// closed-display mode: the sudoers grant and the boot guard the pkg installs
+#[cfg(target_os = "macos")]
+const SLEEP_GRANT_PATH: &str = "/private/etc/sudoers.d/tiles";
+#[cfg(target_os = "macos")]
+const SLEEP_GUARD_PATH: &str = "/Library/LaunchDaemons/com.tilesprivacy.tiles.sleep-guard.plist";
+
+/// written by the app while it holds sleep off
+#[cfg(target_os = "macos")]
+const SLEEP_MARKER: &str =
+    "Library/Application Support/com.tilesprivacy.tiles.menubar/closed-display";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstallLayout {
     bin: PathBuf,
@@ -51,10 +62,44 @@ pub fn uninstall(all: bool) -> Result<()> {
     crate::core::service::unload().context("Failed to unload Tiles service")?;
     plan.apply()?;
     #[cfg(target_os = "macos")]
+    restore_sleep();
+    #[cfg(target_os = "macos")]
     forget_pkg_receipts();
 
     println!("Tiles uninstalled successfully.");
     Ok(())
+}
+
+/// after the grant is gone, so an app still on its way out cannot turn sleep
+/// back off, and its own reset may already have failed for want of it
+#[cfg(target_os = "macos")]
+fn restore_sleep() {
+    let Some(marker) = std::env::home_dir().map(|home| home.join(SLEEP_MARKER)) else {
+        return;
+    };
+    if !marker.exists() {
+        return;
+    }
+
+    let command = if is_running_as_root() {
+        Ok(Command::new("/usr/bin/pmset"))
+    } else {
+        new_trusted_sudo_command().map(|mut command| {
+            command.arg("/usr/bin/pmset");
+            command
+        })
+    };
+    let restored = command.and_then(|mut command| {
+        command.args(["-a", "disablesleep", "0"]);
+        run_elevated_command(&mut command, "turn sleep back on")
+    });
+
+    match restored {
+        Ok(()) => {
+            let _ = fs::remove_file(&marker);
+        }
+        Err(err) => eprintln!("Sleep may still be off, run `sudo pmset -a disablesleep 0`: {err}"),
+    }
 }
 
 /// Discards the installer's receipts. The files are already gone by now, so a
@@ -124,6 +169,10 @@ impl UninstallPlanner {
         // a plain uninstall as well as an --all one
         #[cfg(target_os = "macos")]
         plan.remove_dirs.insert(PathBuf::from(SYSTEM_APP_PATH));
+        #[cfg(target_os = "macos")]
+        for path in [SLEEP_GRANT_PATH, SLEEP_GUARD_PATH] {
+            plan.remove_files.insert(PathBuf::from(path));
+        }
 
         if all {
             let user_data_dir = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
@@ -462,7 +511,10 @@ impl InstallLayout {
 
 fn requires_elevation(path: &Path) -> bool {
     #[cfg(target_os = "macos")]
-    if path.starts_with(SYSTEM_APP_PATH) {
+    if path.starts_with(SYSTEM_APP_PATH)
+        || path.starts_with(SLEEP_GRANT_PATH)
+        || path.starts_with(SLEEP_GUARD_PATH)
+    {
         return true;
     }
 
@@ -702,6 +754,23 @@ mod tests {
 
         // and it is outside the home folder, so removing it needs root
         assert!(requires_elevation(&app));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_sleep_grant_goes_with_the_app() -> Result<()> {
+        for path in [super::SLEEP_GRANT_PATH, super::SLEEP_GUARD_PATH] {
+            let path = PathBuf::from(path);
+            for all in [false, true] {
+                let plan = UninstallPlanner::from_current_system(all)?;
+                assert!(
+                    plan.remove_files.contains(&path),
+                    "{path:?} missing on all={all}"
+                );
+            }
+            assert!(requires_elevation(&path));
+        }
         Ok(())
     }
 
