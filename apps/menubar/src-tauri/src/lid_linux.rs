@@ -18,5 +18,3 @@ pub fn release(_hold: Hold) {}
 pub fn recover(_app: &AppHandle) {}
 
 pub fn watch(_app: &AppHandle) {}
-
-pub fn chirp(_app: &AppHandle) {}

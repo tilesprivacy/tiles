@@ -7,7 +7,6 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
@@ -15,21 +14,18 @@ use core_foundation::runloop::{
     CFRunLoop, CFRunLoopSource, CFRunLoopSourceRef, kCFRunLoopCommonModes,
 };
 use core_foundation::string::{CFString, CFStringRef};
-use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Manager};
 
 use crate::awake;
 
 const SUDO: &str = "/usr/bin/sudo";
 const PMSET: &str = "/usr/bin/pmset";
-const AFPLAY: &str = "/usr/bin/afplay";
 
 /// exactly what the grant allows, sudoers matches the arguments literally
 const RESET: [&str; 6] = [SUDO, "-n", PMSET, "-a", "disablesleep", "0"];
 
 /// our pid while we hold it. the pkg's boot guard looks for this name too
 const MARKER: &str = "closed-display";
-const CHIRP: &str = "sounds/lid-closed.mov";
 
 /// waits on a pipe only we hold the other end of, so any death of ours ends
 /// the read. a newer holder's marker means the reset is no longer ours to do
@@ -41,7 +37,6 @@ while read -r _; do :; done
 "$@" && rm -f "$marker""#;
 
 const CLAMSHELL_CHANGED: u32 = 0xE003_4100;
-const CLAMSHELL_CLOSED: usize = 1 << 0;
 
 type IoObject = u32;
 type InterestCallback = extern "C" fn(*mut c_void, IoObject, u32, *mut c_void);
@@ -82,8 +77,6 @@ unsafe extern "C" {
 static ROOT: LazyLock<IoObject> = LazyLock::new(|| unsafe {
     IOServiceGetMatchingService(0, IOServiceMatching(c"IOPMrootDomain".as_ptr()))
 });
-
-static LID_CLOSED: AtomicBool = AtomicBool::new(false);
 
 fn flag(key: &str) -> bool {
     if *ROOT == 0 {
@@ -281,17 +274,14 @@ extern "C" fn on_root(
     context: *mut c_void,
     _service: IoObject,
     message: u32,
-    argument: *mut c_void,
+    _argument: *mut c_void,
 ) {
     if message != CLAMSHELL_CHANGED {
         return;
     }
-    let closed = argument as usize & CLAMSHELL_CLOSED != 0;
-    let edge = LID_CLOSED.swap(closed, Ordering::Relaxed) != closed;
-
     let app = app_from(context);
     // off the main thread, sudo is not instant
-    std::thread::spawn(move || awake::lid_moved(&app, closed && edge));
+    std::thread::spawn(move || awake::reconcile(&app));
 }
 
 extern "C" fn on_power(context: *mut c_void) {
@@ -301,8 +291,6 @@ extern "C" fn on_power(context: *mut c_void) {
 
 /// the poll is seconds apart, and a lid shut on a cleared setting sleeps in less
 pub fn watch(app: &AppHandle) {
-    LID_CLOSED.store(flag("AppleClamshellState"), Ordering::Relaxed);
-
     let context = Box::into_raw(Box::new(app.clone())).cast::<c_void>();
     let main = CFRunLoop::get_main();
 
@@ -334,22 +322,6 @@ pub fn watch(app: &AppHandle) {
             let source = CFRunLoopSource::wrap_under_create_rule(power);
             main.add_source(&source, kCFRunLoopCommonModes);
         }
-    }
-}
-
-pub fn chirp(app: &AppHandle) {
-    let Ok(sound) = app.path().resolve(CHIRP, BaseDirectory::Resource) else {
-        return;
-    };
-    let mut command = Command::new(AFPLAY);
-    command.arg(sound);
-    match quiet(&mut command).spawn() {
-        Ok(mut child) => {
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-        }
-        Err(err) => eprintln!("[lid] no chirp: {err}"),
     }
 }
 

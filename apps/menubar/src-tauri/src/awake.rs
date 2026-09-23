@@ -257,15 +257,6 @@ pub fn reconcile(app: &AppHandle) {
     }
 }
 
-/// the chirp says the mac is staying up, so only when it is
-pub fn lid_moved(app: &AppHandle, closed: bool) {
-    reconcile(app);
-    let covered = app.state::<Awake>().state.lock().unwrap().lid == Some(true);
-    if closed && covered {
-        lid::chirp(app);
-    }
-}
-
 /// the sentinel would reset it too, this is only sooner
 pub fn shutdown(app: &AppHandle) {
     let Some(awake) = app.try_state::<Awake>() else {
