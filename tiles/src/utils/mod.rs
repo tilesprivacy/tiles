@@ -6,6 +6,7 @@ use std::{
 
 pub mod config;
 pub mod crypto;
+pub mod disk;
 pub mod hf_model_downloader;
 pub mod installer;
 pub mod lexicons;

@@ -49,6 +49,7 @@ pub mod account;
 pub mod agent;
 pub mod atproto;
 pub mod diagnostics;
+pub mod model;
 pub mod modelfile;
 pub mod plugin;
 pub mod server;
@@ -371,6 +372,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool, show_ui: bool) -> Re
         .merge(session_router())
         .merge(atproto_router())
         .merge(plugin::plugin_router())
+        .merge(model::model_router())
         .merge(diagnostics::diagnostics_router())
         // .layer(service)
         .layer(cors_layer());

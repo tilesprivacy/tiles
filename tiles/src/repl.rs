@@ -177,7 +177,7 @@ pub async fn prepare_model(run_args: &RunArgs) -> Result<bool> {
         .context("Could not look up the model's download size")?;
 
     println!("Tiles needs to download {} ({})", spec, human_bytes(size));
-    if let Some((free, total)) = disk_space() {
+    if let Some((free, total)) = crate::utils::disk::model_volume_space() {
         println!(
             "Disk: {} free of {} ({} used)",
             human_bytes(free),
@@ -203,23 +203,6 @@ pub async fn prepare_model(run_args: &RunArgs) -> Result<bool> {
     download_model(&model_name, quant).await?;
     update_current_model(&spec).context("Failed to update current model in config.toml")?;
     Ok(true)
-}
-
-/// free and total bytes on the volume models are kept on
-#[cfg(unix)]
-fn disk_space() -> Option<(u64, u64)> {
-    let dir = crate::utils::config::get_or_create_model_download_path().ok()?;
-    let stat = nix::sys::statvfs::statvfs(&dir).ok()?;
-    let unit = stat.fragment_size();
-    Some((
-        u64::from(stat.blocks_available()) * unit,
-        u64::from(stat.blocks()) * unit,
-    ))
-}
-
-#[cfg(not(unix))]
-fn disk_space() -> Option<(u64, u64)> {
-    None
 }
 
 struct TilesHinter;
