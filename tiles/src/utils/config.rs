@@ -316,14 +316,25 @@ pub fn get_memory_path() -> Result<String> {
         .ok_or_else(|| anyhow!("path doesnt exist (data)"))?
         .as_str()
         .expect("parse failed (memory)");
-    if path.is_empty() {
-        Err(anyhow::anyhow!(format!("NOT SET")))
+    let default_dir = if path.is_empty() {
+        DefaultProvider.get_user_data_dir()?
     } else {
-        Ok(PathBuf::from_str(path)?
-            .join("memory")
-            .to_str()
-            .ok_or_else(|| anyhow!("failed to convert path to str"))?
-            .to_owned())
+        PathBuf::new()
+    };
+    Ok(memory_dir(path, &default_dir)
+        .to_str()
+        .ok_or_else(|| anyhow!("failed to convert path to str"))?
+        .to_owned())
+}
+
+/// blank until the user moves it, and blank means the default, the same rule
+/// `get_user_data_dir` follows. an account made outside the cli setup never
+/// gets a path written
+fn memory_dir(configured: &str, default_dir: &Path) -> PathBuf {
+    if configured.is_empty() {
+        default_dir.join("memory")
+    } else {
+        PathBuf::from(configured).join("memory")
     }
 }
 
@@ -1178,6 +1189,19 @@ mod tests {
         assert_eq!(
             settings_config.default_thinking_level.unwrap(),
             ReasoningEffort::Low
+        );
+    }
+
+    #[test]
+    fn a_blank_data_path_keeps_memory_in_the_default_dir() {
+        let default_dir = Path::new("/home/me/.local/share/tiles/data");
+        assert_eq!(
+            memory_dir("", default_dir),
+            Path::new("/home/me/.local/share/tiles/data/memory")
+        );
+        assert_eq!(
+            memory_dir("/Volumes/ext/tiles", default_dir),
+            Path::new("/Volumes/ext/tiles/memory")
         );
     }
 }
