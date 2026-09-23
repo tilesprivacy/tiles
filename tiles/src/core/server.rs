@@ -110,13 +110,7 @@ pub async fn ping() -> Result<String> {
 /// message needs either. Waits for a just-spawned server to start listening.
 /// Returns whether a prompt was prefilled, which needs one earlier request.
 pub async fn warm_up(model: &str) -> Result<bool> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while ping().await.is_err() {
-        if std::time::Instant::now() > deadline {
-            return Err(anyhow!("the inference server did not come up"));
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    }
+    wait_until_up().await?;
 
     let answer: serde_json::Value = Client::builder()
         .timeout(std::time::Duration::from_secs(600))
@@ -129,4 +123,64 @@ pub async fn warm_up(model: &str) -> Result<bool> {
         .json()
         .await?;
     Ok(answer["prefilled"].as_bool().unwrap_or(false))
+}
+
+/// Waits for a just-spawned inference server to start listening.
+pub async fn wait_until_up() -> Result<()> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while ping().await.is_err() {
+        if std::time::Instant::now() > deadline {
+            return Err(anyhow!("the inference server did not come up"));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    Ok(())
+}
+
+/// Starts the inference server if it is not running, and waits for it.
+pub async fn ensure_up() -> Result<()> {
+    if ping().await.is_ok() {
+        return Ok(());
+    }
+    start_server_daemon().await?;
+    wait_until_up().await
+}
+
+fn py_url(path: &str) -> String {
+    format!("http://127.0.0.1:{}{}", PY_PORT, path)
+}
+
+/// Devices the inference server can run on, with their free memory.
+pub async fn hardware() -> Result<serde_json::Value> {
+    Ok(Client::new()
+        .get(py_url("/v1/hardware"))
+        .timeout(std::time::Duration::from_secs(90))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?)
+}
+
+/// Memory a model file needs, estimated by the inference server from its
+/// header without downloading it.
+pub async fn estimate(url: &str, size: u64) -> Result<crate::core::models::Need> {
+    let answer: serde_json::Value = Client::new()
+        .post(py_url("/v1/estimate"))
+        .timeout(std::time::Duration::from_secs(120))
+        .json(&serde_json::json!({ "url": url, "size": size }))
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let bytes = |key: &str| {
+        answer[key]
+            .as_u64()
+            .ok_or_else(|| anyhow!("estimate is missing {key}"))
+    };
+    Ok(crate::core::models::Need {
+        vram_bytes: bytes("vram_bytes")?,
+        expert_bytes: bytes("expert_bytes")?,
+    })
 }
