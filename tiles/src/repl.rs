@@ -113,12 +113,21 @@ impl From<ReasoningEffort> for String {
 }
 
 pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
+    let Some((modelfile, default_modelfile)) = resolve_modelfiles(&run_args)? else {
+        return Ok(());
+    };
+
+    run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
+}
+
+/// `None` once an invalid modelfile has been reported
+fn resolve_modelfiles(run_args: &RunArgs) -> Result<Option<(Modelfile, Modelfile)>> {
     let (modelfile, default_modelfile) = if let Some(modelfile_str) = &run_args.modelfile_path {
         let modelfile = match tilekit::modelfile::parse_from_file(modelfile_str.as_str()) {
             Ok(mf) => mf,
             Err(err) => {
                 eprintln!("Invalid Modelfile due to {:?}", err);
-                return Ok(());
+                return Ok(None);
             }
         };
         let default_modelfile = get_default_modelfile(DefaultProvider)
@@ -136,13 +145,81 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
             Ok(mf) => mf,
             Err(err) => {
                 eprintln!("Invalid default Modelfile due to {:?}", err);
-                return Ok(());
+                return Ok(None);
             }
         };
         (default_modelfile.clone(), default_modelfile)
     };
 
-    run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
+    Ok(Some((modelfile, default_modelfile)))
+}
+
+/// asks before a model's first download, and has it on disk before the
+/// daemon, menu bar and chat window start, so they come up with a model to
+/// show and load. `false` means stop here
+pub async fn prepare_model(run_args: &RunArgs) -> Result<bool> {
+    let Some((modelfile, _)) = resolve_modelfiles(run_args)? else {
+        return Ok(false);
+    };
+    let spec = model_spec(&modelfile)?;
+    let model_name = modelfile
+        .from
+        .clone()
+        .ok_or_else(|| anyhow!("Modelfile missing FROM instruction"))?;
+    // a partial download is load_model's to resume, as before
+    if get_model_cache(&model_name).is_ok() {
+        return Ok(true);
+    }
+
+    let quant = modelfile.quant.as_deref();
+    let size = download_size(&model_name, quant)
+        .await
+        .context("Could not look up the model's download size")?;
+
+    println!("Tiles needs to download {} ({})", spec, human_bytes(size));
+    if let Some((free, total)) = disk_space() {
+        println!(
+            "Disk: {} free of {} ({} used)",
+            human_bytes(free),
+            human_bytes(total),
+            human_bytes(total.saturating_sub(free))
+        );
+        if size > free {
+            println!(
+                "{}",
+                "There is not enough free space for this download".red()
+            );
+        }
+    }
+    println!("{}", "Download now? (Y/n)".green());
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if matches!(input.trim().to_lowercase().as_str(), "n" | "no") {
+        println!("Setup cancelled. Run `tiles` again when you're ready to download.");
+        return Ok(false);
+    }
+
+    download_model(&model_name, quant).await?;
+    update_current_model(&spec).context("Failed to update current model in config.toml")?;
+    Ok(true)
+}
+
+/// free and total bytes on the volume models are kept on
+#[cfg(unix)]
+fn disk_space() -> Option<(u64, u64)> {
+    let dir = crate::utils::config::get_or_create_model_download_path().ok()?;
+    let stat = nix::sys::statvfs::statvfs(&dir).ok()?;
+    let unit = stat.fragment_size();
+    Some((
+        u64::from(stat.blocks_available()) * unit,
+        u64::from(stat.blocks()) * unit,
+    ))
+}
+
+#[cfg(not(unix))]
+fn disk_space() -> Option<(u64, u64)> {
+    None
 }
 
 struct TilesHinter;
