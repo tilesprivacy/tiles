@@ -493,6 +493,10 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             commands::run_setup_for_ftue(&run_args)
                 .await
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
+            // the model comes before the app, which shows and loads it
+            if !cli.flags.no_repl && !prepare_model(&run_args).await? {
+                return Ok(());
+            }
             let _ = commands::try_app_update().await;
 
             // trying to run the tiles daemon in background concurrently
@@ -523,6 +527,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             commands::run_setup_for_ftue(&run_args)
                 .await
                 .inspect_err(|e| eprintln!("Failed to setup Tiles due to {:?}", e))?;
+            if !prepare_model(&run_args).await? {
+                return Ok(());
+            }
 
             let t = tokio::spawn(async move {
                 let _ = start_cmd(None).await;
@@ -702,6 +709,16 @@ async fn set_plugin_enabled(name: &str, enabled: bool) {
         }
         Err(err) => eprintln!("{}", err),
     }
+}
+
+/// remote inference has nothing to download
+async fn prepare_model(run_args: &RunArgs) -> Result<bool, Box<dyn Error>> {
+    if run_args.remote.is_some() {
+        return Ok(true);
+    }
+    Ok(repl::prepare_model(run_args)
+        .await
+        .inspect_err(|e| eprintln!("Failed to set up the model due to {:?}", e))?)
 }
 
 /// Pi reads plugins at start, so a running app only sees a change once its
