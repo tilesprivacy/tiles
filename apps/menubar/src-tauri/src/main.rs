@@ -3,6 +3,7 @@ mod atproto;
 mod awake;
 mod boot;
 mod daemon;
+mod deeplink;
 mod inference;
 mod lifeline;
 mod paths;
@@ -66,13 +67,22 @@ fn main() {
         // status item of its own. a daemon-owned copy displaces a manual one
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             if lifeline::should_yield_to(&argv) {
+                // the copy taking over opens the link this one held
+                deeplink::stash(app);
                 app.exit(0);
+                return;
+            }
+
+            // the deep link plugin already took it
+            if deeplink::in_args(&argv) {
                 return;
             }
 
             // launching again is someone asking for the window back
             let _ = ui::open(app, "/");
-        }));
+        }))
+        // after single instance, which forwards argv links to it
+        .plugin(tauri_plugin_deep_link::init());
 
     #[cfg(target_os = "macos")]
     let builder = builder.plugin(tauri_nspanel::init());
@@ -121,6 +131,7 @@ fn main() {
 
             panel::warm_up(app.handle());
             ui::init(app.handle());
+            deeplink::init(app.handle());
             boot::init(app.handle());
 
             Ok(())
