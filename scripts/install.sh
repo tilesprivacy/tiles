@@ -29,6 +29,7 @@ REPO="tilesprivacy/tiles"
 VERSION="0.4.18"
 DEV="false"
 NIGHTLY="false"
+CANARY="false"
 INSTALL_DIR_OVERRIDE=""
 LIB_DIR_OVERRIDE=""
 
@@ -44,9 +45,35 @@ usage() {
   echo ""
   echo "  --dev                Install from a local dist/*.tar.gz instead of GitHub"
   echo "  --nightly            Install the latest nightly GitHub release"
+  echo "  --canary             Install the latest canary build (the canary branch, unreleased)"
   echo "                       (e.g. tiles-v0.4.20-x86_64-linux.tar.gz)"
   echo "  --install-dir PATH   Override the binary installation directory"
   echo "  --lib-dir PATH       Override the runtime installation directory"
+}
+
+# Resolve the tarball the rolling `canary` release carries for this platform.
+# Its version is the canary branch's, e.g. tiles-v0.4.20-canary.1-x86_64-linux.tar.gz,
+# so the name is read off the release rather than built from VERSION.
+# Sets RELEASE_TAG, VERSION (for logs), and RELEASE_ASSET (exact filename).
+resolve_canary_version() {
+  local release_json asset
+  local platform="${ARCH}-${OS}"
+
+  release_json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/tags/canary")" \
+    || err "Failed to query the canary release for ${REPO}."
+
+  asset="$(
+    printf '%s' "${release_json}" \
+      | grep -oE "\"name\"[[:space:]]*:[[:space:]]*\"tiles-v[^\"]*-${platform}\\.tar\\.gz\"" \
+      | sed -E 's/.*"([^"]+)".*/\1/' \
+      | head -n 1 \
+      || true
+  )"
+  [ -n "${asset}" ] || err "The canary release has no build for ${platform} yet."
+
+  RELEASE_TAG="canary"
+  RELEASE_ASSET="${asset}"
+  VERSION="$(printf '%s' "${asset}" | sed -E "s/^tiles-v(.*)-${platform}\.tar\.gz$/\1/")"
 }
 
 # Resolve the newest GitHub nightly release that has a tarball for this platform.
@@ -104,6 +131,9 @@ while [[ $# -gt 0 ]]; do
     --nightly|-nightly)
       NIGHTLY="true"
       ;;
+    --canary|-canary)
+      CANARY="true"
+      ;;
     --backend)
       # accepted for older instructions, the backend is picked at runtime now
       [[ $# -ge 2 ]] || err "--backend requires a value."
@@ -137,6 +167,9 @@ done
 
 if [[ "${DEV}" == "true" && "${NIGHTLY}" == "true" ]]; then
   err "--dev and --nightly cannot be used together."
+fi
+if [[ "${CANARY}" == "true" && ( "${DEV}" == "true" || "${NIGHTLY}" == "true" ) ]]; then
+  err "--canary cannot be combined with --dev or --nightly."
 fi
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -179,7 +212,10 @@ TMPDIR="$(mktemp -d)"
 RELEASE_TAG="${VERSION}"
 RELEASE_ASSET="tiles-v${VERSION}-${ARCH}-${OS}.tar.gz"
 
-if [[ "${NIGHTLY}" == "true" ]]; then
+if [[ "${CANARY}" == "true" ]]; then
+  resolve_canary_version
+  log "⬇️  Downloading Tiles canary (${VERSION}) [${RELEASE_ASSET}] for ${ARCH}-${OS}..."
+elif [[ "${NIGHTLY}" == "true" ]]; then
   resolve_nightly_version
   log "⬇️  Downloading Tiles nightly (${VERSION}) [${RELEASE_ASSET}] for ${ARCH}-${OS}..."
 elif [[ "${DEV}" == "true" ]]; then
@@ -189,7 +225,7 @@ else
 fi
 
 if [[ "${DEV}" == "false" ]]; then
-  # Stable (default) and --nightly both download from GitHub.
+  # Stable (default), --nightly and --canary all download from GitHub.
   # Unflagged install always uses the hardcoded VERSION above (never nightly).
   # Nightly uses RELEASE_ASSET from resolve_nightly_version (may differ from tag).
   TAR_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${RELEASE_ASSET}"
@@ -263,37 +299,24 @@ if [ -d "${TMPDIR}/plugins" ] && [ -n "$(ls -A "${TMPDIR}/plugins" 2>/dev/null)"
 fi
 
 
-if [[ "${OS}" == "linux" && -f "${TMPDIR}/tiles-menubar" ]]; then
-  log "Installing the desktop app ..."
-
-  install -m 755 "${TMPDIR}/tiles-menubar" "${LIB_DIR}/tiles-menubar"
-
-  rm -rf "${UI_DIR}"
-  mkdir -p "${UI_DIR}"
-  cp -r "${TMPDIR}/ui"/* "${UI_DIR}/"
-
-  # a launcher entry, so the app shows up in the desktop's app grid
+if [[ "${OS}" == "linux" ]]; then
+  # linux has no desktop app for now, the chat opens in the browser. an earlier
+  # install may have left one behind, with its launcher entry
   if [[ "$(id -u)" != "0" ]]; then
-    APPS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
-    ICONS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/icons/hicolor/128x128/apps"
+    SHARE_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}"
   else
-    APPS_DIR="/usr/local/share/applications"
-    ICONS_DIR="/usr/local/share/icons/hicolor/128x128/apps"
+    SHARE_DIR="/usr/local/share"
   fi
-  mkdir -p "${APPS_DIR}" "${ICONS_DIR}"
-  install -m 644 "${TMPDIR}/tiles.png" "${ICONS_DIR}/tiles.png"
-  cat > "${APPS_DIR}/tiles.desktop" <<DESKTOP
-[Desktop Entry]
-Type=Application
-Name=Tiles
-Comment=A local-first, collaborative AI assistant
-Exec=${LIB_DIR}/tiles-menubar
-Icon=tiles
-Terminal=false
-Categories=Utility;Chat;
-StartupWMClass=tiles-menubar
-DESKTOP
-  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "${APPS_DIR}" 2>/dev/null || true
+  rm -f "${LIB_DIR}/tiles-menubar" \
+    "${SHARE_DIR}/applications/tiles.desktop" \
+    "${SHARE_DIR}/icons/hicolor/128x128/apps/tiles.png"
+
+  if [ -d "${TMPDIR}/ui" ]; then
+    log "Installing the chat UI ..."
+    rm -rf "${UI_DIR}"
+    mkdir -p "${UI_DIR}"
+    cp -r "${TMPDIR}/ui"/* "${UI_DIR}/"
+  fi
 fi
 
 log "📦 Installing Python server to ${SERVER_DIR}..."
@@ -322,9 +345,12 @@ rm -rf "${TMPDIR}"
 log "✅ Tiles installed successfully!"
 log ""
 
+CHAT_HINT=""
+[[ "${OS}" == "linux" ]] && CHAT_HINT=", then open http://127.0.0.1:1729 in your browser (or run \"tiles ui\")"
+
 case ":$PATH:" in
   *":$INSTALL_DIR:"*)
-    echo "🚀 Start Tiles by running \"tiles\""
+    echo "🚀 Start Tiles by running \"tiles\"${CHAT_HINT}"
     ;;
   *)
     echo ""
@@ -334,6 +360,6 @@ case ":$PATH:" in
     echo ""
     echo "  export PATH=$INSTALL_DIR:\$PATH"
     echo ""
-    echo "🚀 Then restart your terminal..."
+    echo "🚀 Then restart your terminal and run \"tiles\"${CHAT_HINT}"
     ;;
 esac

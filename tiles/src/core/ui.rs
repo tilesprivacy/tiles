@@ -136,8 +136,11 @@ pub fn open_in_browser(url: &str) -> Result<()> {
 }
 
 /// a running copy takes the argv through its single-instance lock and shows
-/// its window
+/// its window. linux has no app for now, so the chat opens in the browser
 pub fn launch() -> Result<()> {
+    if !cfg!(target_os = "macos") {
+        return open_in_browser(URL);
+    }
     let bin = resolve().context("The Tiles app is not installed")?;
     std::process::Command::new(&bin)
         .stdin(Stdio::null())
@@ -188,6 +191,10 @@ fn spawn(bin: &PathBuf, show_ui: bool) -> Result<tokio::process::Child> {
 
 /// Nothing here is fatal to the daemon, a headless daemon is a working daemon
 pub fn start(ui: Arc<Ui>, show_ui: bool) {
+    // linux users get the chat in the browser for now
+    if !cfg!(target_os = "macos") {
+        return;
+    }
     if !enabled_by_config() {
         log::info!("Menu bar app disabled by config");
         return;

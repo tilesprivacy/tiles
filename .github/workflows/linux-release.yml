@@ -3,6 +3,9 @@ name: Linux Release
 # builds the Linux (x86_64) tarball whenever any tag is pushed (stable, rc,
 # nightly) and attaches it to the tag's GitHub Release. One tarball ships
 # every GPU backend; llama-server picks one at runtime.
+# Every push to the canary branch also rebuilds the rolling `canary` release's
+# Linux tarball, replacing the previous one, which is what
+# `install.sh --canary` installs.
 # Can also be run manually (Actions tab -> Run workflow) from a branch
 # (artifacts land on the run page) or from a tag ref (uploads into the
 # release for that tag, e.g. re-publishing into an existing 0.4.17).
@@ -14,6 +17,7 @@ name: Linux Release
 on:
   push:
     tags: ["*"]
+    branches: ["canary"]
   workflow_dispatch:
     inputs:
       release_tag:
@@ -54,21 +58,17 @@ jobs:
 
       - name: Install native dependencies and tools
         run: |
-          sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config jq \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+          sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config jq
           # venvstacks 0.8.0 final was never uploaded to PyPI; install from the git tag
           pipx install "venvstacks @ git+https://github.com/lmstudio-ai/venvstacks.git@0.8.0"
 
       - name: Install just
         run: command -v just || cargo install just
 
+      # the chat UI is built with npm and shipped for the daemon to serve
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-
-      - uses: pnpm/action-setup@v4
-        with:
-          package_manager_cache: false
 
       - name: Fetch Pi linux tarball
         run: |
@@ -93,7 +93,26 @@ jobs:
   publish-linux:
     runs-on: ubuntu-latest
     needs: build-linux
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
     steps:
+      # the release this run publishes into, if any: the pushed tag, the
+      # rolling canary release for a canary branch push, or a dispatch's
+      # release_tag
+      - name: Resolve the release
+        id: release
+        env:
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          elif [[ "${GITHUB_REF}" == refs/heads/canary && "${GITHUB_EVENT_NAME}" == push ]]; then
+            echo "tag=canary" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${RELEASE_TAG_INPUT}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
@@ -109,12 +128,21 @@ jobs:
       # manual (non-tag) runs: the tarball already lands on the run page from
       # build-linux; only the checksums are unique to this job.
       - name: Upload checksums
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        if: steps.release.outputs.tag == ''
         uses: actions/upload-artifact@v4
         with:
           name: linux-checksums
           path: dist/checksums.txt
           if-no-files-found: error
+
+      # the canary release is rolling and each build carries its own version in
+      # its name, so the last one would otherwise linger beside the new one
+      - name: Drop the previous canary Linux build
+        if: steps.release.outputs.tag == 'canary'
+        run: |
+          gh release view canary --json assets -q '.assets[].name' \
+            | grep -E '^tiles-v.*-linux(-[a-z]+)?\.tar\.gz$|^checksums\.txt$' \
+            | while read -r asset; do gh release delete-asset canary "$asset" --yes; done || true
 
       # Creates the release if missing, or uploads into the tag's existing
       # release (same-named assets are overwritten on re-runs; existing
@@ -122,10 +150,10 @@ jobs:
       # branch dispatch with `release_tag` set — that publishes the
       # dispatched branch's build into the named tag's release.
       - name: Upload to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
+        if: steps.release.outputs.tag != ''
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          tag_name: ${{ steps.release.outputs.tag }}
           files: |
             dist/tiles-v*.tar.gz
             dist/checksums.txt
