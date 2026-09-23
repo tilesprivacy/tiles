@@ -145,6 +145,18 @@ fn follow_active_space(window: &WebviewWindow) {
 #[cfg(not(target_os = "macos"))]
 fn follow_active_space(_window: &WebviewWindow) {}
 
+/// the page routes itself instead of reloading. one that does not claim the
+/// event, older or still loading, gets a plain navigation
+fn route_in_page(path: &str) -> Result<String, String> {
+    // json, so the path stays a string
+    let path = serde_json::to_string(path).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "(() => {{ const path = {path}; \
+         if (window.dispatchEvent(new CustomEvent('tiles:open', {{ detail: path, cancelable: true }}))) \
+         location.assign(path); }})()"
+    ))
+}
+
 /// deliberately no app activation here. both setActivationPolicy and
 /// activateIgnoringOtherApps send macOS off to whichever space the app counts
 /// as its own, which is what was yanking the user across spaces
@@ -152,12 +164,9 @@ pub fn open(app: &AppHandle, path: &str) -> Result<(), String> {
     let window = match app.get_webview_window(LABEL) {
         // reuse means the click lands on the conversation, not wherever it was left
         Some(window) => {
-            let target = window
-                .url()
-                .map_err(|e| e.to_string())?
-                .join(path)
-                .map_err(|e| format!("bad chat window url: {e}"))?;
-            window.navigate(target).map_err(|e| e.to_string())?;
+            window
+                .eval(route_in_page(path)?)
+                .map_err(|e| e.to_string())?;
             window
         }
         None => build(app, path)?,
@@ -174,6 +183,14 @@ pub fn open(app: &AppHandle, path: &str) -> Result<(), String> {
 /// the daemon decides whether the window belongs on screen at startup. a hand
 /// launch on linux is the ask itself
 pub fn init(app: &AppHandle) {
+    // a handed over link wants the window whatever started the daemon
+    if let Some(path) = crate::deeplink::take_handoff() {
+        if let Err(err) = open(app, &path) {
+            eprintln!("[ui] could not open the chat window: {err}");
+        }
+        return;
+    }
+
     let hand_launched = cfg!(target_os = "linux") && !crate::lifeline::is_supervised();
     if std::env::var_os(SHOW_UI).is_none() && !hand_launched {
         return;
@@ -184,9 +201,8 @@ pub fn init(app: &AppHandle) {
     }
 }
 
-/// the dock icon was clicked. a window that is merely buried comes forward
-/// where it was left, only a closed one goes back to the start
-#[cfg(target_os = "macos")]
+/// dock click or a bare tiles:// link. a buried window comes back as it was,
+/// only a closed one starts over
 pub fn reopen(app: &AppHandle) {
     let result = match app.get_webview_window(LABEL) {
         Some(window) => window

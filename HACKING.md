@@ -128,6 +128,34 @@ Open two terminal windows:
    pnpm --filter tiles-menubar tauri dev
    ```
 
+### Deep links
+
+The app handles `tiles://` links, launching itself if it is not running:
+
+| Link                        | Opens                                        |
+| --------------------------- | -------------------------------------------- |
+| `tiles://`                  | the app, with the window where it was left   |
+| `tiles://chat`              | a new chat                                   |
+| `tiles://chat?draft={text}` | a new chat with that text typed in, not sent |
+| `tiles://chat/{id}`         | that conversation                            |
+| `tiles://plugins`           | the plugin list                              |
+| `tiles://plugins/{slug}`    | that plugin's page                           |
+
+`{text}` is url encoded. A window that is already open moves inside the page, which
+routes itself on a `tiles:open` event, so nothing reloads.
+
+macOS only learns the scheme from an installed bundle, so `tauri dev` cannot receive
+links. Build one and register it:
+
+```sh
+pnpm --filter tiles-menubar tauri build --debug --bundles app
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f target/debug/bundle/macos/Tiles.app
+open 'tiles://chat/<id>'
+```
+
+A debug bundle loads the chat UI from its Vite server, so run `npm run dev` in tiles-ui
+alongside it. Linux registers the scheme itself on start, through `xdg-mime`.
+
 ## Building Tiles installer (Development)
 
 Install [venvstacks](https://github.com/lmstudio-ai/venvstacks?tab=readme-ov-file#installing) for portable py runtime
