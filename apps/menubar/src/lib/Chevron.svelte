@@ -1,19 +1,12 @@
 <script lang="ts">
   interface Props {
-    back?: boolean;
+    dir?: "forward" | "back" | "up";
   }
 
-  let { back = false }: Props = $props();
+  let { dir = "forward" }: Props = $props();
 </script>
 
-<svg
-  class="chevron"
-  data-back={back}
-  viewBox="0 0 12 12"
-  width="12"
-  height="12"
-  aria-hidden="true"
->
+<svg class="chevron" data-dir={dir} viewBox="0 0 12 12" width="12" height="12" aria-hidden="true">
   <path
     d="M4.5 2 8.5 6l-4 4"
     fill="none"
@@ -30,8 +23,12 @@
     transition: color var(--dur-state) ease-out;
   }
 
-  .chevron[data-back="true"] {
+  .chevron[data-dir="back"] {
     transform: rotate(180deg);
     color: var(--ash);
+  }
+
+  .chevron[data-dir="up"] {
+    transform: rotate(-90deg);
   }
 </style>

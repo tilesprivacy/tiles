@@ -1,13 +1,13 @@
-//! holding the machine up, for as long as there is something worth staying up for
+//! holding the machine up
 
 use std::process::{Child, Stdio};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::power;
+use crate::{lid, power};
 
 pub const STATE_EVENT: &str = "awake://state";
 
@@ -29,29 +29,44 @@ impl DevicePower {
     }
 }
 
+/// monotonic: an ntp step must not stall or end a session
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
 fn now_ms() -> u64 {
-    SystemTime::now()
+    EPOCH.elapsed().as_millis() as u64
+}
+
+/// run-clock ms as unix ms
+fn wall_ms(at: u64) -> u64 {
+    let wall = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let now = now_ms();
+
+    if at >= now {
+        wall.saturating_add(at - now)
+    } else {
+        wall.saturating_sub(now - at)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct State {
-    /// the assertion is held right now
     pub active: bool,
-    /// a session exists but is held, its clock stopped and its assertion down
     pub paused: bool,
-    /// unix ms an open ended session counts up from, while it is running
+    /// unix ms an open ended session counts up from
     pub since: Option<u64>,
-    /// unix ms a timed session counts down to, while it is running
+    /// unix ms a timed session counts down to
     pub until: Option<u64>,
-    /// the reading in ms while paused, which has no wall clock to sit against.
-    /// already whole seconds, so it does not step when the clock stops
+    /// the paused reading, already whole seconds
     pub frozen: Option<u64>,
-    /// the current battery and charger state used to gate new sessions
+    /// gates new sessions
     pub power: DevicePower,
+    /// whether a running session survives the lid closing, `None` where
+    /// there is no closed-display mode
+    pub lid: Option<bool>,
 }
 
 const IDLE: State = State {
@@ -64,16 +79,16 @@ const IDLE: State = State {
         plugged_in: false,
         battery_percent: None,
     },
+    lid: None,
 };
 
-/// a run of the clock, which pausing banks and resuming starts again
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Session {
-    /// total length in ms, `None` being the open ended one
+    /// total ms, `None` being open ended
     length: Option<u64>,
-    /// ms banked by earlier runs, which is the whole clock while paused
+    /// ms banked by earlier runs
     elapsed: u64,
-    /// unix ms the run in progress began, `None` while paused
+    /// run-clock ms the run in progress began, `None` while paused
     started: Option<u64>,
 }
 
@@ -84,10 +99,11 @@ impl Session {
 
     /// ms on the clock, counting the run in progress
     fn ran(&self, now: u64) -> u64 {
-        self.elapsed + self.started.map_or(0, |at| now.saturating_sub(at))
+        self.elapsed
+            .saturating_add(self.started.map_or(0, |at| now.saturating_sub(at)))
     }
 
-    /// ms before it ends, `None` for the open ended one
+    /// ms before it ends
     fn left(&self, now: u64) -> Option<u64> {
         self.length.map(|len| len.saturating_sub(self.ran(now)))
     }
@@ -96,9 +112,6 @@ impl Session {
         self.length.is_some_and(|len| self.ran(now) >= len)
     }
 
-    /// the wall clock an open ended run counts up from. `started - elapsed`
-    /// rather than anything involving now, so a tick that changed nothing does
-    /// not look to the panel like a change
     fn since(&self) -> Option<u64> {
         if self.length.is_some() {
             return None;
@@ -106,16 +119,19 @@ impl Session {
         Some(self.started?.saturating_sub(self.elapsed))
     }
 
-    /// the wall clock a timed run counts down to, steady for the same reason
     fn until(&self) -> Option<u64> {
-        Some(self.started? + self.length?.saturating_sub(self.elapsed))
+        Some(
+            self.started?
+                .saturating_add(self.length?.saturating_sub(self.elapsed)),
+        )
     }
 
-    /// what a stopped clock reads, rounded the way a running one is so it does
-    /// not step a second when it is paused
     fn frozen(&self) -> u64 {
         match self.length {
-            Some(len) => len.saturating_sub(self.elapsed).div_ceil(1000) * 1000,
+            Some(len) => len
+                .saturating_sub(self.elapsed)
+                .div_ceil(1000)
+                .saturating_mul(1000),
             None => self.elapsed / 1000 * 1000,
         }
     }
@@ -123,8 +139,9 @@ impl Session {
 
 #[derive(Default)]
 struct Held {
-    /// the tool, alive for exactly as long as the assertion is
     child: Option<Child>,
+    /// taken and let go with the child, the two are one mode
+    lid: Option<lid::Hold>,
     session: Option<Session>,
 }
 
@@ -136,27 +153,24 @@ struct Awake {
 pub fn init(app: &AppHandle) {
     app.manage(Awake {
         held: Mutex::new(Held::default()),
-        // the first tick corrects the mains, and off is the safe thing to draw
         state: Mutex::new(IDLE),
     });
+    lid::recover(app);
+    lid::watch(app);
 }
 
-/// emits on change only, same as the daemon's health
-fn set(app: &AppHandle, next: State) {
+// the caller still holds `held`, so the snapshot cannot be overtaken by a later one
+fn store(app: &AppHandle, next: State) -> bool {
     let awake = app.state::<Awake>();
     let mut state = awake.state.lock().unwrap();
     if *state == next {
-        return;
+        return false;
     }
     *state = next;
-    drop(state);
-
-    let _ = app.emit(STATE_EVENT, next);
+    true
 }
 
-/// what the panel draws, off the session rather than off the clock, so a tick
-/// that moved nothing emits nothing
-fn describe(held: &Held, power: DevicePower) -> State {
+fn describe(held: &Held, power: DevicePower, lid: Option<bool>) -> State {
     let Some(session) = held.session else {
         return State { power, ..IDLE };
     };
@@ -164,9 +178,10 @@ fn describe(held: &Held, power: DevicePower) -> State {
     if session.running() {
         return State {
             active: held.child.is_some(),
-            since: session.since(),
-            until: session.until(),
+            since: session.since().map(wall_ms),
+            until: session.until().map(wall_ms),
             power,
+            lid,
             ..IDLE
         };
     }
@@ -179,25 +194,28 @@ fn describe(held: &Held, power: DevicePower) -> State {
     }
 }
 
-/// the only place the child is started or killed, so the assertion and what the
-/// panel was told can never disagree
-fn reconcile(app: &AppHandle) {
+fn release(held: &mut Held) {
+    if let Some(mut child) = held.child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Some(hold) = held.lid.take() {
+        lid::release(hold);
+    }
+}
+
+pub fn reconcile(app: &AppHandle) {
     let power = power::device_power();
     let now = now_ms();
     let awake = app.state::<Awake>();
     let mut held = awake.held.lock().unwrap();
 
-    // the tool went away on its own, which is `-t` running out or a kill from
-    // outside. the assertion went with it, so the session is over
-    if let Some(child) = held.child.as_mut()
-        && matches!(child.try_wait(), Ok(Some(_)) | Err(_))
-    {
-        held.child = None;
+    if let Some(Ok(Some(_)) | Err(_)) = held.child.as_mut().map(Child::try_wait) {
+        release(&mut held);
         held.session = None;
     }
 
-    // dropping to the protected battery level ends the session rather than
-    // relighting it automatically when power becomes available again
+    // low battery ends the session, a charger later does not bring it back
     if !power.allows_stay_awake() {
         held.session = None;
     }
@@ -218,31 +236,35 @@ fn reconcile(app: &AppHandle) {
                 .stderr(Stdio::null())
                 .spawn()
             {
-                Ok(child) => held.child = Some(child),
-                // nothing to report but the plate staying dark, which the state
-                // below already says
+                Ok(child) => {
+                    held.child = Some(child);
+                    held.lid = Some(lid::hold(app));
+                }
                 Err(_) => held.session = None,
             }
         }
-        (false, true) => {
-            if let Some(mut child) = held.child.take() {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-        }
+        (false, true) => release(&mut held),
         _ => {}
     }
 
-    let next = describe(&held, power);
+    let lid = held.lid.as_mut().and_then(lid::keep);
+    let next = describe(&held, power, lid);
+    let changed = store(app, next);
     drop(held);
 
-    set(app, next);
+    if changed {
+        let _ = app.emit(STATE_EVENT, next);
+    }
 }
 
-/// one supervisor pass, outside the health branch. power and the deadline are
-/// not the daemon's business, and a session outlives it going away
-pub fn tick(app: &AppHandle) {
-    reconcile(app);
+/// the sentinel would reset it too, this is only sooner
+pub fn shutdown(app: &AppHandle) {
+    let Some(awake) = app.try_state::<Awake>() else {
+        return;
+    };
+    let mut held = awake.held.lock().unwrap();
+    release(&mut held);
+    held.session = None;
 }
 
 #[tauri::command]
@@ -250,8 +272,6 @@ pub fn awake_state(app: AppHandle) -> State {
     *app.state::<Awake>().state.lock().unwrap()
 }
 
-/// `seconds` of `None` is the open ended one the menu offers last. a pick while
-/// one is already going replaces it rather than stacking on it
 #[tauri::command]
 pub fn awake_start(app: AppHandle, seconds: Option<u64>) -> Result<(), String> {
     if !power::device_power().allows_stay_awake() {
@@ -261,8 +281,9 @@ pub fn awake_start(app: AppHandle, seconds: Option<u64>) -> Result<(), String> {
     {
         let awake = app.state::<Awake>();
         let mut held = awake.held.lock().unwrap();
+        release(&mut held);
         held.session = Some(Session {
-            length: seconds.map(|s| s * 1000),
+            length: seconds.map(|s| s.saturating_mul(1000)),
             elapsed: 0,
             started: Some(now_ms()),
         });
@@ -281,7 +302,6 @@ pub fn awake_stop(app: AppHandle) {
     reconcile(&app);
 }
 
-/// banks the run so far and drops the assertion. the clock keeps its reading
 #[tauri::command]
 pub fn awake_pause(app: AppHandle) {
     {
@@ -291,7 +311,7 @@ pub fn awake_pause(app: AppHandle) {
         if let Some(session) = held.session.as_mut()
             && let Some(at) = session.started.take()
         {
-            session.elapsed += now.saturating_sub(at);
+            session.elapsed = session.elapsed.saturating_add(now.saturating_sub(at));
         }
     }
     reconcile(&app);
@@ -356,7 +376,6 @@ mod tests {
         assert!(!DevicePower::default().allows_stay_awake());
     }
 
-    /// the run in progress counts, and the banked part counts with it
     #[test]
     fn the_clock_is_the_banked_time_plus_the_run_in_progress() {
         let session = Session {
@@ -368,7 +387,6 @@ mod tests {
         assert_eq!(session.left(NOW + 5_000), Some(15 * 60_000 - 25_000));
     }
 
-    /// pausing banks the run, and what is left does not move while it is held
     #[test]
     fn a_paused_clock_does_not_move() {
         let held = Session {
@@ -380,7 +398,6 @@ mod tests {
         assert!(!held.running());
     }
 
-    /// resuming picks the run up where it was banked rather than restarting it
     #[test]
     fn resuming_carries_the_banked_time_over() {
         let resumed = Session {
@@ -391,8 +408,6 @@ mod tests {
         assert_eq!(resumed.ran(NOW + 30_000), 90_000);
     }
 
-    /// the anchors the panel counts against are steady, so a tick that moved
-    /// nothing is not an emit
     #[test]
     fn the_anchors_do_not_drift_with_the_clock() {
         let session = Session {
@@ -413,13 +428,26 @@ mod tests {
     }
 
     #[test]
+    fn an_absurd_length_saturates_rather_than_wrapping() {
+        let session = Session {
+            length: Some(u64::MAX.saturating_mul(1000)),
+            elapsed: 0,
+            started: Some(NOW),
+        };
+
+        assert!(!session.expired(NOW));
+        assert_eq!(session.left(NOW), Some(u64::MAX));
+        assert_eq!(session.until(), Some(u64::MAX));
+        assert_eq!(session.frozen(), u64::MAX);
+    }
+
+    #[test]
     fn a_session_is_over_once_it_has_run_its_length() {
         let session = timed(15);
         assert!(!session.expired(NOW + 15 * 60_000 - 1));
         assert!(session.expired(NOW + 15 * 60_000));
     }
 
-    /// an open ended one has nothing to run out of
     #[test]
     fn an_open_ended_session_never_expires() {
         let open = Session {
@@ -431,7 +459,6 @@ mod tests {
         assert_eq!(open.left(NOW), None);
     }
 
-    /// a stopped clock reads in whole seconds, the way the running one does
     #[test]
     fn a_frozen_reading_is_rounded_like_a_running_one() {
         let timed_held = Session {

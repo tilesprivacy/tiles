@@ -1,8 +1,8 @@
-//! the atproto session, held by the daemon and signed in from the cli
+//! the atproto session, held by the daemon
 
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::daemon;
 use serde::Serialize;
@@ -10,64 +10,83 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const STATE_EVENT: &str = "atproto://state";
 
-/// the pds serves the blob at whatever size it was uploaded, and 22px of it is
-/// all this draws
 const AVATAR_MAX_BYTES: u64 = 2 * 1024 * 1024;
 
-/// what an <img> renders, so a record pointing anywhere else is never fetched
 const AVATAR_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/webp", "image/gif"];
 
-/// the pds is not the daemon, this round trip leaves the machine
+const META_MAX_BYTES: u64 = 256 * 1024;
+
 const PROFILE_TIMEOUT: Duration = Duration::from_secs(10);
+
+const PROFILE_RETRY_AFTER: Duration = Duration::from_secs(120);
+
+static PROFILES: LazyLock<Option<reqwest::Client>> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(PROFILE_TIMEOUT)
+        .build()
+        .ok()
+});
+
+const MISSES_BEFORE_UNKNOWN: u32 = 3;
+
+const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// the browser round trip, not a network read
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+
+const STATUS_PATH: &str = "/v1/tilekit/atproto/status";
+const LOGIN_PATH: &str = "/v1/tilekit/atproto/login";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "state", rename_all = "lowercase")]
+#[serde(rename_all_fields = "camelCase")]
 pub enum State {
     /// no daemon to ask through
     Unknown,
     /// the daemon answered, nobody is signed in
     None,
-    /// asked for, and the browser has not come back yet
-    Pending { handle: String },
+    Pending {
+        handle: String,
+    },
     Session {
         handle: String,
         did: String,
-        /// the container renames variants and not fields, so this says it
-        #[serde(rename = "displayName")]
         display_name: Option<String>,
-        /// a data uri, ready for an <img src>
-        avatar: Option<String>,
-        /// the host holding the repo, which the detail view names
+        /// a data uri
+        avatar: Option<Arc<str>>,
         pds: Option<String>,
     },
 }
 
-/// the public half of the profile record, read off the pds and not the daemon
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Profile {
     display_name: Option<String>,
-    avatar: Option<String>,
+    avatar: Option<Arc<str>>,
     pds: Option<String>,
 }
 
 #[derive(Default)]
 struct Profiles {
-    /// settled reads, keyed by the did they belong to
+    /// settled reads, keyed by did
     loaded: Option<(String, Profile)>,
-    /// the did a task already has out, so a tick does not start a second
+    /// the did a task already has out
     reading: Option<String>,
+    /// when a did last gave nothing
+    failed: Option<(String, Instant)>,
 }
 
 struct Atproto {
     state: Mutex<State>,
-    /// the daemon binds 8988 for the callback, so a second login cannot start
+    /// one login at a time; the daemon binds one callback port
     in_flight: AtomicBool,
+    misses: AtomicU32,
     profiles: Mutex<Profiles>,
 }
 
 pub fn init(app: &AppHandle) {
     app.manage(Atproto {
         state: Mutex::new(State::Unknown),
+        misses: AtomicU32::new(0),
         in_flight: AtomicBool::new(false),
         profiles: Mutex::new(Profiles::default()),
     });
@@ -77,7 +96,6 @@ fn current(app: &AppHandle) -> State {
     app.state::<Atproto>().state.lock().unwrap().clone()
 }
 
-/// emits on change only, same as the daemon's health
 fn set(app: &AppHandle, next: State) {
     let atproto = app.state::<Atproto>();
     let mut state = atproto.state.lock().unwrap();
@@ -90,52 +108,74 @@ fn set(app: &AppHandle, next: State) {
     let _ = app.emit(STATE_EVENT, next);
 }
 
-/// the daemon stopped answering, and it is the only way in
 pub fn unknown(app: &AppHandle) {
-    set(app, State::Unknown);
+    if logging_in(app) {
+        return;
+    }
+    settle(app, false);
 }
 
-/// one supervisor tick, only while the daemon answers
 pub async fn poll(app: &AppHandle, client: &reqwest::Client) {
-    // a login owns the state until the browser comes back, and the daemon
-    // reports signed out for the whole of that
-    if app.state::<Atproto>().in_flight.load(Ordering::SeqCst) {
+    // the daemon reports signed out for the whole browser round trip
+    if logging_in(app) {
         return;
     }
 
-    // unlike the local did this goes both ways, `tiles accounts at login` and
-    // `logout` flip it under us, so there is nothing to cache
-    let next = dress(app, fetch(client).await);
-    set(app, next);
+    let answer = fetch(client).await;
+
+    if logging_in(app) {
+        return;
+    }
+
+    match answer {
+        Some(state) => {
+            settle(app, true);
+            let next = dress(app, state);
+            set(app, next);
+        }
+        None => settle(app, false),
+    }
 }
 
-async fn fetch(client: &reqwest::Client) -> State {
-    let Ok(res) = client
-        .get(daemon::url("/v1/tilekit/atproto/status"))
-        .send()
-        .await
-    else {
-        return State::Unknown;
-    };
+fn logging_in(app: &AppHandle) -> bool {
+    app.state::<Atproto>().in_flight.load(Ordering::SeqCst)
+}
 
-    // 404 is the answer for nobody signed in, every other failure is the daemon
-    // saying nothing, which is not the same as saying there is no session
+fn tally(answered: bool, misses: u32) -> (u32, bool) {
+    if answered {
+        return (0, true);
+    }
+
+    let misses = misses.saturating_add(1);
+    (misses, misses < MISSES_BEFORE_UNKNOWN)
+}
+
+fn settle(app: &AppHandle, answered: bool) {
+    let atproto = app.state::<Atproto>();
+    let (misses, keeps) = tally(answered, atproto.misses.load(Ordering::SeqCst));
+    atproto.misses.store(misses, Ordering::SeqCst);
+
+    if !keeps {
+        set(app, State::Unknown);
+    }
+}
+
+/// `None` is the daemon not answering
+async fn fetch(client: &reqwest::Client) -> Option<State> {
+    let res = client.get(daemon::url(STATUS_PATH)).send().await.ok()?;
+
     if res.status() == reqwest::StatusCode::NOT_FOUND {
-        return State::None;
+        return Some(State::None);
     }
     if !res.status().is_success() {
-        return State::Unknown;
+        return None;
     }
 
-    match res.text().await {
-        Ok(body) => parse(&body),
-        Err(_) => State::Unknown,
-    }
+    Some(parse(&res.text().await.ok()?))
 }
 
-/// the success body only, a non-2xx never reaches here
 fn parse(body: &str) -> State {
-    // reqwest is built without its json feature, serde_json is already here
+    // reqwest has no json feature here
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
         return State::Unknown;
     };
@@ -152,33 +192,38 @@ fn parse(body: &str) -> State {
             avatar: None,
             pds: None,
         },
-        // a success carrying neither is the daemon contradicting itself, and a
-        // signed-out claim is the one thing it should not be read as
         _ => State::Unknown,
     }
 }
 
-/// the status route carries the identity only, so the profile behind it is this
-/// app's own read and lands a tick or two later
 fn dress(app: &AppHandle, state: State) -> State {
     let State::Session { handle, did, .. } = state else {
         return state;
     };
 
-    let profile = {
+    let (profile, read) = {
         let atproto = app.state::<Atproto>();
         let mut profiles = atproto.profiles.lock().unwrap();
         match &profiles.loaded {
-            Some((seen, profile)) if *seen == did => profile.clone(),
+            Some((seen, profile)) if *seen == did => (profile.clone(), false),
             _ => {
-                if profiles.reading.as_deref() != Some(did.as_str()) {
+                let waiting = profiles.reading.as_deref() == Some(did.as_str());
+                let resting = profiles.failed.as_ref().is_some_and(|(failed, at)| {
+                    *failed == did && at.elapsed() < PROFILE_RETRY_AFTER
+                });
+
+                let read = !waiting && !resting;
+                if read {
                     profiles.reading = Some(did.clone());
-                    spawn_read(app.clone(), did.clone());
                 }
-                Profile::default()
+                (Profile::default(), read)
             }
         }
     };
+
+    if read {
+        spawn_read(app.clone(), did.clone());
+    }
 
     State::Session {
         handle,
@@ -189,8 +234,38 @@ fn dress(app: &AppHandle, state: State) -> State {
     }
 }
 
-/// off the watch loop, whose client times out in a second and whose other polls
-/// are waiting behind it
+/// one hold of the lock, or a stale read resurrects the account
+fn dress_in(app: &AppHandle, did: &str, profile: Profile) {
+    let atproto = app.state::<Atproto>();
+    let mut state = atproto.state.lock().unwrap();
+
+    let State::Session {
+        handle, did: at, ..
+    } = &*state
+    else {
+        return;
+    };
+    if at != did {
+        return;
+    }
+
+    let next = State::Session {
+        handle: handle.clone(),
+        did: at.clone(),
+        display_name: profile.display_name,
+        avatar: profile.avatar,
+        pds: profile.pds,
+    };
+    if *state == next {
+        return;
+    }
+
+    *state = next.clone();
+    drop(state);
+
+    let _ = app.emit(STATE_EVENT, next);
+}
+
 fn spawn_read(app: AppHandle, did: String) {
     tauri::async_runtime::spawn(async move {
         let profile = read_profile(&did).await;
@@ -198,10 +273,16 @@ fn spawn_read(app: AppHandle, did: String) {
         {
             let atproto = app.state::<Atproto>();
             let mut profiles = atproto.profiles.lock().unwrap();
-            profiles.reading = None;
-            // a pds that said nothing caches nothing, so the next tick asks again
-            if let Some(profile) = profile.clone() {
-                profiles.loaded = Some((did.clone(), profile));
+            if profiles.reading.as_deref() == Some(did.as_str()) {
+                profiles.reading = None;
+            }
+
+            match &profile {
+                None => profiles.failed = Some((did.clone(), Instant::now())),
+                Some(profile) => {
+                    profiles.failed = None;
+                    profiles.loaded = Some((did.clone(), profile.clone()));
+                }
             }
         }
 
@@ -209,40 +290,15 @@ fn spawn_read(app: AppHandle, did: String) {
             return;
         };
 
-        // the identity can move while this is out, and the picture belongs to
-        // the one that was asked for
-        let State::Session {
-            handle, did: at, ..
-        } = current(&app)
-        else {
-            return;
-        };
-        if at != did {
-            return;
-        }
-
-        set(
-            &app,
-            State::Session {
-                handle,
-                did: at,
-                display_name: profile.display_name,
-                avatar: profile.avatar,
-                pds: profile.pds,
-            },
-        );
+        dress_in(&app, &did, profile);
     });
 }
 
-/// `None` is the pds saying nothing, which is not the same as an account that
-/// has set no picture
+/// `None` is the pds saying nothing, not an empty profile
 async fn read_profile(did: &str) -> Option<Profile> {
-    let client = reqwest::Client::builder()
-        .timeout(PROFILE_TIMEOUT)
-        .build()
-        .ok()?;
+    let client = PROFILES.as_ref()?;
 
-    let pds = resolve_pds(&client, did).await?;
+    let pds = resolve_pds(client, did).await?;
     let res = client
         .get(format!(
             "{pds}/xrpc/com.atproto.repo.getRecord?repo={did}&collection=app.bsky.actor.profile&rkey=self"
@@ -251,18 +307,17 @@ async fn read_profile(did: &str) -> Option<Profile> {
         .await
         .ok()?;
 
-    // an account that never wrote the record answers 400 and not 404, so any
-    // refusal here is an empty profile rather than a pds that went quiet
-    if !res.status().is_success() {
-        return Some(Profile {
+    let status = res.status();
+    if !status.is_success() {
+        return no_record(status).then(|| Profile {
             pds: Some(pds),
             ..Profile::default()
         });
     }
 
-    let (display_name, blob) = parse_profile(&res.text().await.ok()?);
+    let (display_name, blob) = parse_profile(&text(res, META_MAX_BYTES).await?);
     let avatar = match blob {
-        Some((cid, mime)) => blob_uri(&client, &pds, did, &cid, &mime).await,
+        Some((cid, mime)) => blob_uri(client, &pds, did, &cid, &mime).await,
         None => None,
     };
 
@@ -273,18 +328,44 @@ async fn read_profile(did: &str) -> Option<Profile> {
     })
 }
 
-/// the did document says which pds holds the repo, and the daemon is not in
-/// this path to have resolved it already
 async fn resolve_pds(client: &reqwest::Client, did: &str) -> Option<String> {
     let res = client.get(did_doc_url(did)?).send().await.ok()?;
     if !res.status().is_success() {
         return None;
     }
 
-    pds_from_doc(&res.text().await.ok()?)
+    pds_from_doc(&text(res, META_MAX_BYTES).await?)
 }
 
-/// plc keeps its documents in one directory, did:web serves its own
+/// a record never written answers 400, not 404; the rest may answer next time
+fn no_record(status: reqwest::StatusCode) -> bool {
+    matches!(
+        status,
+        reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::NOT_FOUND
+    )
+}
+
+async fn text(res: reqwest::Response, max: u64) -> Option<String> {
+    String::from_utf8(body(res, max).await?).ok()
+}
+
+async fn body(mut res: reqwest::Response, max: u64) -> Option<Vec<u8>> {
+    if res.content_length().is_some_and(|len| len > max) {
+        return None;
+    }
+
+    // chunked carries no length, so cap the bytes themselves
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(chunk) = res.chunk().await.ok()? {
+        if bytes.len().saturating_add(chunk.len()) as u64 > max {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+
+    Some(bytes)
+}
+
 fn did_doc_url(did: &str) -> Option<String> {
     if !is_token(did) {
         return None;
@@ -294,8 +375,6 @@ fn did_doc_url(did: &str) -> Option<String> {
         return Some(format!("https://plc.directory/{did}"));
     }
 
-    // the host form only, the path form maps colons to slashes and a guess at
-    // one is worse than drawing initials
     let host = did.strip_prefix("did:web:")?;
     if host.is_empty() || host.contains(':') {
         return None;
@@ -304,8 +383,6 @@ fn did_doc_url(did: &str) -> Option<String> {
     Some(format!("https://{host}/.well-known/did.json"))
 }
 
-/// these get joined into urls, and the daemon is not the only thing that could
-/// have put them there
 fn is_token(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
@@ -314,7 +391,6 @@ fn is_token(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b':' | b'.' | b'_' | b'-'))
 }
 
-/// the endpoint of the service entry that holds the repo
 fn pds_from_doc(body: &str) -> Option<String> {
     let doc = serde_json::from_str::<serde_json::Value>(body).ok()?;
     let endpoint = doc
@@ -327,8 +403,6 @@ fn pds_from_doc(body: &str) -> Option<String> {
         .get("serviceEndpoint")?
         .as_str()?;
 
-    // everything after this is built by joining onto it, and only https is
-    // worth sending a did to
     if !endpoint.starts_with("https://") {
         return None;
     }
@@ -336,7 +410,6 @@ fn pds_from_doc(body: &str) -> Option<String> {
     Some(endpoint.trim_end_matches('/').to_owned())
 }
 
-/// the record body, whose avatar is a blob ref and not a url
 fn parse_profile(body: &str) -> (Option<String>, Option<(String, String)>) {
     let Ok(payload) = serde_json::from_str::<serde_json::Value>(body) else {
         return (None, None);
@@ -375,7 +448,7 @@ async fn blob_uri(
     did: &str,
     cid: &str,
     mime: &str,
-) -> Option<String> {
+) -> Option<Arc<str>> {
     let res = client
         .get(format!(
             "{pds}/xrpc/com.atproto.sync.getBlob?did={did}&cid={cid}"
@@ -388,24 +461,16 @@ async fn blob_uri(
         return None;
     }
 
-    // the header is advisory, so it only saves reading a body that already
-    // admits it is too big
-    if res
-        .content_length()
-        .is_some_and(|len| len > AVATAR_MAX_BYTES)
-    {
-        return None;
-    }
+    let bytes = body(res, AVATAR_MAX_BYTES).await?;
 
-    let bytes = res.bytes().await.ok()?;
-    if bytes.len() as u64 > AVATAR_MAX_BYTES {
-        return None;
-    }
-
-    Some(format!(
-        "data:{mime};base64,{}",
-        data_encoding::BASE64.encode(&bytes)
-    ))
+    Some(
+        format!(
+            "data:{mime};base64,{}",
+            data_encoding::BASE64.encode(&bytes)
+        )
+        .into_boxed_str()
+        .into(),
+    )
 }
 
 #[tauri::command]
@@ -413,8 +478,28 @@ pub fn atproto_state(app: AppHandle) -> State {
     current(&app)
 }
 
-/// the daemon resolves the handle, opens the browser itself and holds the
-/// request until the redirect lands, so this waits with no upper bound
+struct Login(AppHandle);
+
+impl Login {
+    /// `None` when a sign-in is already waiting
+    fn claim(app: &AppHandle) -> Option<Self> {
+        let taken = app
+            .state::<Atproto>()
+            .in_flight
+            .swap(true, Ordering::SeqCst);
+        (!taken).then(|| Self(app.clone()))
+    }
+}
+
+impl Drop for Login {
+    fn drop(&mut self) {
+        self.0
+            .state::<Atproto>()
+            .in_flight
+            .store(false, Ordering::SeqCst);
+    }
+}
+
 #[tauri::command]
 pub async fn atproto_login(app: AppHandle, handle: String) -> Result<(), String> {
     let handle = handle.trim().trim_start_matches('@').to_lowercase();
@@ -422,13 +507,7 @@ pub async fn atproto_login(app: AppHandle, handle: String) -> Result<(), String>
         return Err("A handle is needed".into());
     }
 
-    if app
-        .state::<Atproto>()
-        .in_flight
-        .swap(true, Ordering::SeqCst)
-    {
-        return Err("A sign-in is already waiting".into());
-    }
+    let login = Login::claim(&app).ok_or("A sign-in is already waiting")?;
 
     set(
         &app,
@@ -438,31 +517,40 @@ pub async fn atproto_login(app: AppHandle, handle: String) -> Result<(), String>
     );
 
     let outcome = request(&handle).await;
-    app.state::<Atproto>()
-        .in_flight
-        .store(false, Ordering::SeqCst);
+    drop(login);
 
-    if let Err(err) = outcome {
-        // the next tick reports whatever the daemon actually holds
-        set(&app, State::Unknown);
-        return Err(err);
-    }
+    refresh(&app).await;
 
-    Ok(())
+    outcome
+}
+
+async fn refresh(app: &AppHandle) {
+    let Ok(client) = reqwest::Client::builder().timeout(REFRESH_TIMEOUT).build() else {
+        return;
+    };
+    poll(app, &client).await;
 }
 
 async fn request(handle: &str) -> Result<(), String> {
-    // no timeout on this one, the wait is however long the browser takes
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(LOGIN_TIMEOUT)
+        .build()
+        .map_err(|err| err.to_string())?;
     let body = serde_json::json!({ "user_handle": handle }).to_string();
 
     let res = client
-        .post(daemon::url("/v1/tilekit/atproto/login"))
+        .post(daemon::url(LOGIN_PATH))
         .header("content-type", "application/json")
         .body(body)
         .send()
         .await
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| {
+            if err.is_timeout() {
+                "The browser did not come back in time".to_owned()
+            } else {
+                err.to_string()
+            }
+        })?;
 
     let status = res.status();
     if status.is_success() {
@@ -472,8 +560,6 @@ async fn request(handle: &str) -> Result<(), String> {
     Err(reason(&res.text().await.unwrap_or_default(), status))
 }
 
-/// the daemon says why in the body, and its reasons are the readable half of
-/// what went wrong
 fn reason(body: &str, status: reqwest::StatusCode) -> String {
     serde_json::from_str::<serde_json::Value>(body)
         .ok()
@@ -486,12 +572,10 @@ fn reason(body: &str, status: reqwest::StatusCode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{State, did_doc_url, parse, parse_profile, pds_from_doc};
+    use super::{State, did_doc_url, no_record, parse, parse_profile, pds_from_doc, tally};
 
-    /// the shape `status` builds, tiles/src/daemon/atproto.rs
     const SUCCESS: &str = r#"{"status":"success","data":{"handle":"codelif.in","did":"did:plc:7iza6de2dwap2sbkpav7c6c6"}}"#;
 
-    /// the shape a pds returns for app.bsky.actor.profile/self
     const RECORD: &str = r#"{"uri":"at://did:plc:x/app.bsky.actor.profile/self","value":{"$type":"app.bsky.actor.profile","displayName":"Harsh Sharma","avatar":{"$type":"blob","ref":{"$link":"bafkreiabc123"},"mimeType":"image/jpeg","size":91234}}}"#;
 
     #[test]
@@ -509,6 +593,43 @@ mod tests {
     }
 
     #[test]
+    fn a_quiet_tick_does_not_unseat_the_account_on_its_own() {
+        let (misses, keeps) = tally(false, 0);
+        assert_eq!((misses, keeps), (1, true));
+
+        let (misses, keeps) = tally(false, misses);
+        assert_eq!((misses, keeps), (2, true));
+
+        let (misses, keeps) = tally(false, misses);
+        assert_eq!((misses, keeps), (3, false));
+
+        assert_eq!(tally(true, misses), (0, true));
+    }
+
+    #[test]
+    fn the_session_serialises_the_way_the_panel_reads_it() {
+        let state = State::Session {
+            handle: "codelif.in".to_owned(),
+            did: "did:plc:abc".to_owned(),
+            display_name: Some("Harsh Sharma".to_owned()),
+            avatar: None,
+            pds: Some("https://pds.example".to_owned()),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&state).unwrap(),
+            serde_json::json!({
+                "state": "session",
+                "handle": "codelif.in",
+                "did": "did:plc:abc",
+                "displayName": "Harsh Sharma",
+                "avatar": null,
+                "pds": "https://pds.example",
+            })
+        );
+    }
+
+    #[test]
     fn a_body_without_an_identity_is_not_a_sign_out() {
         assert_eq!(parse(r#"{"status":"success","data":{}}"#), State::Unknown);
         assert_eq!(parse("not json"), State::Unknown);
@@ -516,14 +637,12 @@ mod tests {
 
     #[test]
     fn finds_the_pds_in_a_did_document() {
-        // the id carries a fragment, hence the wider raw string
         let doc = r##"{"service":[{"id":"#atproto_pds","type":"AtprotoPersonalDataServer","serviceEndpoint":"https://shimeji.us-east.host.bsky.network/"}]}"##;
         assert_eq!(
             pds_from_doc(doc).as_deref(),
             Some("https://shimeji.us-east.host.bsky.network")
         );
 
-        // a document with no pds entry, and one served over plain http
         assert_eq!(pds_from_doc(r#"{"service":[]}"#), None);
         let plain = r#"{"service":[{"type":"AtprotoPersonalDataServer","serviceEndpoint":"http://pds.example"}]}"#;
         assert_eq!(pds_from_doc(plain), None);
@@ -545,7 +664,6 @@ mod tests {
         assert_eq!(name.as_deref(), Some("Harsh"));
         assert_eq!(blob, None);
 
-        // a blob that an <img> would not render is left alone
         let odd = r#"{"value":{"avatar":{"ref":{"$link":"bafkrei1"},"mimeType":"video/mp4"}}}"#;
         assert_eq!(parse_profile(odd), (None, None));
     }
@@ -560,8 +678,17 @@ mod tests {
             did_doc_url("did:web:example.com").as_deref(),
             Some("https://example.com/.well-known/did.json")
         );
-        // the path form, and a did carrying url of its own
         assert_eq!(did_doc_url("did:web:example.com:u:alice"), None);
         assert_eq!(did_doc_url("did:plc:a/../../evil"), None);
+    }
+
+    #[test]
+    fn only_a_missing_record_settles_the_profile() {
+        for code in [400, 404] {
+            assert!(no_record(reqwest::StatusCode::from_u16(code).unwrap()));
+        }
+        for code in [401, 429, 500, 502, 503] {
+            assert!(!no_record(reqwest::StatusCode::from_u16(code).unwrap()));
+        }
     }
 }

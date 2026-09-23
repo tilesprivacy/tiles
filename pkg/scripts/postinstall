@@ -2,6 +2,59 @@
 
 SERVER_DIR="/usr/local/share/tiles/server"
 
+# closed-display mode. the app may turn sleep off and back on, nothing more.
+# first, so a failure further down cannot skip it
+SLEEP_GRANT="/private/etc/sudoers.d/tiles"
+SLEEP_GUARD="/Library/LaunchDaemons/com.tilesprivacy.tiles.sleep-guard.plist"
+
+install_sleep_grant() {
+  local draft
+  draft=$(mktemp) || return
+  cat > "${draft}" <<'EOF'
+Cmnd_Alias TILES_SLEEP = /usr/bin/pmset -a disablesleep 1, /usr/bin/pmset -a disablesleep 0
+%staff ALL=(root) NOPASSWD: TILES_SLEEP
+EOF
+  # a broken sudoers file takes sudo down for everyone, so it only goes in once it parses
+  if /usr/sbin/visudo -cf "${draft}" >/dev/null; then
+    /usr/bin/install -m 0440 -o root -g wheel "${draft}" "${SLEEP_GRANT}"
+  else
+    echo "⚠️ sudoers draft rejected, closed-display mode stays off"
+  fi
+  rm -f "${draft}"
+}
+
+# a reboot mid-session would otherwise come back with sleep still off. only a
+# marker the app wrote counts, so a user's own disablesleep is left alone
+install_sleep_guard() {
+  cat > "${SLEEP_GUARD}" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.tilesprivacy.tiles.sleep-guard</string>
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.tilesprivacy.tiles.menubar</string>
+	</array>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>for m in /Users/*/Library/"Application Support"/com.tilesprivacy.tiles.menubar/closed-display; do if [ -f "$m" ]; then exec /usr/bin/pmset -a disablesleep 0; fi; done</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+</dict>
+</plist>
+EOF
+  chown root:wheel "${SLEEP_GUARD}"
+  chmod 0644 "${SLEEP_GUARD}"
+}
+
+install_sleep_grant
+install_sleep_guard
+
 echo "🔧 Setting up Python environment..."
 
 cd "${SERVER_DIR}/stack_export_prod" || exit 1

@@ -3,12 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::{sessions, tray};
+use objc2_quartz_core::kCACornerCurveContinuous;
 use tauri::{AppHandle, Manager};
-use tauri_nspanel::objc2::msg_send;
-use tauri_nspanel::objc2::rc::Retained;
-use tauri_nspanel::objc2::runtime::AnyObject;
-use tauri_nspanel::objc2_app_kit::{NSAnimationContext, NSScreen};
-use tauri_nspanel::objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
+use tauri_nspanel::objc2_app_kit::{NSAnimatablePropertyContainer, NSAnimationContext, NSScreen};
+use tauri_nspanel::objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 use tauri_nspanel::{
     CollectionBehavior, ManagerExt, PanelHandle, PanelLevel, StyleMask, WebviewWindowExt,
 };
@@ -120,18 +118,16 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 /// continuous is the squircle rather than a circular arc
 fn round_corners(panel: &PanelHandle<tauri::Wry>) {
     let content_view = panel.content_view();
+    content_view.setWantsLayer(true);
 
-    unsafe {
-        let _: () = msg_send![&*content_view, setWantsLayer: true];
+    let Some(layer) = content_view.layer() else {
+        return;
+    };
 
-        let layer: Retained<AnyObject> = msg_send![&*content_view, layer];
-        let _: () = msg_send![&*layer, setCornerRadius: CORNER_RADIUS];
-        let _: () = msg_send![&*layer, setMasksToBounds: true];
-
-        // kCACornerCurveContinuous
-        let continuous = NSString::from_str("continuous");
-        let _: () = msg_send![&*layer, setCornerCurve: &*continuous];
-    }
+    layer.setCornerRadius(CORNER_RADIUS);
+    layer.setMasksToBounds(true);
+    // extern static
+    layer.setCornerCurve(unsafe { kCACornerCurveContinuous });
 }
 
 /// an unshown WKWebView has rasterised nothing, so the first orderFront would
@@ -303,10 +299,7 @@ pub fn dismiss(app: &AppHandle, mode: Dismiss) {
     let ns_panel = panel.as_panel();
     NSAnimationContext::beginGrouping();
     NSAnimationContext::currentContext().setDuration(FADE_OUT.as_secs_f64());
-    unsafe {
-        let animator: Retained<AnyObject> = msg_send![ns_panel, animator];
-        let _: () = msg_send![&*animator, setAlphaValue: 0.0f64];
-    }
+    ns_panel.animator().setAlphaValue(0.0);
     NSAnimationContext::endGrouping();
 
     let handle = app.clone();

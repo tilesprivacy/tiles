@@ -13,13 +13,7 @@
   /* the one cut echoing the switch's, chips only and never rows */
   .chip {
     flex: none;
-    clip-path: polygon(
-      0 0,
-      100% 0,
-      100% calc(100% - var(--cut)),
-      calc(100% - var(--cut)) 100%,
-      0 100%
-    );
+    clip-path: var(--clip-cut);
     padding: 3px 5px;
     background: var(--steel);
     color: var(--ash);
