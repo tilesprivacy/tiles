@@ -96,16 +96,13 @@ fi
 
 
 if [[ "${OS}" == "linux" ]]; then
-  # builds the panel, fetches the chat UI named in apps/menubar/ui.pin and
-  # embeds both in the app. the same chat UI build is shipped as ui/ so the
-  # daemon can serve it to a browser
-  echo "🖥️  Building the desktop app..."
-  [[ -d "${MENUBAR_DIR}/node_modules" ]] || pnpm install --frozen-lockfile
-  (cd "${MENUBAR_DIR}" && pnpm tauri build --no-bundle)
-  cp "target/${TARGET}/tiles-menubar" "${DIST_DIR}/tmp/"
+  # linux has no desktop app for now: the daemon serves the chat UI to the
+  # browser, so only the UI itself is built, the one named in apps/menubar/ui.pin
+  echo "🖥️  Building the chat UI..."
+  mkdir -p "${MENUBAR_DIR}/dist"
+  "${MENUBAR_DIR}/scripts/bundle-ui.sh"
   mkdir -p "${DIST_DIR}/tmp/ui"
   find "${MENUBAR_DIR}/dist" -mindepth 1 -maxdepth 1 ! -name panel -exec cp -R {} "${DIST_DIR}/tmp/ui/" \;
-  cp "${MENUBAR_DIR}/src-tauri/icons/128x128.png" "${DIST_DIR}/tmp/tiles.png"
 fi
 
 echo "🧩 Provisioning llama-server binary into ${SERVER_DIR}/bin..."
