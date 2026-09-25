@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+import uuid
 from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
@@ -15,6 +17,7 @@ from ...config import DAEMON_PORT, get_llama_config
 from ...schemas import ResponsesRequest
 from .gguf import find_gguf_file
 from . import process
+from ..commons import _process_error_event
 from .openresponses_adapter import (
     generate_response_chat_stream as _generate_response_chat_stream,
 )
@@ -90,7 +93,21 @@ async def generate_response_chat_stream(
 ) -> AsyncGenerator[str, None]:
     # model loading blocks on llama-server startup. Run it in a
     # worker thread so the async event loop isn't frozen for the duration.
-    await asyncio.to_thread(get_or_load_model, request.model)
+    try:
+        await asyncio.to_thread(get_or_load_model, request.model)
+    except Exception as exc:
+        # A load failure used to escape before the first event, so the
+        # connection closed empty and the client could only say the stream
+        # ended early. The exception already carries the cause - for a
+        # llama-server that exits at startup, its code and log tail - so send
+        # it as a proper response.failed and let the chat show the reason.
+        logger.exception("Model load failed before the stream started")
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        event, _ = _process_error_event(
+            str(detail), f"resp_{uuid.uuid4()}", request, int(time.time()), 0
+        )
+        yield event
+        return
     llama_config = get_llama_config()
     async for chunk in _generate_response_chat_stream(request, llama_config):
         yield chunk

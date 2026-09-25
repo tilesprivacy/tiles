@@ -120,10 +120,31 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
 }
 
+/// Expands `~` and `$VARS` in a modelfile path, as a shell would.
+///
+/// A shell does this before Tiles sees the argument, but a quoted argument,
+/// a script or an app launching Tiles hands `~/models/modelfile` over
+/// literally, and the path then pointed nowhere. A variable that is not set
+/// leaves the path as given, so the not-found message still names it.
+fn expand_home(path: &str) -> PathBuf {
+    shellexpand::full(path)
+        .map(|expanded| PathBuf::from(expanded.as_ref()))
+        .unwrap_or_else(|_| PathBuf::from(path))
+}
+
 /// `None` once an invalid modelfile has been reported
 fn resolve_modelfiles(run_args: &RunArgs) -> Result<Option<(Modelfile, Modelfile)>> {
     let (modelfile, default_modelfile) = if let Some(modelfile_str) = &run_args.modelfile_path {
-        let modelfile = match tilekit::modelfile::parse_from_file(modelfile_str.as_str()) {
+        let path = expand_home(modelfile_str);
+        if !path.is_file() {
+            eprintln!(
+                "No Modelfile at {} (from `{}`)",
+                path.display(),
+                modelfile_str
+            );
+            return Ok(None);
+        }
+        let modelfile = match tilekit::modelfile::parse_from_file(&path.to_string_lossy()) {
             Ok(mf) => mf,
             Err(err) => {
                 eprintln!("Invalid Modelfile due to {:?}", err);
@@ -1872,6 +1893,34 @@ fn persist_default_thinking_level(level: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_leading_tilde_is_the_home_directory() {
+        let home = std::env::home_dir().unwrap();
+        assert_eq!(
+            super::expand_home("~/models/modelfile"),
+            home.join("models/modelfile")
+        );
+        assert_eq!(super::expand_home("~"), home);
+        assert_eq!(
+            super::expand_home("$HOME/models/modelfile"),
+            home.join("models/modelfile")
+        );
+        // an unset variable leaves the path as given, for the error message
+        assert_eq!(
+            super::expand_home("$TILES_NO_SUCH_VAR/modelfile"),
+            std::path::PathBuf::from("$TILES_NO_SUCH_VAR/modelfile")
+        );
+        // only a leading tilde is special, as in a shell
+        assert_eq!(
+            super::expand_home("models/~/modelfile"),
+            std::path::PathBuf::from("models/~/modelfile")
+        );
+        assert_eq!(
+            super::expand_home("/abs/modelfile"),
+            std::path::PathBuf::from("/abs/modelfile")
+        );
+    }
+
     use super::*;
     use crate::core::agent::types::{
         GetStateData, PiAgentEndEvent, PiModelInfo, PiMsgContent, PiMsgEvent,
