@@ -70,8 +70,38 @@ pub struct LlamaConfig {
     pub n_cpu_moe: Option<u32>,
     /// Enable flash attention (`--flash-attn`).
     pub flash_attn: Option<bool>,
-    /// Disable memory-mapping the GGUF (`--no-mmap`).
-    pub no_mmap: Option<bool>,
+    /// How llama.cpp loads the model (`--load-mode`).
+    pub load_mode: Option<LoadMode>,
+}
+
+/// llama.cpp's `--load-mode`, named exactly as llama.cpp names its values so
+/// a config reads the same as llama.cpp's own docs.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum LoadMode {
+    /// mmap, unless a device does not support it (llama.cpp's default)
+    #[serde(rename = "auto")]
+    #[value(name = "auto")]
+    Auto,
+    /// no special loading mode
+    #[serde(rename = "none")]
+    #[value(name = "none")]
+    None,
+    /// memory-map the model
+    #[serde(rename = "mmap")]
+    #[value(name = "mmap")]
+    Mmap,
+    /// keep the model in RAM rather than swapping or compressing it
+    #[serde(rename = "mlock")]
+    #[value(name = "mlock")]
+    Mlock,
+    /// mmap, and keep the model in RAM
+    #[serde(rename = "mmap+mlock")]
+    #[value(name = "mmap+mlock")]
+    MmapMlock,
+    /// DirectIO, where available
+    #[serde(rename = "dio")]
+    #[value(name = "dio")]
+    Dio,
 }
 
 impl LlamaConfig {
@@ -83,7 +113,7 @@ impl LlamaConfig {
             && self.mtp.is_none()
             && self.n_cpu_moe.is_none()
             && self.flash_attn.is_none()
-            && self.no_mmap.is_none()
+            && self.load_mode.is_none()
     }
 }
 
@@ -722,7 +752,10 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     llama_config.mtp = config.mtp.or(llama_config.mtp);
     llama_config.n_cpu_moe = config.n_cpu_moe.or(llama_config.n_cpu_moe).or(Some(12));
     llama_config.flash_attn = config.flash_attn.or(llama_config.flash_attn).or(Some(true));
-    llama_config.no_mmap = config.no_mmap.or(llama_config.no_mmap).or(Some(true));
+    llama_config.load_mode = config
+        .load_mode
+        .or(llama_config.load_mode)
+        .or(Some(LoadMode::Auto));
     root_config.llama = Some(llama_config);
     save_root_config(&root_config)
 }
@@ -826,6 +859,42 @@ mod tests {
     use crate::core::agent::types::ReasoningEffort;
 
     use super::*;
+
+    /// Keys Tiles no longer knows, like the retired `no_mmap`, must be
+    /// ignored rather than fail the load: old configs in the field still have
+    /// them, and nothing migrates them. They drop out on the next save, since
+    /// that writes the struct. Adding `deny_unknown_fields` breaks this.
+    #[test]
+    fn a_config_with_retired_keys_still_loads() {
+        let config: RootConfig = toml::from_str(
+            r#"
+                [llama]
+                context_length = 32768
+                no_mmap = true
+            "#,
+        )
+        .unwrap();
+
+        let llama = config.llama.unwrap();
+        assert_eq!(llama.context_length, Some(32768));
+        assert_eq!(llama.load_mode, None);
+    }
+
+    #[test]
+    fn load_mode_takes_llama_cpp_names_and_rejects_others() {
+        for (name, mode) in [
+            ("auto", LoadMode::Auto),
+            ("none", LoadMode::None),
+            ("mmap", LoadMode::Mmap),
+            ("mlock", LoadMode::Mlock),
+            ("mmap+mlock", LoadMode::MmapMlock),
+            ("dio", LoadMode::Dio),
+        ] {
+            let config: LlamaConfig = toml::from_str(&format!("load_mode = \"{name}\"")).unwrap();
+            assert_eq!(config.load_mode, Some(mode));
+        }
+        assert!(toml::from_str::<LlamaConfig>("load_mode = \"no-mmap\"").is_err());
+    }
     use serde_json::Value;
     use tempfile::tempdir;
 
