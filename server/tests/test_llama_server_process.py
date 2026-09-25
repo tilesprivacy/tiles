@@ -78,7 +78,9 @@ def test_build_llama_server_command_includes_optional_flags(tmp_path: Path):
     assert "--no-kv-offload" in cmd
     assert "--n-cpu-moe" in cmd and "12" in cmd
     assert "--flash-attn" in cmd and "on" in cmd
-    assert "--no-mmap" in cmd
+    assert "--load-mode" in cmd and cmd[cmd.index("--load-mode") + 1] == "none"
+    # the old spelling is gone from llama.cpp and would stop the server
+    assert "--no-mmap" not in cmd
     assert "--jinja" in cmd
     assert "--spec-type" not in cmd
 
