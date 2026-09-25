@@ -443,20 +443,6 @@ pub fn get_or_create_config(provider: impl ConfigProvider) -> Result<Table> {
     }
 }
 
-/// Removes `[llama] no_mmap`, retired for llama.cpp's own `load_mode`. True
-/// if it was there.
-///
-/// Its value is not carried over: Tiles wrote `no_mmap = true` into every
-/// config as its old default, so it says nothing about what a user chose,
-/// and carrying it would pin everyone to `none` instead of llama.cpp's
-/// default of `auto`.
-fn drop_retired_llama_keys(table: &mut Table) -> bool {
-    table
-        .get_mut("llama")
-        .and_then(|llama| llama.as_table_mut())
-        .is_some_and(|llama| llama.remove("no_mmap").is_some())
-}
-
 fn get_or_create_root_config() -> Result<RootConfig> {
     let tiles_config_dir = DefaultProvider.get_config_dir()?;
     let config_toml_path = tiles_config_dir.join("config.toml");
@@ -466,15 +452,7 @@ fn get_or_create_root_config() -> Result<RootConfig> {
         .context("config.toml path doesn't exist")?
     {
         let config_str = fs::read_to_string(config_toml_path)?;
-        let mut table: Table = toml::from_str(&config_str)?;
-        let dropped_legacy = drop_retired_llama_keys(&mut table);
-        let root_config: RootConfig = table.try_into()?;
-        if dropped_legacy {
-            // written back so every other reader of config.toml, the python
-            // server's fallback included, sees the file without it
-            save_root_config(&root_config)?;
-        }
-        Ok(root_config)
+        Ok(toml::from_str(&config_str)?)
     } else {
         let init_table: RootConfig = toml::from_str(
             r#"
@@ -882,41 +860,24 @@ mod tests {
 
     use super::*;
 
+    /// Keys Tiles no longer knows, like the retired `no_mmap`, must be
+    /// ignored rather than fail the load: old configs in the field still have
+    /// them, and nothing migrates them. They drop out on the next save, since
+    /// that writes the struct. Adding `deny_unknown_fields` breaks this.
     #[test]
-    fn a_config_from_before_load_mode_loses_no_mmap_and_keeps_the_rest() {
-        let mut table: Table = toml::from_str(
+    fn a_config_with_retired_keys_still_loads() {
+        let config: RootConfig = toml::from_str(
             r#"
                 [llama]
                 context_length = 32768
-                flash_attn = true
                 no_mmap = true
             "#,
         )
         .unwrap();
 
-        assert!(drop_retired_llama_keys(&mut table));
-        let llama = table["llama"].as_table().unwrap();
-        assert!(!llama.contains_key("no_mmap"));
-        assert_eq!(llama["context_length"].as_integer(), Some(32768));
-
-        // and the result still loads, with load_mode unset so the default applies
-        let config: LlamaConfig = llama.clone().try_into().unwrap();
-        assert_eq!(config.load_mode, None);
-        assert_eq!(config.flash_attn, Some(true));
-    }
-
-    #[test]
-    fn a_current_config_is_left_alone() {
-        let mut table: Table = toml::from_str("[llama]\nload_mode = \"mlock\"\n").unwrap();
-
-        assert!(!drop_retired_llama_keys(&mut table));
-        let config: LlamaConfig = table["llama"]
-            .as_table()
-            .unwrap()
-            .clone()
-            .try_into()
-            .unwrap();
-        assert_eq!(config.load_mode, Some(LoadMode::Mlock));
+        let llama = config.llama.unwrap();
+        assert_eq!(llama.context_length, Some(32768));
+        assert_eq!(llama.load_mode, None);
     }
 
     #[test]
