@@ -16,7 +16,10 @@ use tiles::{
         start_server, stop_cmd, unshare_remote_link,
     },
     repl::{self, RunArgs},
-    utils::{config::LlamaConfig, installer},
+    utils::{
+        config::{LlamaConfig, LoadMode},
+        installer,
+    },
 };
 
 use crate::commands::{
@@ -248,9 +251,9 @@ struct RunFlags {
     #[arg(long, default_missing_value = "true")]
     flash_attn: Option<bool>,
 
-    /// no_mmap, default true
-    #[arg(long)]
-    no_mmap: Option<bool>,
+    /// How llama.cpp loads the model, as llama-server's --load-mode (default: auto)
+    #[arg(long, value_enum)]
+    load_mode: Option<LoadMode>,
 
     /// Enable MTP speculative decoding (requires an MTP head GGUF next to the model)
     #[arg(long, num_args = 0..=1, default_missing_value = "true")]
@@ -270,7 +273,7 @@ fn llama_config_from_flags(flags: &RunFlags) -> Option<LlamaConfig> {
         mtp: flags.mtp,
         n_cpu_moe: flags.n_cpu_moe,
         flash_attn: flags.flash_attn,
-        no_mmap: flags.no_mmap,
+        load_mode: flags.load_mode,
     };
 
     Some(config)

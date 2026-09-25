@@ -2,7 +2,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from pydantic import BaseModel
@@ -35,7 +35,7 @@ LLAMA_CONFIG_FIELDS = (
     "mtp",
     "n_cpu_moe",
     "flash_attn",
-    "no_mmap",
+    "load_mode",
 )
 
 
@@ -47,7 +47,8 @@ class LlamaConfig(BaseModel):
     mtp: bool | None = None
     n_cpu_moe: int | None = None
     flash_attn: bool | None = None
-    no_mmap: bool | None = None
+    # llama.cpp's --load-mode, in llama.cpp's own names
+    load_mode: Literal["auto", "none", "mmap", "mlock", "mmap+mlock", "dio"] | None = None
 
 
 def _config_toml_candidates() -> list[Path]:

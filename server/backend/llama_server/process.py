@@ -227,12 +227,10 @@ def build_llama_server_command(
     elif flash_attn is False:
         cmd.extend(["--flash-attn", "off"])
 
-    # llama.cpp replaced --no-mmap with --load-mode (gone by b11005, the tag
-    # scripts/fetch_llama_server.sh pins for every platform); an unknown flag
-    # stops llama-server from starting at all
-    no_mmap = llama_config.get("no_mmap")
-    if no_mmap is True:
-        cmd.extend(["--load-mode", "none"])
+    # passed through verbatim: the config uses llama.cpp's own value names
+    load_mode = llama_config.get("load_mode")
+    if load_mode is not None:
+        cmd.extend(["--load-mode", str(load_mode)])
 
     # MTP speculative decoding: opt-in. Enabled only when `mtp = true` is
     # set in config.toml (or passed via `tiles run --mtp`); the presence

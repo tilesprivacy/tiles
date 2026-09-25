@@ -31,7 +31,7 @@ pub enum Power {
 }
 
 /// the `[llama]` table, the flags the runtime was launched with
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Llama {
     pub context_length: Option<u32>,
@@ -41,7 +41,8 @@ pub struct Llama {
     pub mtp: Option<bool>,
     pub n_cpu_moe: Option<u32>,
     pub flash_attn: Option<bool>,
-    pub no_mmap: Option<bool>,
+    /// llama.cpp's `--load-mode` value, as written in config.toml
+    pub load_mode: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -226,7 +227,10 @@ fn llama(body: &serde_json::Value) -> Option<Llama> {
         mtp: flag("mtp"),
         n_cpu_moe: int("n_cpu_moe"),
         flash_attn: flag("flash_attn"),
-        no_mmap: flag("no_mmap"),
+        load_mode: table
+            .get("load_mode")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
     })
 }
 
