@@ -28,8 +28,8 @@
     if (llama.flashAttn !== null) rows.push({ key: "Flash attention", value: onOff(llama.flashAttn) });
     if (llama.offloadKqv !== null) rows.push({ key: "KQV offload", value: onOff(llama.offloadKqv) });
     if (llama.mtp !== null) rows.push({ key: "Multi-token prediction", value: onOff(llama.mtp) });
-    // the daemon stores the negative, the panel shows the thing itself
-    if (llama.noMmap !== null) rows.push({ key: "Memory mapping", value: onOff(!llama.noMmap) });
+    // shown in llama.cpp's own words, as config.toml spells it
+    if (llama.loadMode !== null) rows.push({ key: "Load mode", value: llama.loadMode });
 
     return rows;
   });

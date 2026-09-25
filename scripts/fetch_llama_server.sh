@@ -16,6 +16,11 @@ OUT_DIR="${ROOT}/server/bin"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 
+# one llama.cpp release for every platform, so a flag that works on one build
+# works on all of them. The platforms drifted once (macOS b9867, Linux b11005)
+# and b11005 had dropped --no-mmap: every Linux install failed at startup.
+LLAMA_CPP_TAG="${LLAMA_CPP_TAG:-b11005}"
+
 mkdir -p "${OUT_DIR}"
 
 if [[ "${OS}" == "Darwin" ]]; then
@@ -23,13 +28,12 @@ if [[ "${OS}" == "Darwin" ]]; then
   [[ "${BACKEND}" == "metal" ]] || { echo "Unsupported macOS llama backend: ${BACKEND}" >&2; exit 1; }
 
   if [[ -x "${OUT_DIR}/llama-server" && -f "${OUT_DIR}/.llama-backend" \
-    && "$(<"${OUT_DIR}/.llama-backend")" == "${BACKEND}" \
+    && "$(<"${OUT_DIR}/.llama-backend")" == "${BACKEND} ${LLAMA_CPP_TAG}" \
     && "${FORCE_LLAMA_FETCH:-}" != "1" ]]; then
     echo "llama-server already present at ${OUT_DIR}/llama-server; skipping fetch (set FORCE_LLAMA_FETCH=1 to force)."
     exit 0
   fi
 
-  LLAMA_CPP_TAG="${LLAMA_CPP_TAG:-b9867}"
   case "${ARCH}" in
     arm64)  ASSET="llama-${LLAMA_CPP_TAG}-bin-macos-arm64.tar.gz" ;;
     x86_64) ASSET="llama-${LLAMA_CPP_TAG}-bin-macos-x64.tar.gz" ;;
@@ -54,7 +58,7 @@ if [[ "${OS}" == "Darwin" ]]; then
   cp -a "${BIN_DIR}/"*.dylib "${OUT_DIR}/" 2>/dev/null || true
   cp -a "${BIN_DIR}/"*.metal* "${OUT_DIR}/" 2>/dev/null || true
   chmod +x "${OUT_DIR}/llama-server"
-  printf '%s\n' "${BACKEND}" > "${OUT_DIR}/.llama-backend"
+  printf '%s\n' "${BACKEND} ${LLAMA_CPP_TAG}" > "${OUT_DIR}/.llama-backend"
   echo "Installed ${OUT_DIR}/llama-server (macOS Metal, ${LLAMA_CPP_TAG})"
   exit 0
 fi
@@ -64,7 +68,6 @@ if [[ "${OS}" != "Linux" ]]; then
   exit 1
 fi
 
-LLAMA_CPP_TAG="${LLAMA_CPP_TAG:-b11005}"
 VARIANTS="${TILES_LLAMA_VARIANTS-cuda_v12 cuda_v13 vulkan}"
 LAYOUT="linux ${LLAMA_CPP_TAG} [${VARIANTS}]"
 
