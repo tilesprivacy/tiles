@@ -32,6 +32,7 @@ use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
+use rustyline::error::ReadlineError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
@@ -343,9 +344,17 @@ fn draw_progress(state: &serde_json::Value) {
     io::Write::flush(&mut io::stdout()).ok();
 }
 
-struct TilesHinter;
+pub struct TilesHelper {
+    pub commands: Vec<String>,
+}
 
-impl Hinter for TilesHinter {
+impl TilesHelper {
+    pub fn new(commands: Vec<String>) -> Self {
+        Self { commands }
+    }
+}
+
+impl Hinter for TilesHelper {
     type Hint = String;
 
     fn hint(&self, line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<Self::Hint> {
@@ -357,19 +366,36 @@ impl Hinter for TilesHinter {
     }
 }
 
-impl Completer for TilesHinter {
+impl Completer for TilesHelper {
     type Candidate = String;
+
+    fn complete(&self, line: &str, pos: usize, _ctx: &rustyline::Context<'_>) -> Result<(usize, Vec<Self::Candidate>), ReadlineError> {
+        let word_start = line[..pos].rfind(' ').map_or(0, |i| i + 1);
+        let current_word = &line[word_start..pos];
+
+        if !current_word.starts_with('/') {
+            return Ok((word_start, vec![]));
+        }
+
+        let matches: Vec<String> = self
+            .commands
+            .iter()
+            .filter(|cmd| cmd.starts_with(current_word))
+            .cloned()
+            .collect();
+        Ok((word_start, matches))
+    }
 }
 
-impl Highlighter for TilesHinter {
+impl Highlighter for TilesHelper {
     fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
         std::borrow::Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
     }
 }
 
-impl Validator for TilesHinter {}
+impl Validator for TilesHelper {}
 
-impl Helper for TilesHinter {}
+impl Helper for TilesHelper {}
 
 enum InputType {
     Skip,
@@ -579,9 +605,26 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
     let current_user = get_current_user(&db_conn.common)?;
 
     let config = Config::builder().auto_add_history(true).build();
-    let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config)
+    let mut editor = Editor::<TilesHelper, DefaultHistory>::with_config(config)
         .context("Failed to create editor")?;
-    editor.set_helper(Some(TilesHinter));
+
+    // this should be updated to get the commands from types.rs by using something like strum to iterate over the enum
+    let commands = vec![
+        "/status".to_string(),
+        "/share".to_string(),
+        "/sessions".to_string(),
+        "/resume".to_string(),
+        "/reasoning".to_string(),
+        "/set_thinking_level".to_string(),
+        "/abort".to_string(),
+        "/skills".to_string(),
+        "/get_commands".to_string(),
+        "/help".to_string(),
+        "/bye".to_string()
+    ];
+
+    let tiles_helper = TilesHelper::new(commands);
+    editor.set_helper(Some(tiles_helper));
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
