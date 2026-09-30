@@ -1,0 +1,37 @@
+name: macOS check
+
+# the daemon and the menu bar app compile per platform, and nothing else here
+# builds them for macOS before a release does
+on:
+  pull_request:
+    branches: ["canary", "main"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-check-${{ hashFiles('**/Cargo.lock') }}
+
+      # tauri's build script embeds the frontend, so it needs a dist to point at
+      - name: Stub the menu bar frontend
+        run: mkdir -p apps/menubar/dist && touch apps/menubar/dist/index.html
+
+      - name: Clippy
+        run: cargo clippy -p tiles -p tiles-menubar --all-targets -- -D warnings
