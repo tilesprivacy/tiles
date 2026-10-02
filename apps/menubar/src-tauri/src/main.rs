@@ -1,7 +1,7 @@
 mod account;
 mod atproto;
 mod awake;
-mod boot;
+mod clipboard;
 mod daemon;
 mod deeplink;
 mod inference;
@@ -109,9 +109,7 @@ fn main() {
             awake::awake_start,
             awake::awake_stop,
             awake::awake_pause,
-            awake::awake_resume,
-            ui::open_session,
-            ui::open_ui
+            awake::awake_resume
         ])
         .setup(|app| {
             // first, so a daemon that dies mid-setup still takes us with it

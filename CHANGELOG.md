@@ -5,6 +5,8 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.4.19] - 2026-08-30
+
 ### Added
 
 - `--mtp` flag for `tiles run` to enable/disable MTP speculative decoding (persists to `config.toml` like the other llama flags).
@@ -97,6 +99,10 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 - On macOS the vendored `.node` binaries are re-signed with our Team ID at
   bundle time. Pi runs with hardened runtime and no
   `disable-library-validation`, so unsigned native modules are rejected.
+### Fixed
+
+- Chances of installing multiple version of Tiles during `tiles update` #[194](https://github.com/tilesprivacy/tiles/pull/194)
+
 
 ## [0.4.18] - 2026-08-23
 

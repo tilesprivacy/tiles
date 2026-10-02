@@ -46,10 +46,7 @@
       <Avatar nickname={name ?? session?.handle ?? "?"} src={session?.avatar} size={26} />
     {/snippet}
   </Row>
-  <Note>
-    Your Atmosphere Account is connected and ready to share conversations through your AT Protocol
-    PDS.
-  </Note>
+  <Note>This account lives on the server below, and Tiles reads it there directly</Note>
 </Zone>
 
 <Zone label="Handle">

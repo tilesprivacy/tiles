@@ -1,32 +1,26 @@
-//! holding the machine up
-
-use std::process::{Child, Stdio};
+//! holding the mac up
+use std::process::{Child, Command, Stdio};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::{lid, power};
-
 pub const STATE_EVENT: &str = "awake://state";
 
-const MINIMUM_BATTERY_PERCENT: u8 = 10;
+/// `-w` releases the assertion even on a kill we never see, which Drop cannot
+const CAFFEINATE: &str = "/usr/bin/caffeinate";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DevicePower {
-    pub plugged_in: bool,
-    pub battery_percent: Option<u8>,
+/// -2.0, external power; a desktop reads this too
+const UNLIMITED: f64 = -2.0;
+
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    fn IOPSGetTimeRemainingEstimate() -> f64;
 }
 
-impl DevicePower {
-    fn allows_stay_awake(self) -> bool {
-        self.plugged_in
-            || self
-                .battery_percent
-                .is_some_and(|percent| percent > MINIMUM_BATTERY_PERCENT)
-    }
+fn on_ac() -> bool {
+    unsafe { IOPSGetTimeRemainingEstimate() == UNLIMITED }
 }
 
 /// monotonic: an ntp step must not stall or end a session
@@ -62,11 +56,7 @@ pub struct State {
     pub until: Option<u64>,
     /// the paused reading, already whole seconds
     pub frozen: Option<u64>,
-    /// gates new sessions
-    pub power: DevicePower,
-    /// whether a running session survives the lid closing, `None` where
-    /// there is no closed-display mode
-    pub lid: Option<bool>,
+    pub ac: bool,
 }
 
 const IDLE: State = State {
@@ -75,11 +65,7 @@ const IDLE: State = State {
     since: None,
     until: None,
     frozen: None,
-    power: DevicePower {
-        plugged_in: false,
-        battery_percent: None,
-    },
-    lid: None,
+    ac: false,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -140,8 +126,6 @@ impl Session {
 #[derive(Default)]
 struct Held {
     child: Option<Child>,
-    /// taken and let go with the child, the two are one mode
-    lid: Option<lid::Hold>,
     session: Option<Session>,
 }
 
@@ -155,8 +139,6 @@ pub fn init(app: &AppHandle) {
         held: Mutex::new(Held::default()),
         state: Mutex::new(IDLE),
     });
-    lid::recover(app);
-    lid::watch(app);
 }
 
 // the caller still holds `held`, so the snapshot cannot be overtaken by a later one
@@ -170,9 +152,9 @@ fn store(app: &AppHandle, next: State) -> bool {
     true
 }
 
-fn describe(held: &Held, power: DevicePower, lid: Option<bool>) -> State {
+fn describe(held: &Held, ac: bool) -> State {
     let Some(session) = held.session else {
-        return State { power, ..IDLE };
+        return State { ac, ..IDLE };
     };
 
     if session.running() {
@@ -180,8 +162,7 @@ fn describe(held: &Held, power: DevicePower, lid: Option<bool>) -> State {
             active: held.child.is_some(),
             since: session.since().map(wall_ms),
             until: session.until().map(wall_ms),
-            power,
-            lid,
+            ac,
             ..IDLE
         };
     }
@@ -189,7 +170,7 @@ fn describe(held: &Held, power: DevicePower, lid: Option<bool>) -> State {
     State {
         paused: true,
         frozen: Some(session.frozen()),
-        power,
+        ac,
         ..IDLE
     }
 }
@@ -199,24 +180,26 @@ fn release(held: &mut Held) {
         let _ = child.kill();
         let _ = child.wait();
     }
-    if let Some(hold) = held.lid.take() {
-        lid::release(hold);
-    }
 }
 
 pub fn reconcile(app: &AppHandle) {
-    let power = power::device_power();
+    let ac = on_ac();
     let now = now_ms();
     let awake = app.state::<Awake>();
     let mut held = awake.held.lock().unwrap();
-
-    if let Some(Ok(Some(_)) | Err(_)) = held.child.as_mut().map(Child::try_wait) {
-        release(&mut held);
-        held.session = None;
+    match held.child.as_mut().map(Child::try_wait) {
+        Some(Ok(Some(_))) => {
+            held.child = None;
+            held.session = None;
+        }
+        Some(Err(_)) => {
+            release(&mut held);
+            held.session = None;
+        }
+        _ => {}
     }
 
-    // low battery ends the session, a charger later does not bring it back
-    if !power.allows_stay_awake() {
+    if !ac {
         held.session = None;
     }
 
@@ -227,8 +210,13 @@ pub fn reconcile(app: &AppHandle) {
     let running = held.session.is_some_and(|session| session.running());
     match (running, held.child.is_some()) {
         (true, false) => {
-            let left = held.session.and_then(|session| session.left(now));
-            let mut command = power::inhibitor(left);
+            let mut command = Command::new(CAFFEINATE);
+            // `-i` keeps the system up and leaves the display free to sleep
+            command.arg("-i");
+            if let Some(left) = held.session.and_then(|session| session.left(now)) {
+                command.args(["-t", &left.div_ceil(1000).max(1).to_string()]);
+            }
+            command.args(["-w", &std::process::id().to_string()]);
 
             match command
                 .stdin(Stdio::null())
@@ -236,10 +224,7 @@ pub fn reconcile(app: &AppHandle) {
                 .stderr(Stdio::null())
                 .spawn()
             {
-                Ok(child) => {
-                    held.child = Some(child);
-                    held.lid = Some(lid::hold(app));
-                }
+                Ok(child) => held.child = Some(child),
                 Err(_) => held.session = None,
             }
         }
@@ -247,8 +232,7 @@ pub fn reconcile(app: &AppHandle) {
         _ => {}
     }
 
-    let lid = held.lid.as_mut().and_then(lid::keep);
-    let next = describe(&held, power, lid);
+    let next = describe(&held, ac);
     let changed = store(app, next);
     drop(held);
 
@@ -257,27 +241,13 @@ pub fn reconcile(app: &AppHandle) {
     }
 }
 
-/// the sentinel would reset it too, this is only sooner
-pub fn shutdown(app: &AppHandle) {
-    let Some(awake) = app.try_state::<Awake>() else {
-        return;
-    };
-    let mut held = awake.held.lock().unwrap();
-    release(&mut held);
-    held.session = None;
-}
-
 #[tauri::command]
 pub fn awake_state(app: AppHandle) -> State {
     *app.state::<Awake>().state.lock().unwrap()
 }
 
 #[tauri::command]
-pub fn awake_start(app: AppHandle, seconds: Option<u64>) -> Result<(), String> {
-    if !power::device_power().allows_stay_awake() {
-        return Err("Connect a charger or charge above 10% to use Stay Awake".into());
-    }
-
+pub fn awake_start(app: AppHandle, seconds: Option<u64>) {
     {
         let awake = app.state::<Awake>();
         let mut held = awake.held.lock().unwrap();
@@ -289,7 +259,6 @@ pub fn awake_start(app: AppHandle, seconds: Option<u64>) -> Result<(), String> {
         });
     }
     reconcile(&app);
-    Ok(())
 }
 
 #[tauri::command]
@@ -318,11 +287,7 @@ pub fn awake_pause(app: AppHandle) {
 }
 
 #[tauri::command]
-pub fn awake_resume(app: AppHandle) -> Result<(), String> {
-    if !power::device_power().allows_stay_awake() {
-        return Err("Connect a charger or charge above 10% to resume Stay Awake".into());
-    }
-
+pub fn awake_resume(app: AppHandle) {
     {
         let awake = app.state::<Awake>();
         let mut held = awake.held.lock().unwrap();
@@ -333,12 +298,12 @@ pub fn awake_resume(app: AppHandle) -> Result<(), String> {
         }
     }
     reconcile(&app);
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DevicePower, Session};
+
+    use super::Session;
 
     const NOW: u64 = 1_700_000_000_000;
 
@@ -348,32 +313,6 @@ mod tests {
             elapsed: 0,
             started: Some(NOW),
         }
-    }
-
-    #[test]
-    fn stay_awake_needs_power_or_more_than_ten_percent() {
-        assert!(
-            DevicePower {
-                plugged_in: true,
-                battery_percent: Some(1),
-            }
-            .allows_stay_awake()
-        );
-        assert!(
-            DevicePower {
-                plugged_in: false,
-                battery_percent: Some(11),
-            }
-            .allows_stay_awake()
-        );
-        assert!(
-            !DevicePower {
-                plugged_in: false,
-                battery_percent: Some(10),
-            }
-            .allows_stay_awake()
-        );
-        assert!(!DevicePower::default().allows_stay_awake());
     }
 
     #[test]

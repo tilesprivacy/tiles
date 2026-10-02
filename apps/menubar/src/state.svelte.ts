@@ -33,13 +33,13 @@ export type Atproto =
   | { state: "none" }
   | { state: "pending"; handle: string }
   | {
-      state: "session";
-      handle: string;
-      did: string;
-      displayName?: string | null;
-      avatar?: string | null;
-      pds?: string | null;
-    };
+    state: "session";
+    handle: string;
+    did: string;
+    displayName?: string | null;
+    avatar?: string | null;
+    pds?: string | null;
+  };
 
 export type Session = { id: string; name: string; createdAt: number };
 export type Sessions = { state: "unknown" } | { state: "ready"; sessions: Session[] };
@@ -50,12 +50,8 @@ export type Awake = {
   since: number | null;
   until: number | null;
   frozen: number | null;
-  power: DevicePower;
-  /** whether a running session survives the lid closing, null where there is no such mode */
-  lid: boolean | null;
+  ac: boolean;
 };
-
-export type DevicePower = { pluggedIn: boolean; batteryPercent: number | null };
 
 export type Remote =
   | { state: "unknown" }
@@ -71,15 +67,7 @@ export const atproto = $state<{ value: Atproto }>({ value: { state: "unknown" } 
 export const sessions = $state<{ value: Sessions }>({ value: { state: "unknown" } });
 export const remote = $state<{ value: Remote }>({ value: { state: "unknown" } });
 export const awake = $state<{ value: Awake }>({
-  value: {
-    active: false,
-    paused: false,
-    since: null,
-    until: null,
-    frozen: null,
-    power: { pluggedIn: false, batteryPercent: null },
-    lid: null,
-  },
+  value: { active: false, paused: false, since: null, until: null, frozen: null, ac: false },
 });
 
 /**
@@ -98,7 +86,7 @@ export function connect(): () => void {
       .then((unlisten) => {
         if (!connected) {
           unlisten();
-          return () => {};
+          return () => { };
         }
 
         const snapshotGeneration = generation;
@@ -106,7 +94,7 @@ export function connect(): () => void {
           .then((value) => {
             if (connected && generation === snapshotGeneration) apply(value);
           })
-          .catch(() => {});
+          .catch(() => { });
         return unlisten;
       })
       .catch(() => {
@@ -114,9 +102,9 @@ export function connect(): () => void {
         if (connected) {
           void invoke<T>(command)
             .then((value) => connected && apply(value))
-            .catch(() => {});
+            .catch(() => { });
         }
-        return () => {};
+        return () => { };
       });
   };
 

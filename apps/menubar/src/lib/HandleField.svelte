@@ -57,7 +57,7 @@
       autocomplete="off"
       autocorrect="off"
       disabled={pending}
-      aria-label="Atmosphere account handle"
+      aria-label="Atmosphere handle"
       onkeydown={key}
     />
   </span>

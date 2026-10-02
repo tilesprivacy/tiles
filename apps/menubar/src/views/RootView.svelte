@@ -253,7 +253,7 @@
 <Masthead {mode} {on} pending={busy} disabled={health.value.state !== "up"} ontoggle={toggle} />
 
 <Zone label="Accounts">
-  <h3 class="account">Tiles Account</h3>
+  <h3 class="account">Tiles</h3>
   <Row
     size="large"
     title={identity.title}
@@ -268,9 +268,8 @@
     {#snippet trailing()}
       {#if account.value.state === "local"}<Chevron />{/if}
     {/snippet}
-  </Row>
-
-  <h3 class="account">Atmosphere Account</h3>
+  </Row>  
+  <h3 class="account">Atmosphere</h3>
   <Row
     size="large"
     title={atmosphere.title}

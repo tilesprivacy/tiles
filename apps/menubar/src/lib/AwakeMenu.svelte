@@ -1,18 +1,13 @@
 <script lang="ts">
   interface Props {
     session: "none" | "running" | "paused";
-    /** new or resumed sessions need mains or enough battery */
-    available: boolean;
-    note: string;
-    alert: boolean;
     onpick: (seconds: number | null) => void;
     onpause: () => void;
     onresume: () => void;
     onstop: () => void;
   }
 
-  let { session, available, note, alert, onpick, onpause, onresume, onstop }: Props = $props();
-
+  let { session, onpick, onpause, onresume, onstop }: Props = $props();
   const DURATIONS: { label: string; seconds: number | null }[] = [
     { label: "15 minutes", seconds: 15 * 60 },
     { label: "30 minutes", seconds: 30 * 60 },
@@ -27,38 +22,21 @@
   <!-- clip-path takes the drop shadow with it, so the halo is a sibling -->
   <span class="menu__halo"></span>
 
-  <div class="menu__list" role="menu">
-    <p class="menu__note" data-alert={alert}>{note}</p>
-    <div class="menu__rule"></div>
-
+  
+  <div class="menu__list">
     {#if session !== "none"}
       {#if session === "running"}
-        <button class="menu__item menu__item--lead" role="menuitem" onclick={onpause}>
-          Pause
-        </button>
+        <button class="menu__item menu__item--lead" onclick={onpause}>Pause</button>
       {:else}
-        <button
-          class="menu__item menu__item--lead"
-          role="menuitem"
-          disabled={!available}
-          onclick={onresume}
-        >
-          Resume
-        </button>
+        <button class="menu__item menu__item--lead" onclick={onresume}>Resume</button>
       {/if}
-      <button class="menu__item menu__item--lead" role="menuitem" onclick={onstop}>
-        Turn off
-      </button>
+      <button class="menu__item menu__item--lead" onclick={onstop}>Turn off</button>
       <div class="menu__rule"></div>
     {/if}
 
     {#each DURATIONS as duration (duration.label)}
-      <button
-        class="menu__item"
-        role="menuitem"
-        disabled={!available}
-        onclick={() => onpick(duration.seconds)}
-      >
+      
+      <button class="menu__item" onclick={() => onpick(duration.seconds)}>
         {duration.label}
       </button>
     {/each}
@@ -109,25 +87,6 @@
 
   .menu__item:hover {
     color: var(--signal);
-  }
-
-  .menu__item:disabled {
-    color: var(--slate);
-    opacity: 0.45;
-  }
-
-  .menu__note {
-    width: 190px;
-    margin: 0;
-    padding: 7px var(--pad-x);
-    color: var(--slate);
-    font-family: var(--font-ui);
-    font-size: var(--fs-meta);
-    line-height: 1.35;
-  }
-
-  .menu__note[data-alert="true"] {
-    color: var(--alert);
   }
 
   .menu__rule {

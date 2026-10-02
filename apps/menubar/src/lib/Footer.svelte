@@ -6,6 +6,11 @@
   import CupMark from "./CupMark.svelte";
   import { awake } from "../state.svelte";
 
+  import AwakeMenu from "./AwakeMenu.svelte";
+  import Chevron from "./Chevron.svelte";
+  import CupMark from "./CupMark.svelte";
+  import { awake } from "../state.svelte";
+
   interface Props {
     /** the daemon's version, or why there is no version to show */
     note: string;
@@ -39,22 +44,6 @@
   const session: "none" | "running" | "paused" = $derived(
     awake.value.paused ? "paused" : awake.value.active ? "running" : "none",
   );
-  const powerAllowed = $derived(
-    awake.value.power.pluggedIn ||
-      (awake.value.power.batteryPercent !== null && awake.value.power.batteryPercent > 10),
-  );
-  const powerCopy = $derived.by(() => {
-    const percent = awake.value.power.batteryPercent;
-    if (!powerAllowed && percent !== null) {
-      return `${percent}% battery · Connect a charger to enable`;
-    }
-    return "Available when plugged in or battery is above 10%";
-  });
-  // the grant comes with the pkg, so a mac without it sleeps on a closed lid
-  const lidExposed = $derived(session === "running" && awake.value.lid === false);
-  const menuNote = $derived(
-    lidExposed ? "Closing the lid will still sleep this Mac · Reinstall Tiles to fix" : powerCopy,
-  );
 
   const reading = $derived.by(() => {
     const { paused, since, until, frozen } = awake.value;
@@ -66,13 +55,12 @@
 
   function pick(seconds: number | null) {
     menu = false;
-    if (!powerAllowed) return;
-    act("awake_start", { seconds });
+    void invoke("awake_start", { seconds }).catch(() => {});
   }
 
   function run(command: "awake_pause" | "awake_resume" | "awake_stop") {
     menu = false;
-    act(command);
+    void invoke(command).catch(() => {});
   }
 
   // capture, or the panel's handler pops the view out from under the menu
@@ -99,9 +87,6 @@
       ></button>
       <AwakeMenu
         {session}
-        available={powerAllowed}
-        note={menuNote}
-        alert={!powerAllowed || lidExposed}
         onpick={pick}
         onpause={() => run("awake_pause")}
         onresume={() => run("awake_resume")}
@@ -112,24 +97,27 @@
     <button
       class="footer__cup"
       data-state={session}
-      aria-label="Keep this Mac awake"
+      disabled={!awake.value.ac}
+      aria-label={awake.value.ac ? "Keep this Mac awake" : "Keeping awake needs mains power"}
       aria-haspopup="menu"
       aria-expanded={menu}
-      title={powerAllowed ? "Keep this Mac awake" : powerCopy}
       onclick={() => (menu = !menu)}
     >
       <CupMark active={session === "running"} />
       {#if session !== "none"}
         <span class="footer__count">{reading}</span>
-      {:else}
+      {:else if awake.value.ac}
         <span>Keep awake</span>
+      {:else}
+        <span>Needs mains</span>
       {/if}
 
       <Chevron dir="up" />
     </button>
   </div>
 
-  <button class="footer__quit" onclick={() => act("quit_app")}>
+  
+  <button class="footer__quit" onclick={() => void invoke("quit_app").catch(() => {})}>
     Quit
   </button>
 </footer>
@@ -237,6 +225,13 @@
 
   .footer__cup[data-state="paused"] {
     color: var(--signal);
+  }
+
+  
+  .footer__cup:disabled {
+    background: var(--steel);
+    color: var(--slate);
+    opacity: 0.5;
   }
 
   .footer__quit:hover {
