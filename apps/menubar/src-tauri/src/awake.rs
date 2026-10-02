@@ -8,6 +8,24 @@ use tauri::{AppHandle, Emitter, Manager};
 
 pub const STATE_EVENT: &str = "awake://state";
 
+const MINIMUM_BATTERY_PERCENT: u8 = 10;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DevicePower {
+    pub plugged_in: bool,
+    pub battery_percent: Option<u8>,
+}
+
+impl DevicePower {
+    fn allows_stay_awake(self) -> bool {
+        self.plugged_in
+            || self
+                .battery_percent
+                .is_some_and(|percent| percent > MINIMUM_BATTERY_PERCENT)
+    }
+}
+
 /// `-w` releases the assertion even on a kill we never see, which Drop cannot
 const CAFFEINATE: &str = "/usr/bin/caffeinate";
 
@@ -239,6 +257,16 @@ pub fn reconcile(app: &AppHandle) {
     if changed {
         let _ = app.emit(STATE_EVENT, next);
     }
+}
+
+/// the sentinel would reset it too, this is only sooner
+pub fn shutdown(app: &AppHandle) {
+    let Some(awake) = app.try_state::<Awake>() else {
+        return;
+    };
+    let mut held = awake.held.lock().unwrap();
+    release(&mut held);
+    held.session = None;
 }
 
 #[tauri::command]

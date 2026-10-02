@@ -1,7 +1,7 @@
 mod account;
 mod atproto;
 mod awake;
-mod clipboard;
+mod boot;
 mod daemon;
 mod deeplink;
 mod inference;

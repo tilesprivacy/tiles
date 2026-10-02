@@ -17,6 +17,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2.11", features = [] }
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "c9ec2130422200f0863b23dfdad02b133a529b07" }
 tauri-plugin-single-instance = "2"
+tauri-plugin-deep-link = "2"
 dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
 objc2-quartz-core = { version = "0.3", default-features = false, features = [
     "std",

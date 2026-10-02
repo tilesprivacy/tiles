@@ -6,10 +6,6 @@
   import CupMark from "./CupMark.svelte";
   import { awake } from "../state.svelte";
 
-  import AwakeMenu from "./AwakeMenu.svelte";
-  import Chevron from "./Chevron.svelte";
-  import CupMark from "./CupMark.svelte";
-  import { awake } from "../state.svelte";
 
   interface Props {
     /** the daemon's version, or why there is no version to show */
