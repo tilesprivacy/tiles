@@ -5,7 +5,7 @@ info:
 
 http:
   method: GET
-  url: "{{tilekit_base_url}}/authz/token-info/{cid}"
+  url: "{{tilekit_base_url}}/authz/token_info/mAXESIJ9TXRmCvIFqH+12lszWKSEufz454rz2Fs7FPYSCTpzy"
   body:
     type: json
     data: |-

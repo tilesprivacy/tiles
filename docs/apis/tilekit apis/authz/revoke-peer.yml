@@ -1,0 +1,19 @@
+info:
+  name: revoke-peer
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/peers/revoke/mAXESIJ9TXRmCvIFqH+12lszWKSEufz454rz2Fs7FPYSCTpzy"
+  body:
+    type: json
+    data: ""
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

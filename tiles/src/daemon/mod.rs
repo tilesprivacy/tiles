@@ -11,8 +11,13 @@ use std::{
 use crate::{
     core::agent::pi::PiAgent,
     daemon::{
-        account::account_router, agent::agent_router, atproto::atproto_router, authz::authz_router,
-        server::server_router, session::session_router,
+        account::account_router,
+        agent::agent_router,
+        atproto::atproto_router,
+        authz::authz_router,
+        server::server_router,
+        session::session_router,
+        sync::{SyncState, sync_router},
     },
 };
 use anyhow::{Result, anyhow};
@@ -44,7 +49,7 @@ pub mod atproto;
 pub mod authz;
 pub mod server;
 pub mod session;
-
+pub mod sync;
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
@@ -67,6 +72,7 @@ pub struct AppState {
     pub remote_shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
     pub agent: AsyncMutex<Option<PiAgent>>,
     pub ui: Arc<Ui>,
+    pub sync_state: AsyncMutex<Option<SyncState>>,
 }
 
 #[cfg(test)]
@@ -81,6 +87,7 @@ impl AppState {
             remote_running: Mutex::new(false),
             agent: None.into(),
             ui: Ui::new(),
+            sync_state: None.into(),
         }
     }
 }
@@ -264,6 +271,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         remote_running: Mutex::new(false),
         agent: None.into(),
         ui: ui.clone(),
+        sync_state: None.into(),
     };
 
     let shared_state = Arc::new(state);
@@ -287,6 +295,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         .merge(session_router())
         .merge(atproto_router())
         .merge(authz_router())
+        .merge(sync_router())
         // .layer(service)
         .with_state(shared_state.clone());
 

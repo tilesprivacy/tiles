@@ -11,8 +11,8 @@ http:
     data: |-
       {
         "aud_did": "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
-        "token_type": "Sync",
-        "nickname": "optional"
+        "capabilities": [{"type": "all"}],
+        "aud_nickname": "optional"
       }
   auth: inherit
 

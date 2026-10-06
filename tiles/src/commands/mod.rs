@@ -4,9 +4,10 @@ use std::io;
 
 use anyhow::{Context, Result, anyhow};
 use owo_colors::OwoColorize;
+use reqwest::Client;
 use tiles::core::account::local::{
-    RootUser, add_token, create_root_account, create_token, get_peer_list, get_root_user_details,
-    is_valid_delegation, save_root_account, set_nickname, unlink,
+    Capabilities, RootUser, add_token, create_root_account, create_token, get_peer_list,
+    get_root_user_details, is_valid_delegation, save_root_account, set_nickname, unlink,
 };
 use tiles::core::network::link;
 use tiles::core::server::{ping, start_server_daemon, stop_server_daemon};
@@ -370,15 +371,10 @@ pub fn unlink_peer(db_conn: &Dbconn, user_id: &str) -> Result<()> {
 pub async fn create_link(aud_did: Option<String>) -> Result<()> {
     if let Some(audience_did) = aud_did {
         // aud_did is there, so definitely trying online syncing
-        let token = create_token(
-            &audience_did,
-            None,
-            tiles::core::account::local::TokenType::Sync,
-        )
-        .await?;
+        let token = create_token(&audience_did, None, vec![Capabilities::All]).await?;
         println!(
             "\nHere's the UCAN token:\n\n{}\n\nPlease share this with {} out-of-band",
-            token, audience_did
+            token.token, audience_did
         );
     } else {
         // will do a syncronized linking over offline network
@@ -392,17 +388,32 @@ pub async fn add_link(token: String, db_conn: &Dbconn) -> Result<()> {
     if token.len() == 8 {
         link(Some(token)).await?;
     } else if is_valid_delegation(&token).is_ok() {
-        let token = add_token(
-            &token,
-            &db_conn.common,
-            None,
-            tiles::core::account::local::TokenType::Sync,
-        )?;
+        let token = add_token(&token, &db_conn.common, None)?;
         println!("Added the token from DID={}", token.did);
     } else {
         eprintln!("Invalid token")
     }
     Ok(())
+}
+
+pub async fn fetch_sync_listener_status() {
+    let client = Client::new();
+    let addr = "http://127.0.0.1:1729/v1/tilekit/sync/sync-listener-status";
+    let res = client.get(addr).send().await;
+    match res {
+        Err(err) => println!("Fetching sync listener status failed due to {:?}", err),
+        Ok(response) => println!("{}", response.text().await.unwrap()),
+    }
+}
+
+pub async fn toggle_sync_listener() {
+    let client = Client::new();
+    let addr = "http://127.0.0.1:1729/v1/tilekit/sync/toggle-sync-listener";
+    let res = client.get(addr).send().await;
+    match res {
+        Err(err) => println!("toggle sync listener failed due to {:?}", err),
+        Ok(response) => println!("{}", response.text().await.unwrap()),
+    }
 }
 #[cfg(test)]
 mod tests {

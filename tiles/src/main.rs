@@ -7,7 +7,6 @@ use tiles::{
     core::{
         self,
         account::atproto::{login, logout},
-        network::sync,
         plugin::{self, install, uninstall},
         service,
     },
@@ -19,7 +18,8 @@ use tiles::{
 };
 
 use crate::commands::{
-    add_link, create_link, set_inference_config_to_daemon, show_peers, unlink_peer,
+    add_link, create_link, fetch_sync_listener_status, set_inference_config_to_daemon, show_peers,
+    toggle_sync_listener, unlink_peer,
 };
 
 mod commands;
@@ -160,6 +160,8 @@ enum SyncCommands {
         did: Option<String>,
     },
 
+    SyncToggle,
+    SyncStatus,
     /// Remote stuff
     Remote(RemoteArgs),
 }
@@ -600,7 +602,10 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 add_link(token, &db_conn).await?;
             }
         },
-        Some(Commands::Sync(SyncCommands::Sync { did })) => sync(did).await?,
+        Some(Commands::Sync(SyncCommands::Sync { did: _ })) => {
+            // sync(did, None, None).await?
+            println!("will update this")
+        }
         Some(Commands::Sync(SyncCommands::Remote(remote_args))) => match remote_args.command {
             RemoteCommands::Share => {
                 println!("{}", share_remote_link().await?);
@@ -612,6 +617,12 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 println!("{}", remote_status().await?);
             }
         },
+        Some(Commands::Sync(SyncCommands::SyncToggle)) => {
+            toggle_sync_listener().await;
+        }
+        Some(Commands::Sync(SyncCommands::SyncStatus)) => {
+            fetch_sync_listener_status().await;
+        }
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
                 login(&handle).await?;

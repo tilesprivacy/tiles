@@ -1,11 +1,13 @@
 //! Local Account
 // Stuff related to account and identity system
 use anyhow::{Context, Result, anyhow};
+
 use cid::Cid;
-use dialog_credentials::{Ed25519KeyResolver, Ed25519Signer, KeyExport};
+use dialog_credentials::{DidKeyResolver, Ed25519Signer, KeyExport};
 use dialog_ucan::{
-    Delegation, DelegationBuilder, Invocation, InvocationBuilder, future::Sendable,
-    subject::Subject, time::timestamp::Timestamp,
+    Delegation, DelegationBuilder, Environment, Invocation, InvocationBuilder,
+    UnverifiedRevocations, VerificationContext, delegation::policy::predicate::Predicate,
+    future::Sendable, subject::Subject, time::timestamp::Timestamp,
 };
 
 use dialog_varsig::{Did, Principal, Signature, eddsa::Ed25519Signature};
@@ -93,7 +95,6 @@ impl Display for ACCOUNT {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct User {
     // unique uuidv7
@@ -112,7 +113,7 @@ pub struct User {
     pub updated_at: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Token {
     pub id: String,
     pub did: String,
@@ -122,22 +123,83 @@ pub struct Token {
     pub created_at: u64,
     pub updated_at: u64,
     pub aud_did: String,
-    pub aud_nickname: Option<String>,
+    pub nickname: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
 pub enum TokenType {
-    // data syncing
-    Sync,
-    // Remote connection
-    Connect,
+    // powerline capabilities
+    Linked,
+    Peer,
+}
+
+// TODO: Prolly we got move this token stuff to its own module
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")]
+pub enum Capabilities {
+    #[serde(rename = "all")]
+    All,
+    #[serde(rename = "sync")]
+    Sync(SyncCaps),
+    #[serde(rename = "remote_inference")]
+    RemoteInference(RemoteInferenceCaps),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct SyncCaps {
+    #[serde(rename = "sessionIds")]
+    session_ids: Option<Vec<String>>,
+    command: SyncCapsCommand,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum SyncCapsCommand {
+    #[serde(rename = "all")]
+    All,
+    #[serde(rename = "push")]
+    Push,
+    #[serde(rename = "pull")]
+    Pull,
+}
+
+impl Display for SyncCapsCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SyncCapsCommand::All => write!(f, "sync"),
+            SyncCapsCommand::Push => write!(f, "sync/push"),
+            SyncCapsCommand::Pull => write!(f, "sync/pull"),
+        }
+    }
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RemoteInferenceCaps {
+    pub command: RemoteInferenceCapsCommand,
+}
+
+impl Display for RemoteInferenceCapsCommand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RemoteInferenceCapsCommand::All => write!(f, "remote_inference"),
+            RemoteInferenceCapsCommand::Share => write!(f, "remote_inference/share"),
+            RemoteInferenceCapsCommand::Use => write!(f, "remote_inference/use"),
+        }
+    }
+}
+#[derive(Serialize, Deserialize, Debug)]
+pub enum RemoteInferenceCapsCommand {
+    #[serde(rename = "all")]
+    All,
+    #[serde(rename = "share")]
+    Share,
+    #[serde(rename = "use")]
+    Use,
 }
 
 impl FromSql for TokenType {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
         match value.as_str()? {
-            "sync" => Ok(Self::Sync),
-            "connect" => Ok(Self::Connect),
+            "linked" => Ok(Self::Linked),
+            "peer" => Ok(Self::Peer),
             _token_type => Err(FromSqlError::InvalidType),
         }
     }
@@ -145,11 +207,11 @@ impl FromSql for TokenType {
 impl ToSql for TokenType {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
         match self {
-            TokenType::Sync => Ok(rusqlite::types::ToSqlOutput::Owned(
-                rusqlite::types::Value::Text(String::from("sync")),
+            TokenType::Linked => Ok(rusqlite::types::ToSqlOutput::Owned(
+                rusqlite::types::Value::Text(String::from("linked")),
             )),
-            TokenType::Connect => Ok(rusqlite::types::ToSqlOutput::Owned(
-                rusqlite::types::Value::Text(String::from("connect")),
+            TokenType::Peer => Ok(rusqlite::types::ToSqlOutput::Owned(
+                rusqlite::types::Value::Text(String::from("peer")),
             )),
         }
     }
@@ -158,8 +220,8 @@ impl ToSql for TokenType {
 impl Display for TokenType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            TokenType::Sync => write!(f, "sync"),
-            TokenType::Connect => write!(f, "connect"),
+            TokenType::Linked => write!(f, "linked"),
+            TokenType::Peer => write!(f, "peer"),
         }
     }
 }
@@ -167,6 +229,19 @@ impl Display for TokenType {
 impl Display for RootUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "id: {}\nnickname: {}\n", self.id, self.nickname)
+    }
+}
+
+#[derive(Default)]
+pub struct TokenQueryOptions {
+    pub issuer_did: Option<String>,
+    pub aud_did: Option<String>,
+    pub token_type: Option<TokenType>,
+}
+
+impl TokenQueryOptions {
+    pub fn is_empty(&self) -> bool {
+        self.issuer_did.is_none() && self.aud_did.is_none() && self.token_type.is_none()
     }
 }
 
@@ -410,11 +485,12 @@ pub fn save_peer_account_db(db_conn: &Connection, user_id: &str, nickname: &str)
     Ok(())
 }
 
+/// Create a Token which has ucan token string for the given `aud_did` with the given `capabilities`
 pub async fn create_token(
     aud_did: &str,
-    aud_nickname: Option<&str>,
-    token_type: TokenType,
-) -> Result<String> {
+    nickname: Option<&str>,
+    capabilities: Vec<Capabilities>,
+) -> Result<Token> {
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
     let user = get_current_user(&db_conn)?;
     let app_name = get_app_name();
@@ -422,41 +498,86 @@ pub async fn create_token(
     let keyexport = KeyExport::from(&signing_key.to_bytes());
     let issuer: Ed25519Signer = Ed25519Signer::import(keyexport).await?;
     info!("issuer did {}", issuer.ed25519_did());
-    let token = generate_delegation_token(issuer, aud_did, aud_nickname, token_type).await?;
-    Ok(token.token)
+    // TODO: Getting a db conn again here, cuz the await above could move a
+    // db reference to another thread. Used tokio-rusqlite
+    let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
+    let token = generate_delegation_token(issuer, aud_did, nickname, capabilities, db_conn).await?;
+    Ok(token)
 }
 
+/// Generates a UCAN delegation token and saves it in the DB
 async fn generate_delegation_token(
     issuer: Ed25519Signer,
     aud_did: &str,
-    aud_nickname: Option<&str>,
-    token_type: TokenType,
+    nickname: Option<&str>,
+    capabilities: Vec<Capabilities>,
+    db_conn: Connection,
 ) -> Result<Token> {
-    let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
     let aud_did = Did::from_str(aud_did)?;
     let subject = Subject::Specific(Did::from_str(&issuer.ed25519_did().to_string())?);
+    let (commands, predicates, token_type) = generate_commands_and_predicates(capabilities);
     let delegation = DelegationBuilder::<Ed25519Signature>::new()
         .issuer(issuer)
         .audience(&aud_did)
         .subject(subject)
-        .policy(vec![])
-        //generating token with an expiry of an year, assuming this is for powerline user, will make it configurable later
+        .policy(predicates)
+        //TODO: generating token with an expiry of an year, assuming this is for powerline user, will make it configurable when we do on-demand remote_inference
         .expiration(Timestamp::new(
-            SystemTime::now() + Duration::from_secs(86400 * 365 * 10),
+            SystemTime::now() + Duration::from_secs(86400 * 365),
         )?)
-        .command(vec![])
+        .command(commands)
         .try_build()
         .await?;
 
-    let delegation_token = save_token(&db_conn, delegation, aud_nickname, token_type)?;
+    let delegation_token = save_token(&db_conn, delegation, nickname, token_type)?;
     Ok(delegation_token)
+}
+
+/// Infer rules needed for token generation from the passed capabilities
+fn generate_commands_and_predicates(
+    capabilities: Vec<Capabilities>,
+) -> (Vec<String>, Vec<Predicate>, TokenType) {
+    let mut commands = vec![];
+    let predicates: Vec<Predicate> = vec![];
+    let mut token_type: Option<TokenType> = None;
+    let mut is_linked = false;
+    for caps in &capabilities {
+        match caps {
+            Capabilities::All => {
+                token_type = {
+                    is_linked = true;
+                    Some(TokenType::Linked)
+                }
+            }
+            Capabilities::Sync(SyncCaps {
+                session_ids: _,
+                command,
+            }) => {
+                commands.push(command.to_string());
+                token_type = Some(TokenType::Peer)
+            }
+            Capabilities::RemoteInference(RemoteInferenceCaps { command }) => {
+                commands.push(command.to_string());
+                token_type = Some(TokenType::Peer)
+            }
+        }
+    }
+
+    // Prevents overwriting of token_type in case of multiple capabilities
+    let tok_type = if let Some(TokenType::Peer) = token_type
+        && is_linked
+    {
+        TokenType::Linked
+    } else {
+        token_type.unwrap_or(TokenType::Peer)
+    };
+    (commands, predicates, tok_type)
 }
 
 pub fn add_token(
     delegation_token: &str,
     db_conn: &Connection,
-    aud_nickname: Option<&str>,
-    token_type: TokenType,
+    nickname: Option<&str>,
 ) -> Result<Token> {
     let delegation_token_bytes = data_encoding::BASE64
         .decode(delegation_token.as_bytes())
@@ -464,64 +585,36 @@ pub fn add_token(
     let delegation: Delegation<Ed25519Signature> =
         serde_ipld_dagcbor::from_slice(&delegation_token_bytes).context("Invalid DID")?;
 
-    let token = save_token(db_conn, delegation, aud_nickname, token_type)
+    // if delegation command list is empty, that means powerline
+    let token_type = if delegation.command().0.is_empty() {
+        TokenType::Linked
+    } else {
+        TokenType::Peer
+    };
+    let token = save_token(db_conn, delegation, nickname, token_type)
         .context("Saving delegation token failed")?;
     Ok(token)
 }
 
-pub fn fetch_token(did: &str, conn: &Connection, token_type: TokenType) -> Result<Option<Token>> {
-    let fetch_resp = conn.query_row(
-        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE did= ?1 and type=?2 order by id desc limit 1",
-        [did, token_type.to_string().as_str()],
-        |row| {
-            Ok(Token {
-                id: row.get(0)?,
-                did: row.get(1)?,
-                token: row.get(2)?,
-                cid: row.get(3)?,
-                created_at: row.get::<usize, f64>(4)? as u64,
-                updated_at: row.get::<usize, f64>(5)? as u64,
-                r#type: row.get(6)?,
-                aud_did: row.get(7)?,
-                aud_nickname: row.get(8)?,
-            })
+pub fn fetch_delegated_tokens(
+    issuer_did: &str,
+    conn: &Connection,
+    token_type: Option<TokenType>,
+) -> Result<Vec<Token>> {
+    let tokens = fetch_tokens(
+        conn,
+        TokenQueryOptions {
+            issuer_did: Some(issuer_did.to_string()),
+            token_type,
+            ..Default::default()
         },
-    );
-    match fetch_resp {
-        Ok(token) => Ok(Some(token)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(err) => Err(Into::into(err)),
-    }
-}
-
-pub fn fetch_token_by_ucan(token: &str, conn: &Connection) -> Result<Option<Token>> {
-    let fetch_resp = conn.query_row(
-        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE token= ?1",
-        [token],
-        |row| {
-            Ok(Token {
-                id: row.get(0)?,
-                did: row.get(1)?,
-                token: row.get(2)?,
-                cid: row.get(3)?,
-                created_at: row.get::<usize, f64>(4)? as u64,
-                updated_at: row.get::<usize, f64>(5)? as u64,
-                r#type: row.get(6)?,
-                aud_did: row.get(7)?,
-                aud_nickname: row.get(8)?,
-            })
-        },
-    );
-    match fetch_resp {
-        Ok(token) => Ok(Some(token)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(err) => Err(Into::into(err)),
-    }
+    )?;
+    Ok(tokens)
 }
 
 pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>> {
     let fetch_resp = conn.query_row(
-        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE cid= ?1",
+        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, nickname FROM tokens WHERE cid= ?1",
         [cid],
         |row| {
             Ok(Token {
@@ -533,7 +626,7 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
                 updated_at: row.get::<usize, f64>(5)? as u64,
                 r#type: row.get(6)?,
                 aud_did: row.get(7)?,
-                aud_nickname: row.get(8)?,
+                nickname: row.get(8)?,
             })
         },
     );
@@ -543,38 +636,36 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
         Err(err) => Err(Into::into(err)),
     }
 }
-pub fn fetch_token_by_aud(
-    aud_did: &str,
-    conn: &Connection,
-    token_type: TokenType,
-) -> Result<Option<Token>> {
-    let fetch_resp = conn.query_row(
-        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens WHERE aud_did= ?1 and type=?2 order by id desc limit 1",
-        [aud_did, token_type.to_string().as_str()],
-        |row| {
-            Ok(Token {
-                id: row.get(0)?,
-                did: row.get(1)?,
-                token: row.get(2)?,
-                cid: row.get(3)?,
-                created_at: row.get::<usize, f64>(4)? as u64,
-                updated_at: row.get::<usize, f64>(5)? as u64,
-                r#type: row.get(6)?,
-                aud_did: row.get(7)?,
-                aud_nickname: row.get(8)?,
-            })
-        },
-    );
-    match fetch_resp {
-        Ok(token) => Ok(Some(token)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(err) => Err(Into::into(err)),
-    }
-}
-pub fn fetch_tokens(conn: &Connection) -> Result<Vec<Token>> {
-    let query = "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname FROM tokens";
 
-    let mut stmt = conn.prepare(query)?;
+pub fn delete_token_by_cid(conn: &Connection, cid: &str) -> Result<usize> {
+    let mut stmt = conn.prepare("DELETE FROM tokens WHERE cid= ?1")?;
+    stmt.execute([cid]).map_err(|e| anyhow!(e.to_string()))
+}
+
+pub fn fetch_tokens(conn: &Connection, filter: TokenQueryOptions) -> Result<Vec<Token>> {
+    let mut final_query: String = String::from("");
+    let base_query =
+        "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, nickname FROM tokens";
+
+    final_query.push_str(base_query);
+    if !filter.is_empty() {
+        final_query.push_str(" where");
+    }
+    if let Some(issuer_did) = filter.issuer_did {
+        final_query.push_str(&format!(" did = '{}' and", issuer_did));
+    }
+
+    if let Some(aud_did) = filter.aud_did {
+        final_query.push_str(&format!(" aud_did= '{}' and", aud_did));
+    }
+
+    if let Some(token_type) = filter.token_type {
+        final_query.push_str(&format!(" type = '{}' and", token_type));
+    }
+    let mut final_query = final_query.trim_end_matches("and").to_string();
+    final_query.push_str(" order by updated_at");
+
+    let mut stmt = conn.prepare(&final_query)?;
     let token_rows = stmt.query_map([], |row| {
         Ok(Token {
             id: row.get(0)?,
@@ -585,7 +676,7 @@ pub fn fetch_tokens(conn: &Connection) -> Result<Vec<Token>> {
             updated_at: row.get::<usize, f64>(5)? as u64,
             r#type: row.get(6)?,
             aud_did: row.get(7)?,
-            aud_nickname: row.get(8)?,
+            nickname: row.get(8)?,
         })
     })?;
 
@@ -597,14 +688,28 @@ pub fn fetch_tokens(conn: &Connection) -> Result<Vec<Token>> {
     Ok(tokens)
 }
 
+pub fn fetch_linked_tokens(conn: &Connection, did: &str) -> Result<Vec<Token>> {
+    fetch_tokens(
+        conn,
+        TokenQueryOptions {
+            aud_did: Some(did.to_string()),
+            token_type: Some(TokenType::Linked),
+            ..Default::default()
+        },
+    )
+}
+
 fn save_token<S: Signature>(
     conn: &Connection,
     delegation: Delegation<S>,
-    aud_nickname: Option<&str>,
+    nickname: Option<&str>,
     token_type: TokenType,
 ) -> Result<Token> {
+    // We do an upsert only when the did, aud_did and the the type of token
+    // is `linked`. As there is no point of accumulating these, as it proves
+    // same point, but with maybe an extension of time
     let mut stmt = conn.prepare(
-        "insert into tokens(id, did, token, cid, created_at, updated_at, type, aud_did, aud_nickname) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) on conflict(did, aud_did, type) do update set token = ?3, updated_at = ?6, cid = ?4",
+        "insert into tokens(id, did, token, cid, created_at, updated_at, type, aud_did, nickname) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) on conflict(did, aud_did) where type = 'linked' do update set token = ?3, updated_at = ?6, cid = ?4, nickname = ?9",
     )?;
 
     let issuer_did = delegation.issuer().did();
@@ -625,10 +730,10 @@ fn save_token<S: Signature>(
         get_unix_time_now() as f64,
         token_type,
         aud_did.as_str(),
-        aud_nickname
+        nickname
     ]) {
         Ok(_res) => {
-            let token = fetch_token(issuer_did.as_str(), &conn, TokenType::Sync)?;
+            let token = fetch_token_by_cid(&token_cid, conn)?;
             Ok(token.expect("Expected token"))
         }
         Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
@@ -636,8 +741,8 @@ fn save_token<S: Signature>(
 }
 
 /// Create an invocation token from the delegation token
-pub async fn create_invocation_token(token_delegated: &str, conn: &Connection) -> Result<String> {
-    let user = get_current_user(conn)?;
+pub async fn create_invocation_token(token_delegated: &str, conn: Connection) -> Result<String> {
+    let user = get_current_user(&conn)?;
     let app_name = get_app_name();
     let signing_key = get_signing_key(&app_name, &user.user_id)?;
     let keyexport = KeyExport::from(&signing_key.to_bytes());
@@ -702,7 +807,7 @@ async fn process_invocation_verification(
     let delegation_store: Arc<Mutex<HashMap<Cid, Arc<Delegation<Ed25519Signature>>>>> =
         Arc::new(Mutex::new(hash_store));
 
-    let tokens = fetch_tokens(&db_conn)?;
+    let tokens = fetch_delegated_tokens(invocation.audience().as_ref(), &db_conn, None)?;
 
     {
         let mut delegation_store_guard = delegation_store.lock().unwrap();
@@ -716,10 +821,15 @@ async fn process_invocation_verification(
         }
     }
 
-    match invocation
-        .check::<Sendable, _, _, _>(&delegation_store, &Ed25519KeyResolver)
-        .await
-    {
+    let env = Environment::new(
+        delegation_store.clone(),
+        DidKeyResolver,
+        UnverifiedRevocations,
+    );
+
+    let ctx = VerificationContext::at(&env, Some(Timestamp::now()));
+
+    match invocation.check::<Sendable, _, _, _>(&ctx).await {
         Ok(_res) => Ok(()),
         Err(err) => {
             warn!("Invocation verification failed due to {:?}", err);
@@ -731,7 +841,6 @@ async fn process_invocation_verification(
 async fn create_root_user(root_user_config: &Table, nickname: Option<String>) -> Result<Table> {
     let mut root_user_table = root_user_config.clone();
     let app_name = get_app_name();
-    println!("{}", app_name);
     match create_identity(&app_name).await {
         Ok(did) => {
             root_user_table.insert("id".to_owned(), toml::Value::String(did));
@@ -862,6 +971,7 @@ pub mod tests {
     };
     use anyhow::Result;
     use rusqlite::Connection;
+    use serde_json::json;
     use toml::Table;
 
     fn use_sample_keyring_store() -> Result<()> {
@@ -1109,13 +1219,17 @@ pub mod tests {
             updated_at INTEGER NOT NULL,
             type TEXT NOT NULL,
             aud_did TEXT,
-            aud_nickname TEXT,
-            UNIQUE(did, aud_did, type)
+            nickname TEXT
         );",
             [],
         )
         .unwrap();
 
+        conn.execute(
+            "CREATE UNIQUE INDEX did_aud_type ON tokens(did, aud_did) WHERE type = 'linked';",
+            [],
+        )
+        .unwrap();
         conn
     }
 
@@ -1286,11 +1400,30 @@ pub mod tests {
 
         let db_conn = setup_db_conn_v2();
 
-        let resp = add_token(token, &db_conn.common, None, TokenType::Sync);
+        let resp = add_token(token, &db_conn.common, None);
 
         assert!(resp.is_ok());
+        let token_struct = resp.unwrap();
+        assert_eq!(token_struct.token, token);
+        assert_eq!(token_struct.r#type, TokenType::Linked)
+    }
 
-        assert_eq!(resp.unwrap().token, token);
+    #[test]
+    fn test_fetching_linked_tokens() {
+        let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
+
+        let db_conn = setup_db_conn_v2();
+
+        let resp = add_token(token, &db_conn.common, None);
+
+        assert!(resp.is_ok());
+        let token_struct = resp.unwrap();
+        assert_eq!(token_struct.token, token);
+        assert_eq!(token_struct.r#type, TokenType::Linked);
+        let linked_tokens =
+            fetch_linked_tokens(&db_conn.common, "did:plc:mbk6wgmxiatotzy5b3q57naw").unwrap();
+
+        assert_eq!(linked_tokens.len(), 1)
     }
 
     #[test]
@@ -1300,23 +1433,41 @@ pub mod tests {
         let did = "did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5";
         let db_conn = setup_db_conn_v2();
 
-        let resp = add_token(token, &db_conn.common, None, TokenType::Sync);
-        println!("{:?}", resp);
+        let resp = add_token(token, &db_conn.common, None);
         assert!(resp.is_ok());
 
         assert_eq!(resp.unwrap().token, token);
 
         let tokenb = "glhACMCMJFAYFQBP/AwhUuH6A1B5eQWo1EWBg5X8B5CXAyDAb/LhTSM6ndct/N/0rz2K2tdOLkUFAkowwR4sd02zCKJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SJYY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUFSdn3+p0ErihX4qr3oZZFo=";
 
-        let _resp = add_token(tokenb, &db_conn.common, None, TokenType::Sync);
-        // assert_eq!(resp_token, token);
-        assert_eq!(
-            fetch_token(did, &db_conn.common, TokenType::Sync)
-                .unwrap()
-                .unwrap()
-                .token,
-            tokenb
-        );
+        let _resp = add_token(tokenb, &db_conn.common, None);
+
+        let added_tokens =
+            fetch_delegated_tokens(did, &db_conn.common, Some(TokenType::Linked)).unwrap();
+
+        assert_eq!(added_tokens[0].token, tokenb);
+    }
+
+    #[test]
+    fn test_valid_add_token_multiple_same_did_aud_did_not_linked_device() {
+        let token = "glhADK2Ve9OyeCax365HyOtRP7y0H1qqfnZJjF8K2lcmCG5ludHKvWV7veoTTM0cuaqtkA+nNWrSVcexHrBobVCIBaJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZHEvcmVtb3RlX2luZmVyZW5jZWNleHAabKS2P2Npc3N4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1Y3BvbIBjc3VieDhkaWQ6a2V5Ono2TWtxa1BZVTNlVVNzN1BnNE5zU1ROYm05aEtaNE1VOTk3d0tGYkJ3dDlnRDVrNWVub25jZVCrDOFqEFvQ8bt4XBtHe9Bn";
+
+        let did = "did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5";
+        let db_conn = setup_db_conn_v2();
+
+        let resp = add_token(token, &db_conn.common, None);
+        assert!(resp.is_ok());
+
+        let token_struct = resp.unwrap();
+        assert_eq!(token_struct.r#type, TokenType::Peer);
+        assert_eq!(token_struct.token, token);
+
+        let tokenb = "glhAUlzEEyhWb4rmH/P0tjNv0cdxjSpZ2c4KiNhgOyRp06Kfps9pmUowDtLXUi+cpqO78AO8zQGHeMZIxDU++oBADaJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZHEvcmVtb3RlX2luZmVyZW5jZWNleHAabKS2dGNpc3N4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1Y3BvbIBjc3VieDhkaWQ6a2V5Ono2TWtxa1BZVTNlVVNzN1BnNE5zU1ROYm05aEtaNE1VOTk3d0tGYkJ3dDlnRDVrNWVub25jZVDLlcBTLJtaix333xmQXf5E";
+
+        let _resp = add_token(tokenb, &db_conn.common, None);
+        let added_tokens =
+            fetch_delegated_tokens(did, &db_conn.common, Some(TokenType::Peer)).unwrap();
+        assert_eq!(added_tokens[1].token, tokenb);
     }
     #[test]
     fn test_invalid_token_in_add_token() {
@@ -1324,7 +1475,7 @@ pub mod tests {
 
         let db_conn = setup_db_conn_v2();
 
-        let resp = add_token(token, &db_conn.common, None, TokenType::Sync);
+        let resp = add_token(token, &db_conn.common, None);
 
         assert!(resp.is_err());
     }
@@ -1332,19 +1483,130 @@ pub mod tests {
     #[tokio::test]
     async fn test_generate_token() {
         let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
-        let _db_conn = setup_db_conn_v2();
-        assert!(
-            generate_delegation_token(
-                signer,
-                "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
-                None,
-                TokenType::Sync
-            )
-            .await
-            .is_ok()
+        let db_conn = setup_db_conn_v2();
+        let token = generate_delegation_token(
+            signer,
+            "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
+            None,
+            vec![Capabilities::All],
+            db_conn.common,
+        )
+        .await;
+
+        assert!(token.is_ok());
+        let token = token.unwrap();
+        assert_eq!(token.nickname, None);
+        assert_eq!(token.r#type, TokenType::Linked);
+        let t_token = token.token.clone();
+        let delegation_token_bytes = data_encoding::BASE64.decode(t_token.as_bytes()).unwrap();
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(&delegation_token_bytes)
+                .context("Invalid DID")
+                .unwrap();
+
+        let commands: Vec<String> = vec![];
+        assert_eq!(commands, delegation.command().0);
+
+        assert_eq!(
+            delegation.audience().to_string(),
+            "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww"
         );
     }
 
+    #[tokio::test]
+    async fn test_generate_token_with_invalid_aud_did() {
+        let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
+        let db_conn = setup_db_conn_v2();
+        let token = generate_delegation_token(
+            signer,
+            "did:ka",
+            None,
+            vec![Capabilities::All],
+            db_conn.common,
+        )
+        .await;
+        assert!(token.is_err())
+    }
+
+    #[tokio::test]
+    async fn test_generate_token_persists_metadata_and_peer_command() {
+        let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
+        let issuer_did = signer.ed25519_did().to_string();
+        let audience_did = "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww";
+        let db = setup_db_conn_v2();
+
+        let token = generate_delegation_token(
+            signer,
+            audience_did,
+            Some("alice"),
+            vec![Capabilities::Sync(SyncCaps {
+                session_ids: None,
+                command: SyncCapsCommand::Push,
+            })],
+            db.common,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(token.did, issuer_did);
+        assert_eq!(token.aud_did, audience_did);
+        assert_eq!(token.nickname.as_deref(), Some("alice"));
+        assert!(matches!(token.r#type, TokenType::Peer));
+        assert!(!token.cid.is_empty());
+
+        let t_token = token.token.clone();
+        let delegation_token_bytes = data_encoding::BASE64.decode(t_token.as_bytes()).unwrap();
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(&delegation_token_bytes)
+                .context("Invalid DID")
+                .unwrap();
+
+        let commands: Vec<&str> = vec!["sync", "push"];
+        assert_eq!(commands, delegation.command().0);
+    }
+
+    #[tokio::test]
+    async fn test_multiple_capabilities_in_create_token() {
+        let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
+        let issuer_did = signer.ed25519_did().to_string();
+        let audience_did = "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww";
+        let db = setup_db_conn_v2();
+
+        let token = generate_delegation_token(
+            signer,
+            audience_did,
+            Some("alice"),
+            vec![
+                Capabilities::All,
+                Capabilities::Sync(SyncCaps {
+                    session_ids: None,
+                    command: SyncCapsCommand::Push,
+                }),
+                Capabilities::RemoteInference(RemoteInferenceCaps {
+                    command: RemoteInferenceCapsCommand::All,
+                }),
+            ],
+            db.common,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(token.did, issuer_did);
+        assert_eq!(token.aud_did, audience_did);
+        assert_eq!(token.nickname.as_deref(), Some("alice"));
+        assert!(matches!(token.r#type, TokenType::Linked));
+        assert!(!token.cid.is_empty());
+
+        let t_token = token.token.clone();
+        let delegation_token_bytes = data_encoding::BASE64.decode(t_token.as_bytes()).unwrap();
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(&delegation_token_bytes)
+                .context("Invalid DID")
+                .unwrap();
+
+        let commands: Vec<&str> = vec!["sync", "push", "remote_inference"];
+        assert_eq!(commands, delegation.command().0);
+    }
     #[tokio::test]
     async fn test_invocation_verification() {
         let db_conn = setup_db_conn_v2();
@@ -1354,18 +1616,18 @@ pub mod tests {
             issued_signer,
             &audience_signer.ed25519_did().to_string(),
             None,
-            TokenType::Sync,
+            vec![Capabilities::All],
+            db_conn.common,
         )
         .await
         .unwrap();
 
         let token_delegated_in_bytes = data_encoding::BASE64
-            .decode(token_delegated.token.as_bytes())
+            .decode(token_delegated.token.clone().as_bytes())
             .unwrap();
-        let delegation: Delegation<Ed25519Signature> =
+        let _delegation: Delegation<Ed25519Signature> =
             serde_ipld_dagcbor::from_slice(&token_delegated_in_bytes).unwrap();
 
-        println!("Delegated token\n{:?}", delegation);
         let invocation_token = generate_invocation_token(audience_signer, &token_delegated.token)
             .await
             .unwrap();
@@ -1373,16 +1635,28 @@ pub mod tests {
         let invocation_token_bytes = data_encoding::BASE64
             .decode(invocation_token.as_bytes())
             .unwrap();
-        let inv: Invocation<Ed25519Signature> =
+        let _inv: Invocation<Ed25519Signature> =
             serde_ipld_dagcbor::from_slice(&invocation_token_bytes).unwrap();
 
-        println!("Invocation token\n{:?}", inv);
-
+        let db_conn = setup_db_conn_v2();
+        let token_delegated_in_bytes = data_encoding::BASE64
+            .decode(token_delegated.token.clone().as_bytes())
+            .unwrap();
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(&token_delegated_in_bytes).unwrap();
+        let _ = save_token(&db_conn.common, delegation, None, TokenType::Linked);
         assert!(
             process_invocation_verification(&invocation_token, db_conn.common)
                 .await
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn test_caps_structs() {
+        let caps = json!({"type": "sync", "command": "all"});
+
+        let _cap_s: Capabilities = serde_json::from_value(caps).unwrap();
     }
     pub fn setup_db_conn_v2() -> Dbconn {
         Dbconn {

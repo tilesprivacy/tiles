@@ -31,8 +31,8 @@ use tokio::{
     io::{AsyncWriteExt, copy},
     net::{TcpListener, TcpStream},
     sync::{
-        mpsc::{self},
-        oneshot::{self, Receiver},
+        mpsc::{self, Receiver as MpscReceiver},
+        oneshot::{self, Receiver as oneshotReceiver},
     },
     task::spawn_blocking,
     time::sleep,
@@ -40,18 +40,21 @@ use tokio::{
 
 use uuid::Uuid;
 
-use crate::core::{
-    account::{
-        self, get_did_from_public_key, get_public_key_from_did, get_random_bytes,
-        local::{
-            add_token, create_invocation_token, create_token, fetch_token, fetch_token_by_aud,
-            get_app_secret_key, get_current_user, get_user_info, save_peer_account_db,
-            verify_invocation,
+use crate::{
+    core::{
+        account::{
+            self, get_did_from_public_key, get_public_key_from_did, get_random_bytes,
+            local::{
+                Capabilities, Token, add_token, create_invocation_token, create_token,
+                fetch_delegated_tokens, get_app_secret_key, get_current_user, get_user_info,
+                save_peer_account_db, verify_invocation,
+            },
         },
+        chats::{SyncOp, create_db_sync_channel},
+        network::ticket::EndpointUserData,
+        storage::db::{DBTYPE, get_db_conn},
     },
-    chats::{SyncOp, create_db_sync_channel},
-    network::ticket::EndpointUserData,
-    storage::db::{DBTYPE, get_db_conn},
+    daemon::sync::SyncApiResponse,
 };
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
@@ -409,6 +412,8 @@ async fn sync_subscribe_loop(
             }
         }
     }
+    info!("gossip receiver exit, close the endpoint too");
+    sync_main_sender.send(0).await?;
     Ok(())
 }
 pub async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
@@ -436,10 +441,15 @@ pub async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
 ///
 /// if valid DID is passed, function will be in initiator mode
 /// else will be in listening mode.
-pub async fn sync(did: Option<String>) -> Result<()> {
+pub async fn sync(
+    did: Option<String>,
+    endpoint: Endpoint,
+    sync_main_sender: tokio::sync::mpsc::Sender<u8>,
+    sync_main_receiver: MpscReceiver<u8>,
+    sync_api_resp_sender: tokio::sync::mpsc::Sender<SyncApiResponse>,
+) -> Result<()> {
     let user_db_conn = get_db_conn(&DBTYPE::COMMON)?;
     let user = get_current_user(&user_db_conn)?;
-    let endpoint = create_endpoint(&user).await?;
     let is_online = is_online(&endpoint).await;
 
     // handling the endpoint lookup separately for offline network using
@@ -450,15 +460,13 @@ pub async fn sync(did: Option<String>) -> Result<()> {
     }
 
     // Channel to communicate from the `sync_subscribe_loop`, which is a concurrent process, mainly to gracefully exit
-    let (sync_main_sender, mut sync_main_receiver) = mpsc::channel(1);
-
+    let mut sync_main_receiver = sync_main_receiver;
     // Creates a channel to communicate with the Database and pass the
     // sender across the tokio tasks
     let db_channel_sender = create_db_sync_channel();
 
     if let Some(receiver_did) = did {
         // INITIATOR BLOCK
-
         // We only check if peer is already linked only for offline sync
         if let Err(_) = get_user_info(&user_db_conn, &receiver_did)
             && !is_online
@@ -468,39 +476,40 @@ pub async fn sync(did: Option<String>) -> Result<()> {
         }
 
         let (invocation_token, rev_delegated_token) = if is_online {
-            let token_delegated = if let Ok(token_resp) = fetch_token(
+            let tokens = fetch_delegated_tokens(
                 &receiver_did,
                 &user_db_conn,
-                account::local::TokenType::Sync,
-            ) && let Some(token) = token_resp
-            {
-                // fetch token delegated to receiver, if not create one
-
-                token
+                Some(account::local::TokenType::Linked),
+            )?;
+            let token_delegated = if tokens.len() == 1 {
+                tokens[0].clone()
             } else {
                 eprintln!("No sync authorization token found for {}", receiver_did);
                 return Ok(());
             };
-            let rev_token_resp = fetch_token_by_aud(
-                &receiver_did,
+            let tokens = fetch_delegated_tokens(
+                &user.user_id,
                 &user_db_conn,
-                account::local::TokenType::Sync,
+                Some(account::local::TokenType::Linked),
             )?;
-            let rev_delegated_token = if let Some(rev_token) = rev_token_resp {
-                rev_token.token
+            let aud_tokens: Vec<Token> = tokens
+                .into_iter()
+                .filter(|t| t.aud_did == receiver_did)
+                .collect();
+
+            let rev_delegated_token = if !aud_tokens.is_empty() {
+                aud_tokens[0].token.clone()
             } else {
+                info!("No reverse delegated token exist, creating one");
                 // create a token
-                create_token(
-                    &receiver_did,
-                    Some(&receiver_did),
-                    account::local::TokenType::Sync,
-                )
-                .await?
+                create_token(&receiver_did, Some(&receiver_did), vec![Capabilities::All])
+                    .await?
+                    .token
             };
-            (
-                create_invocation_token(&token_delegated.token, &user_db_conn).await?,
-                rev_delegated_token,
-            )
+
+            let invocation_token =
+                create_invocation_token(&token_delegated.token, user_db_conn).await?;
+            (invocation_token, rev_delegated_token)
         } else {
             // We don't use invocation token in offline, so providing a dummy
             (String::from("offline token"), String::from("no token"))
@@ -551,7 +560,11 @@ pub async fn sync(did: Option<String>) -> Result<()> {
 
         println!("\nSyncing in progress with ....{}", receiver_did);
         sync_main_receiver.recv().await;
+        sync_api_resp_sender
+            .send(SyncApiResponse::DirectSyncDone)
+            .await?;
         recv_router.shutdown().await?;
+        endpoint.close().await;
     } else {
         // LISTENER BLOCK
         // The sync gossip topic is basically derived from the receiver's
@@ -580,7 +593,9 @@ pub async fn sync(did: Option<String>) -> Result<()> {
             sync_main_sender.clone(),
         ));
         println!("{}", "Ready to accept sync requests from peers...".blue());
-
+        sync_api_resp_sender
+            .send(SyncApiResponse::SyncListenerStarted)
+            .await?;
         // Since in dev, we create endpoints randomly, at the initiator side
         // we can use the DID derived from this, instead of actual ones
         // for the network to form correctly
@@ -589,8 +604,10 @@ pub async fn sync(did: Option<String>) -> Result<()> {
         };
         sync_main_receiver.recv().await;
         recv_router.shutdown().await?;
+        endpoint.close().await;
+        // we probably can update the sync_endpoint_running variable here
+        info!("Closing the sync listener")
     }
-    endpoint.close().await;
     Ok(())
 }
 
@@ -775,12 +792,7 @@ async fn on_sync_start_event(
         if msg.is_online {
             //TODO: revist this, if we need a new conn here
             let conn = get_db_conn(&DBTYPE::COMMON)?;
-            add_token(
-                rev_del_token,
-                &conn,
-                Some(&nickname),
-                account::local::TokenType::Sync,
-            )?;
+            add_token(rev_del_token, &conn, Some(nickname))?;
         }
 
         let sender_did = get_did_from_public_key(delivered_from.as_bytes())?;
@@ -824,7 +836,7 @@ async fn on_sync_send_delta_info(
         &tokio::sync::mpsc::Sender<u8>,
     ),
 ) -> Result<()> {
-    let (sync_db_channel_sender, sync_main_sender) = senders;
+    let (sync_db_channel_sender, _sync_main_sender) = senders;
     if let MessageBody::SyncSendDeltaInfo {
         blob_ticket,
         last_row_counter,
@@ -883,16 +895,17 @@ async fn on_sync_send_delta_info(
             let stop_req = NetworkMessage::new(user, msg.is_online, MessageBody::SyncEnd);
             network_sender.broadcast(stop_req.to_bytes().into()).await?;
             info!("sync ended");
-            println!("\nSync completed..., exiting now..");
+            println!("\nSync completed....");
             // Adding a delay to prevent the risk of closing the endpoint before we send the msg via the above broadcast
-            sleep(Duration::from_secs(5)).await;
-            sync_main_sender.send(0).await?;
+            // We dont send the close event back, as the sync close is determined by listener
+            // sleep(Duration::from_secs(5)).await;
+            // sync_main_sender.send(0).await?;
         }
     }
     Ok(())
 }
 
-pub async fn share(endpoint: Endpoint, mut recvx: Receiver<bool>) -> Result<()> {
+pub async fn share(endpoint: Endpoint, mut recvx: oneshotReceiver<bool>) -> Result<()> {
     loop {
         tokio::select! {
                         _ = &mut recvx => {
