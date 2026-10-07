@@ -41,7 +41,6 @@ dialog-ucan = { git = "https://github.com/dialog-db/dialog-db", tag = "tonk-2026
 dialog-credentials = { git = "https://github.com/dialog-db/dialog-db", tag = "tonk-2026-09-25.2", package = "dialog-credentials"}
 chacha20poly1305 = { version = "0.10" }
 dialog-varsig= { git = "https://github.com/dialog-db/dialog-db", tag = "tonk-2026-09-25.2", package = "dialog-varsig"}
-
 serde_ipld_dagcbor = "0.6.4"
 cid = "0.11.3"
 keyring-core = "1.0.0"
