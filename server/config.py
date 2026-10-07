@@ -10,7 +10,10 @@ from pydantic import BaseModel
 logger = logging.getLogger("app")
 
 PORT = 6969
-DAEMON_PORT = 1729
+if os.environ.get("TILES_PY_ENV") == "dev":
+    DAEMON_PORT = os.environ.get("TILES_DAEMON_DEV_PORT", "1729")
+else:
+    DAEMON_PORT = 1729
 LLAMA_SERVER_HOST = os.environ.get("TILES_LLAMA_SERVER_HOST", "127.0.0.1")
 LLAMA_SERVER_PORT = int(os.environ.get("TILES_LLAMA_SERVER_PORT", "18080"))
 MODEL_ID = "driaforall/mem-agent"
@@ -93,7 +96,10 @@ def _read_llama_config_from_toml() -> dict:
 def get_llama_config() -> dict:
     global _llama_config_cache, _llama_config_cache_ts
     now = time.monotonic()
-    if _llama_config_cache is not None and (now - _llama_config_cache_ts) < _LLAMA_CONFIG_TTL_S:
+    if (
+        _llama_config_cache is not None
+        and (now - _llama_config_cache_ts) < _LLAMA_CONFIG_TTL_S
+    ):
         return _llama_config_cache
 
     config = _fetch_llama_config()

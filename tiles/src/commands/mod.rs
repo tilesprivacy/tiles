@@ -12,7 +12,7 @@ use tiles::core::account::local::{
 use tiles::core::network::link;
 use tiles::core::server::{ping, start_server_daemon, stop_server_daemon};
 use tiles::core::storage::db::Dbconn;
-use tiles::daemon::{ping as ping_daemon, stop_cmd};
+use tiles::daemon::{get_or_set_daemon_port, ping as ping_daemon, stop_cmd};
 use tiles::utils::config::{
     ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
     set_user_data_path, update_inference_config,
@@ -398,7 +398,11 @@ pub async fn add_link(token: String, db_conn: &Dbconn) -> Result<()> {
 
 pub async fn fetch_sync_listener_status() {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/v1/tilekit/sync/sync-listener-status";
+    let port = *get_or_set_daemon_port();
+    let addr = format!(
+        "http://127.0.0.1:{}/v1/tilekit/sync/sync-listener-status",
+        port
+    );
     let res = client.get(addr).send().await;
     match res {
         Err(err) => println!("Fetching sync listener status failed due to {:?}", err),
@@ -408,7 +412,11 @@ pub async fn fetch_sync_listener_status() {
 
 pub async fn toggle_sync_listener() {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/v1/tilekit/sync/toggle-sync-listener";
+    let port = *get_or_set_daemon_port();
+    let addr = format!(
+        "http://127.0.0.1:{}/v1/tilekit/sync/toggle-sync-listener",
+        port
+    );
     let res = client.get(addr).send().await;
     match res {
         Err(err) => println!("toggle sync listener failed due to {:?}", err),

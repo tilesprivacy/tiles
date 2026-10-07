@@ -241,10 +241,6 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
-
-        // curl -X POST "http://127.0.0.1:1729/v1/tilekit/agent/prompt" \
-        //   -H "Content-Type: application/json" \
-        //   -d '{"message":"hello"}'
     }
 
     #[tokio::test]

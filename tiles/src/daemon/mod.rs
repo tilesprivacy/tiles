@@ -4,7 +4,7 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -166,10 +166,22 @@ pub struct RemoteStatus {
 }
 const ALPN: &[u8] = b"remote-link/v1";
 
-//TODO: Add a different PORT for development
-// We should update that in py server too for the daemon api calls
-const DEFAULT_PORT: u32 = 1729;
+const DEFAULT_DAEMON_PORT: u32 = 1729;
 
+static DAEMON_PORT: OnceLock<u32> = OnceLock::new();
+
+pub fn get_or_set_daemon_port() -> &'static u32 {
+    DAEMON_PORT.get_or_init(|| {
+        if cfg!(debug_assertions) {
+            std::env::var("TILES_DAEMON_DEV_PORT")
+                .ok()
+                .and_then(|val| val.parse().ok())
+                .unwrap_or(DEFAULT_DAEMON_PORT)
+        } else {
+            DEFAULT_DAEMON_PORT
+        }
+    })
+}
 /// the inference server is the slowest thing in a shutdown, and the only one
 /// that can hang it
 const INFERENCE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -510,7 +522,7 @@ fn get_port(port: Option<u32>) -> u32 {
     if let Some(port_number) = port {
         port_number
     } else {
-        DEFAULT_PORT
+        *get_or_set_daemon_port()
     }
 }
 
@@ -608,7 +620,8 @@ async fn show_remote_status(State(state): State<Arc<AppState>>) -> Result<String
 
 pub async fn share_remote_link() -> Result<String> {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-share";
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/remote-share", port);
     let res = client.get(addr).send().await;
     match res {
         Err(err) => Err(anyhow!("Daemon remote share failed due to {:?}", err)),
@@ -626,7 +639,8 @@ pub async fn share_remote_link() -> Result<String> {
 
 pub async fn unshare_remote_link() -> Result<()> {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-unshare";
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/remote-unshare", port);
     let res = client.get(addr).send().await;
 
     match res {
@@ -637,7 +651,8 @@ pub async fn unshare_remote_link() -> Result<()> {
 
 pub async fn remote_status() -> Result<String> {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-status";
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/remote-status", port);
     let res = client.get(addr).send().await;
 
     match res {
@@ -667,7 +682,8 @@ async fn connect_remote_inference(
 
 pub async fn connect_remote(ticket: &str) -> Result<()> {
     let client = Client::new();
-    let addr = format!("http://127.0.0.1:1729/connect-remote?ticket={}", ticket);
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/connect-remote?ticket={}", port, ticket);
     let res = client.get(addr).send().await;
 
     match res {

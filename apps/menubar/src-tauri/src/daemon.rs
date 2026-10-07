@@ -1,14 +1,28 @@
 //! watching the daemon, which is the thing that started us
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use crate::{account, atproto, awake, inference, remote, sessions};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-const PORT: u16 = 1729;
+const PORT: u32 = 1729;
 
+static DAEMON_PORT: OnceLock<u32> = OnceLock::new();
+
+pub fn get_or_set_daemon_port() -> &'static u32 {
+    DAEMON_PORT.get_or_init(|| {
+        if cfg!(debug_assertions) {
+            std::env::var("TILES_DAEMON_DEV_PORT")
+                .ok()
+                .and_then(|val| val.parse().ok())
+                .unwrap_or(PORT)
+        } else {
+            PORT
+        }
+    })
+}
 const PING_TIMEOUT: Duration = Duration::from_secs(1);
 /// the routes behind `GET /` open sqlcipher and read the keychain
 const POLL_TIMEOUT: Duration = Duration::from_secs(5);
@@ -46,7 +60,8 @@ pub fn init(app: &AppHandle) {
 
 /// everything the daemon serves hangs off one loopback port
 pub fn url(path: &str) -> String {
-    format!("http://127.0.0.1:{PORT}{path}")
+    let port = *get_or_set_daemon_port();
+    format!("http://127.0.0.1:{port}{path}")
 }
 
 /// `GET /` answers with the daemon's version, so one request covers both questions

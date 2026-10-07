@@ -1,6 +1,6 @@
 // #![warn(clippy::pedantic)]
 
-use std::error::Error;
+use std::{env, error::Error};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use tiles::{
@@ -11,7 +11,8 @@ use tiles::{
         service,
     },
     daemon::{
-        remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
+        get_or_set_daemon_port, remote_status, share_remote_link, start_cmd, start_server,
+        stop_cmd, unshare_remote_link,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
@@ -452,6 +453,7 @@ enum AtCommands {
     #[command(about = "Log out of your Atproto account.")]
     Logout,
 }
+
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
@@ -462,6 +464,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    let daemon_port = get_or_set_daemon_port();
+    log::info!("DAEMON PORT: {}", daemon_port);
     let db_conn = core::init()?;
 
     match cli.command {
