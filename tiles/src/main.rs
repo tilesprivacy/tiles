@@ -11,8 +11,9 @@ use tiles::{
         service,
     },
     daemon::{
-        get_or_set_daemon_port, remote_status, share_remote_link, start_cmd, start_server,
-        stop_cmd, unshare_remote_link,
+        get_or_set_daemon_port,
+        net::{fetch_network_status_cli, start_network_cli, stop_network_cli},
+        remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
@@ -58,7 +59,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    account   Manage your user account\n",
     "    at        ATProto-related commands\n",
     "    data      Configure your data and storage\n\n",
-    "  Sync\n",
+    "  Collaboration\n",
     "    link      Link devices via peer-to-peer\n",
     "    sync      Sync chats with peers\n",
     "    remote    Remote inference commands\n\n",
@@ -68,7 +69,8 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
     "    daemon    Configure daemon behavior\n",
-    "    service   Run Tiles in the background from login\n\n",
+    "    service   Run Tiles in the background from login\n",
+    "    network   Configure Tiles network\n\n",
     "  Tools\n",
     "    plugin    Manage plugins such as skills, extensions etc\n\n",
     "Options:\n",
@@ -183,6 +185,9 @@ enum SystemCommands {
 
     /// Run Tiles in the background from login
     Service(ServiceArgs),
+
+    /// Configure Tiles networking
+    Network(NetworkArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -362,6 +367,26 @@ enum ServiceCommands {
     Start,
 
     /// Stop the service now
+    Stop,
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct NetworkArgs {
+    #[command(subcommand)]
+    command: NetworkCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworkCommands {
+    /// Start Tiles network
+    Start,
+
+    /// Get Tiles network status
+    Status,
+
+    /// Start Tiles network
     Stop,
 }
 
@@ -636,6 +661,19 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,
+        Some(Commands::System(SystemCommands::Network(network_args))) => {
+            match network_args.command {
+                NetworkCommands::Start => {
+                    start_network_cli().await;
+                }
+                NetworkCommands::Stop => {
+                    stop_network_cli().await;
+                }
+                NetworkCommands::Status => {
+                    fetch_network_status_cli().await;
+                }
+            }
+        }
     }
     Ok(())
 }

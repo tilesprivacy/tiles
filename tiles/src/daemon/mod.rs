@@ -15,9 +15,9 @@ use crate::{
         agent::agent_router,
         atproto::atproto_router,
         authz::authz_router,
+        net::{NetworkState, network_router, start_network_cli},
         server::server_router,
         session::session_router,
-        sync::{SyncState, sync_router},
     },
 };
 use anyhow::{Result, anyhow};
@@ -34,7 +34,7 @@ use log::info;
 use nix::unistd::setsid;
 use reqwest::Client;
 use semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::OpenOptions;
 use std::sync::Mutex;
@@ -47,9 +47,10 @@ pub mod account;
 pub mod agent;
 pub mod atproto;
 pub mod authz;
+pub mod net;
 pub mod server;
 pub mod session;
-pub mod sync;
+
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
@@ -61,6 +62,7 @@ use crate::{
     utils::config::{ConfigProvider, DefaultProvider, get_config_json, get_model_cache},
 };
 
+#[derive(Debug)]
 pub struct AppState {
     /// A watch rather than a one-shot: quit, `tiles daemon stop` and a SIGTERM
     /// from launchd all land here, and a one-shot panics on the second of them
@@ -72,9 +74,13 @@ pub struct AppState {
     pub remote_shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
     pub agent: AsyncMutex<Option<PiAgent>>,
     pub ui: Arc<Ui>,
-    pub sync_state: AsyncMutex<Option<SyncState>>,
+    pub network_state: AsyncMutex<Option<NetworkState>>,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct SimpleResponse {
+    pub message: String,
+}
 #[cfg(test)]
 impl AppState {
     /// the routes under test never shut anything down, so the handles are inert
@@ -87,7 +93,7 @@ impl AppState {
             remote_running: Mutex::new(false),
             agent: None.into(),
             ui: Ui::new(),
-            sync_state: None.into(),
+            network_state: None.into(),
         }
     }
 }
@@ -121,7 +127,7 @@ impl IntoResponse for AppError {
     }
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 pub struct ApiResponse<T> {
     status: String,
     data: T,
@@ -283,7 +289,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         remote_running: Mutex::new(false),
         agent: None.into(),
         ui: ui.clone(),
-        sync_state: None.into(),
+        network_state: None.into(),
     };
 
     let shared_state = Arc::new(state);
@@ -307,7 +313,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         .merge(session_router())
         .merge(atproto_router())
         .merge(authz_router())
-        .merge(sync_router())
+        .merge(network_router())
         // .layer(service)
         .with_state(shared_state.clone());
 
@@ -315,6 +321,10 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     info!("Daemon server started at {}", dyn_port);
+
+    tokio::spawn(async move {
+        start_network_cli().await;
+    });
 
     if with_ui {
         ui::start(ui);

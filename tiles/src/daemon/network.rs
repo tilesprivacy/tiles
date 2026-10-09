@@ -1,4 +1,4 @@
-//! Tilekit apis related to session sync
+//! Tilekit apis related to networking
 
 use std::sync::Arc;
 

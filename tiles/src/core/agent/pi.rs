@@ -10,16 +10,19 @@ use std::{fs, process::Stdio};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
+#[derive(Debug)]
 pub struct PiAgent {
     pub process: Child,
     pub writer: PiWriter,
     pub reader: PiReader,
 }
 
+#[derive(Debug)]
 pub struct PiWriter {
     stdin: ChildStdin,
 }
 
+#[derive(Debug)]
 pub struct PiReader {
     lines: Lines<BufReader<ChildStdout>>,
 }

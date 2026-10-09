@@ -304,12 +304,12 @@ pub fn get_encoded_delta(
     Ok(encode_delta_to_bytes(&delta))
 }
 
-/// Spawns a concurrent process that can process DB operations for p2p syncing through channel communication
+/// Spawns a concurrent process that can process DB operations while p2p communication through rust channel communication
 ///
 /// Returns a sender to the caller.
 ///
 /// This is due to the restrictions on sharing around DB references across threads, due to the Connection object being not thread safe
-pub fn create_db_sync_channel() -> Sender<SyncOp> {
+pub fn create_db_channel() -> Sender<SyncOp> {
     let (sender, mut receiver) = mpsc::channel::<SyncOp>(32);
 
     tokio::spawn(async move {

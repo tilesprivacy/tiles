@@ -369,6 +369,7 @@ pub fn set_nickname(config: &Table, nickname: &str) -> Result<Table> {
     }
 }
 
+/// Get current active local user details
 pub fn get_current_user(conn: &Connection) -> Result<User> {
     let mut fetch_current_user = conn.prepare("select id, user_id, username, account_type, active_profile, root, created_at, updated_at  from users where active_profile= true")?;
 
@@ -389,7 +390,17 @@ pub fn get_current_user(conn: &Connection) -> Result<User> {
                 updated_at: updated_at as u64,
             })
         })
-        .map_err(<rusqlite::Error as Into<anyhow::Error>>::into)
+        .map_err(|e| {
+            // TODO: This block can be separated out to a function for generic use case
+            let err_str = match e {
+                rusqlite::Error::QueryReturnedNoRows => "User not found".to_string(),
+                _ => {
+                    let err: anyhow::Error = e.into();
+                    err.to_string()
+                }
+            };
+            anyhow!("Failed to fetch current user due to {}", err_str)
+        })
 }
 
 pub fn get_user(conn: &Connection, did: &str) -> Result<User> {

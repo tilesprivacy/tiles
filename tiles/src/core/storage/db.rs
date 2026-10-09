@@ -77,9 +77,11 @@ const COMMON_MIGRATION_ARRAY: &[M] = &[
                 updated_at INTEGER NOT NULL
         )",
     ),
-    M::up("ALTER TABLE tokens ADD COLUMN aud_did TEXT;"),
-    M::up("ALTER TABLE tokens ADD COLUMN nickname TEXT;"),
-    M::up("CREATE UNIQUE INDEX did_aud_type ON tokens(did, aud_did) where type = 'linked';"),
+    M::up(
+        "ALTER TABLE tokens ADD COLUMN aud_did TEXT;
+        ALTER TABLE tokens ADD COLUMN nickname TEXT;
+        CREATE UNIQUE INDEX did_aud_type ON tokens(did, aud_did) where type = 'linked';",
+    ),
 ];
 
 const COMMON_MIGRATIONS: Migrations = Migrations::from_slice(COMMON_MIGRATION_ARRAY);

@@ -50,11 +50,11 @@ use crate::{
                 save_peer_account_db, verify_invocation,
             },
         },
-        chats::{SyncOp, create_db_sync_channel},
+        chats::{SyncOp, create_db_channel},
         network::ticket::EndpointUserData,
         storage::db::{DBTYPE, get_db_conn},
     },
-    daemon::sync::SyncApiResponse,
+    daemon::net::NetworkApiEvent,
 };
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
@@ -337,14 +337,14 @@ async fn subsribe_loop(
 }
 
 /// Handles the iroh gossip eventd for the sync process
-async fn sync_subscribe_loop(
+async fn process_gossip_network_events(
     mut receiver: GossipReceiver,
     network_sender: GossipSender,
     user: account::local::User,
     store: MemStore,
     endpoint: Endpoint,
     sync_db_channel_sender: tokio::sync::mpsc::Sender<SyncOp>,
-    sync_main_sender: tokio::sync::mpsc::Sender<u8>,
+    main_network_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
 ) -> Result<()> {
     while let Some(event) = receiver.try_next().await? {
         info!(
@@ -371,8 +371,8 @@ async fn sync_subscribe_loop(
                     info!("Received sync start event...");
                     let senders: (
                         &tokio::sync::mpsc::Sender<SyncOp>,
-                        &tokio::sync::mpsc::Sender<u8>,
-                    ) = (&sync_db_channel_sender, &sync_main_sender);
+                        &tokio::sync::mpsc::Sender<NetworkApiEvent>,
+                    ) = (&sync_db_channel_sender, &main_network_sender);
                     on_sync_start_event(&network_sender, &store, &msg, pub_key, &user, senders)
                         .await?;
                 }
@@ -382,8 +382,8 @@ async fn sync_subscribe_loop(
                 } => {
                     let senders: (
                         &tokio::sync::mpsc::Sender<SyncOp>,
-                        &tokio::sync::mpsc::Sender<u8>,
-                    ) = (&sync_db_channel_sender, &sync_main_sender);
+                        &tokio::sync::mpsc::Sender<NetworkApiEvent>,
+                    ) = (&sync_db_channel_sender, &main_network_sender);
                     on_sync_send_delta_info(
                         &network_sender,
                         &store,
@@ -397,14 +397,19 @@ async fn sync_subscribe_loop(
                 }
                 MessageBody::SyncEnd => {
                     println!("Sync completed..., exiting..");
-                    sync_main_sender.send(0).await?;
+                    // TODO: Rethink if the event shld be stopnetwork or stop sync
+                    main_network_sender
+                        .send(NetworkApiEvent::StopNetwork)
+                        .await?;
                 }
                 MessageBody::SyncRejected { reason } => {
                     println!(
                         "Oops looks like your sync request has been rejected by {}({}),\nreason: {},\n Try again",
                         msg.from_nickname, msg.from_did, reason
                     );
-                    sync_main_sender.send(0).await?;
+                    main_network_sender
+                        .send(NetworkApiEvent::StopNetwork)
+                        .await?;
                 }
                 msg_body => {
                     info!("Invalid sync message {:?}", msg_body)
@@ -413,9 +418,13 @@ async fn sync_subscribe_loop(
         }
     }
     info!("gossip receiver exit, close the endpoint too");
-    sync_main_sender.send(0).await?;
+    main_network_sender
+        .send(NetworkApiEvent::StopNetwork)
+        .await?;
     Ok(())
 }
+
+/// Creats an Iroh endpoint. All the tiles communication references this endpoint
 pub async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
     // In release mode, we will build the endpoint using
     // tiles keypair in keychain
@@ -437,6 +446,61 @@ pub async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
     }
 }
 
+/// Starts tiles network in background
+///
+/// All p2p communcation goes thru this network
+pub async fn start_network(
+    user: crate::core::account::local::User,
+    endpoint: Endpoint,
+    main_network_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
+    main_network_recv: MpscReceiver<NetworkApiEvent>,
+    caller_resp_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
+) -> Result<()> {
+    let did = if cfg!(debug_assertions) {
+        let pub_key = endpoint.id();
+        &get_did_from_public_key(pub_key.as_bytes())?
+    } else {
+        &user.user_id
+    };
+
+    let network_topic = format!("tiles-network:{}", did);
+    let network_topic_id = create_topic_id(&network_topic);
+    let (gossip_network_sender, gossip_network_receiver, router_recv, store) =
+        create_tiles_gossip_network(&endpoint, network_topic_id, vec![]).await?;
+    info!("Started tiles gossip network");
+
+    let db_channel_sender = create_db_channel();
+
+    tokio::spawn(process_gossip_network_events(
+        gossip_network_receiver,
+        gossip_network_sender.clone(),
+        user.clone(),
+        store,
+        endpoint.clone(),
+        db_channel_sender.clone(),
+        main_network_sender.clone(),
+    ));
+
+    info!("{}", "Ready to accept requests from peers...".blue());
+    caller_resp_sender
+        .send(NetworkApiEvent::NetworkStarted)
+        .await?;
+
+    // Since in dev, we create endpoints randomly, at the initiator side
+    // we can use the DID derived from this, instead of actual ones
+    // for the network to form correctly
+    if cfg!(debug_assertions) {
+        println!("Use this DID {} in dev for testing", did);
+    };
+
+    let mut main_network_recv = main_network_recv;
+    main_network_recv.recv().await;
+    router_recv.shutdown().await?;
+    endpoint.close().await;
+    info!("Closing the tiles network listener");
+    Ok(())
+}
+
 /// Entry point for the sync operation
 ///
 /// if valid DID is passed, function will be in initiator mode
@@ -444,9 +508,9 @@ pub async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
 pub async fn sync(
     did: Option<String>,
     endpoint: Endpoint,
-    sync_main_sender: tokio::sync::mpsc::Sender<u8>,
+    main_network_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
     sync_main_receiver: MpscReceiver<u8>,
-    sync_api_resp_sender: tokio::sync::mpsc::Sender<SyncApiResponse>,
+    sync_api_resp_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
 ) -> Result<()> {
     let user_db_conn = get_db_conn(&DBTYPE::COMMON)?;
     let user = get_current_user(&user_db_conn)?;
@@ -459,11 +523,11 @@ pub async fn sync(
         endpoint.address_lookup()?.add(mdns.clone());
     }
 
-    // Channel to communicate from the `sync_subscribe_loop`, which is a concurrent process, mainly to gracefully exit
+    // Channel to communicate from the `process_gossip_network_events`, which is a concurrent process, mainly to gracefully exit
     let mut sync_main_receiver = sync_main_receiver;
     // Creates a channel to communicate with the Database and pass the
     // sender across the tokio tasks
-    let db_channel_sender = create_db_sync_channel();
+    let db_channel_sender = create_db_channel();
 
     if let Some(receiver_did) = did {
         // INITIATOR BLOCK
@@ -531,14 +595,14 @@ pub async fn sync(
 
         println!("\nConnecting to {}.....", receiver_did);
         network_receiver.joined().await?;
-        tokio::spawn(sync_subscribe_loop(
+        tokio::spawn(process_gossip_network_events(
             network_receiver,
             network_sender.clone(),
             user.clone(),
             store,
             endpoint.clone(),
             db_channel_sender.clone(),
-            sync_main_sender.clone(),
+            main_network_sender.clone(),
         ));
 
         let receiver_last_row_counter =
@@ -561,7 +625,7 @@ pub async fn sync(
         println!("\nSyncing in progress with ....{}", receiver_did);
         sync_main_receiver.recv().await;
         sync_api_resp_sender
-            .send(SyncApiResponse::DirectSyncDone)
+            .send(NetworkApiEvent::DirectSyncDone)
             .await?;
         recv_router.shutdown().await?;
         endpoint.close().await;
@@ -583,18 +647,18 @@ pub async fn sync(
         let (network_sender, network_receiver, recv_router, store) =
             create_sync_network(&endpoint, sync_topic_id, vec![]).await?;
         info!("sync gossip network created");
-        tokio::spawn(sync_subscribe_loop(
+        tokio::spawn(process_gossip_network_events(
             network_receiver,
             network_sender.clone(),
             user.clone(),
             store,
             endpoint.clone(),
             db_channel_sender.clone(),
-            sync_main_sender.clone(),
+            main_network_sender.clone(),
         ));
         println!("{}", "Ready to accept sync requests from peers...".blue());
         sync_api_resp_sender
-            .send(SyncApiResponse::SyncListenerStarted)
+            .send(NetworkApiEvent::SyncListenerStarted)
             .await?;
         // Since in dev, we create endpoints randomly, at the initiator side
         // we can use the DID derived from this, instead of actual ones
@@ -628,6 +692,26 @@ async fn create_sync_network(
     let (goss_sender, goss_receiver) = gossip.subscribe(topic_id, bootstrap_ids).await?.split();
 
     Ok((goss_sender, goss_receiver, recv_router, store))
+}
+
+/// Router with gossip and blob protocol
+async fn create_tiles_gossip_network(
+    endpoint: &Endpoint,
+    topic_id: TopicId,
+    bootstrap_ids: Vec<iroh::PublicKey>,
+) -> Result<(GossipSender, GossipReceiver, Router, MemStore)> {
+    let gossip = Gossip::builder().spawn(endpoint.clone());
+    let store = MemStore::new();
+    let blobs = BlobsProtocol::new(&store, None);
+    let recv_router = Router::builder(endpoint.clone())
+        .accept(iroh_gossip::ALPN, gossip.clone())
+        .accept(iroh_blobs::ALPN, blobs.clone())
+        .spawn();
+
+    let (network_sender, network_receiver) =
+        gossip.subscribe(topic_id, bootstrap_ids).await?.split();
+
+    Ok((network_sender, network_receiver, recv_router, store))
 }
 
 fn create_topic_id(topic_name: &str) -> TopicId {
@@ -759,10 +843,10 @@ async fn on_sync_start_event(
     user: &account::local::User,
     senders: (
         &tokio::sync::mpsc::Sender<SyncOp>,
-        &tokio::sync::mpsc::Sender<u8>,
+        &tokio::sync::mpsc::Sender<NetworkApiEvent>,
     ),
 ) -> Result<()> {
-    let (sync_db_channel_sender, sync_main_sender) = senders;
+    let (sync_db_channel_sender, main_network_sender) = senders;
     if let MessageBody::SyncStart {
         last_row_counter: lrc,
         invocation_token: token,
@@ -786,7 +870,9 @@ async fn on_sync_start_event(
                 .await?;
             // Adding a delay to prevent the risk of closing the endpoint before we send the msg via the above broadcast
             sleep(Duration::from_secs(5)).await;
-            sync_main_sender.send(0).await?;
+            main_network_sender
+                .send(NetworkApiEvent::StopNetwork)
+                .await?;
             return Err(anyhow!("Verification failed for invocation token"));
         }
         if msg.is_online {
@@ -833,10 +919,10 @@ async fn on_sync_send_delta_info(
     endpoint: &Endpoint,
     senders: (
         &tokio::sync::mpsc::Sender<SyncOp>,
-        &tokio::sync::mpsc::Sender<u8>,
+        &tokio::sync::mpsc::Sender<NetworkApiEvent>,
     ),
 ) -> Result<()> {
-    let (sync_db_channel_sender, _sync_main_sender) = senders;
+    let (sync_db_channel_sender, _main_network_sender) = senders;
     if let MessageBody::SyncSendDeltaInfo {
         blob_ticket,
         last_row_counter,
@@ -899,7 +985,7 @@ async fn on_sync_send_delta_info(
             // Adding a delay to prevent the risk of closing the endpoint before we send the msg via the above broadcast
             // We dont send the close event back, as the sync close is determined by listener
             // sleep(Duration::from_secs(5)).await;
-            // sync_main_sender.send(0).await?;
+            // main_network_sender.send(0).await?;
         }
     }
     Ok(())
