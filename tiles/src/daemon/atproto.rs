@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
+    Router,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -16,7 +16,7 @@ use crate::{
         account::atproto,
         storage::db::{Dbconn, get_db_conn},
     },
-    daemon::{ApiResponse, AppError, AppState},
+    daemon::{ApiJson, ApiResponse, AppError, AppState},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -37,7 +37,9 @@ pub fn atproto_router() -> Router<Arc<AppState>> {
 }
 
 #[debug_handler]
-pub async fn login(Json(login_request): Json<AtLoginReq>) -> Result<impl IntoResponse, AppError> {
+pub async fn login(
+    ApiJson(login_request): ApiJson<AtLoginReq>,
+) -> Result<impl IntoResponse, AppError> {
     let resp = atproto::login(&login_request.user_handle)
         .map_err(|e| AppError::CannotProcess(e.to_string()))
         .await?;

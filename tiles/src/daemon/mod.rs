@@ -18,12 +18,12 @@ use crate::{
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
-    extract::{Query, State},
-    http::StatusCode,
+    extract::{Query, State, rejection::JsonRejection},
+    http::{HeaderValue, Method, StatusCode, Uri, header::CONTENT_TYPE},
     response::IntoResponse,
     routing::get,
 };
-use axum_macros::debug_handler;
+use axum_macros::{FromRequest, debug_handler};
 use iroh_tickets::endpoint::EndpointTicket;
 use log::info;
 use nix::unistd::setsid;
@@ -37,6 +37,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
+use tower_http::cors::CorsLayer;
 
 pub mod account;
 pub mod agent;
@@ -91,6 +92,7 @@ pub enum AppError {
     BadRequest(String),
     AlreadyExists(String),
     CannotProcess(String),
+    MethodNotAllowed(String),
 }
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -101,6 +103,7 @@ impl IntoResponse for AppError {
             Self::BadRequest(e) => (StatusCode::BAD_REQUEST, e),
             Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
             Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
+            Self::MethodNotAllowed(e) => (StatusCode::METHOD_NOT_ALLOWED, e),
         };
 
         let body = Json(json!({
@@ -111,6 +114,21 @@ impl IntoResponse for AppError {
         (status, body).into_response()
     }
 }
+
+/// a body that does not parse fails in the same json shape as every other error
+impl From<JsonRejection> for AppError {
+    fn from(rejection: JsonRejection) -> Self {
+        match rejection.status() {
+            StatusCode::UNPROCESSABLE_ENTITY => Self::CannotProcess(rejection.body_text()),
+            _ => Self::BadRequest(rejection.body_text()),
+        }
+    }
+}
+
+/// `Json`, with its rejection turned into an `AppError`
+#[derive(FromRequest)]
+#[from_request(via(Json), rejection(AppError))]
+pub struct ApiJson<T>(pub T);
 
 #[derive(Serialize, Debug)]
 pub struct ApiResponse<T> {
@@ -175,6 +193,30 @@ pub async fn stop_cmd() -> Result<()> {
 }
 async fn root(State(state): State<Arc<AppState>>) -> String {
     state.vsn.clone()
+}
+
+async fn no_route(uri: Uri) -> AppError {
+    AppError::NotFound(format!("No route for {}", uri.path()))
+}
+
+async fn wrong_method(method: Method, uri: Uri) -> AppError {
+    AppError::MethodNotAllowed(format!("{} is not allowed on {}", method, uri.path()))
+}
+
+/// the app's webview and the vite dev server are on other origins
+fn cors_layer() -> CorsLayer {
+    let origins = [
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    .map(HeaderValue::from_static);
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([CONTENT_TYPE])
 }
 
 // allow zombie, since this process is expected to be
@@ -284,7 +326,10 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         .merge(account_router())
         .merge(session_router())
         .merge(atproto_router())
+        .fallback(no_route)
+        .method_not_allowed_fallback(wrong_method)
         // .layer(service)
+        .layer(cors_layer())
         .with_state(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);

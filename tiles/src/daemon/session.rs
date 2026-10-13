@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     response::IntoResponse,
     routing::{get, post},
@@ -24,7 +24,7 @@ use crate::{
 
 use crate::utils::config::{ConfigProvider, DefaultProvider};
 use crate::{
-    daemon::{ApiResponse, AppError, AppState, agent::get_agent_start_params},
+    daemon::{ApiJson, ApiResponse, AppError, AppState, agent::get_agent_start_params},
     utils::config::PY_PORT,
 };
 
@@ -125,7 +125,7 @@ fn do_fetch_sessions(
 
 async fn save_chat(
     State(state): State<Arc<AppState>>,
-    Json(save_request): Json<SaveChatRequest>,
+    ApiJson(save_request): ApiJson<SaveChatRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
         .map_err(|e| AppError::CannotProcess(e.to_string()))?;

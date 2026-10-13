@@ -7989,6 +7989,7 @@ dependencies = [
  "tokio-util",
  "toml 1.1.4+spec-1.1.0",
  "tower",
+ "tower-http",
  "uuid",
  "wiremock",
 ]

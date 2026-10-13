@@ -1,14 +1,18 @@
 //! APIs for user account related management
 
 use crate::{
-    core::account::local::{
-        RootUser, create_root_account, get_root_user_details, save_root_account_with_provider,
+    core::{
+        account::local::{
+            RootUser, create_root_account, get_root_user_details, save_root_account_with_provider,
+        },
+        init_account,
+        storage::db::{DBTYPE, Dbconn, get_db_conn},
     },
-    daemon::{ApiResponse, AppError, AppState},
+    daemon::{ApiJson, ApiResponse, AppError, AppState},
     utils::config::{ConfigProvider, DefaultProvider, get_or_create_config},
 };
 use axum::{
-    Json, Router,
+    Router,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -36,7 +40,7 @@ fn get_account_status(provider: impl ConfigProvider) -> Result<impl IntoResponse
     let config =
         get_or_create_config(provider).map_err(|e| AppError::InternalServerError(e.to_string()))?;
     let root_user_details =
-        get_root_user_details(&config).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        get_root_user_details(&config).map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     if root_user_details.id.is_empty() {
         Err(AppError::NotFound(
@@ -47,22 +51,34 @@ fn get_account_status(provider: impl ConfigProvider) -> Result<impl IntoResponse
     }
 }
 
-async fn create_account(Json(payload): Json<CreateAccount>) -> Result<impl IntoResponse, AppError> {
-    do_create_account(DefaultProvider, payload).await
+async fn create_account(
+    ApiJson(payload): ApiJson<CreateAccount>,
+) -> Result<impl IntoResponse, AppError> {
+    let account = do_create_account(DefaultProvider, payload).await?;
+
+    // saved chats are owned by the database copy of the account, which only
+    // the cli used to write
+    let db_conn = Dbconn {
+        chat: get_db_conn(&DBTYPE::CHAT)
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?,
+        common: get_db_conn(&DBTYPE::COMMON)
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?,
+    };
+    init_account(&db_conn).map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    Ok(account)
 }
 
 async fn do_create_account(
     provider: impl ConfigProvider + Clone,
     payload: CreateAccount,
 ) -> Result<impl IntoResponse, AppError> {
-    println!("{:?}", provider.get_config_dir().unwrap());
     let config = get_or_create_config(provider.clone())
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     let root_user_details =
-        get_root_user_details(&config).map_err(|e| AppError::BadRequest(e.to_string()))?;
+        get_root_user_details(&config).map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    println!("{:?}", root_user_details);
     if !root_user_details.id.is_empty() {
         let err_msg = format!("Local Identity exists with id: {}", root_user_details.id);
         Err(AppError::AlreadyExists(err_msg))
