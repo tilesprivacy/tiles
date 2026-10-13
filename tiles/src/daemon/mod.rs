@@ -115,7 +115,7 @@ impl IntoResponse for AppError {
     }
 }
 
-/// a body that does not parse fails in the same json shape as every other error
+// a body that does not parse fails in the same json shape as every other error
 impl From<JsonRejection> for AppError {
     fn from(rejection: JsonRejection) -> Self {
         match rejection.status() {
@@ -203,7 +203,7 @@ async fn wrong_method(method: Method, uri: Uri) -> AppError {
     AppError::MethodNotAllowed(format!("{} is not allowed on {}", method, uri.path()))
 }
 
-/// the app's webview and the vite dev server are on other origins
+// the app's webview and the vite dev server are on other origins
 fn cors_layer() -> CorsLayer {
     let origins = [
         "tauri://localhost",
