@@ -54,19 +54,27 @@ fn get_account_status(provider: impl ConfigProvider) -> Result<impl IntoResponse
 async fn create_account(
     ApiJson(payload): ApiJson<CreateAccount>,
 ) -> Result<impl IntoResponse, AppError> {
-    let account = do_create_account(DefaultProvider, payload).await?;
+    let created = do_create_account(DefaultProvider, payload).await;
 
-    // saved chats are owned by the database copy of the account, which only
-    // the cli used to write
+    // an earlier attempt can have saved the config and failed on the database,
+    // so an existing account gets its row too
+    if matches!(created, Ok(_) | Err(AppError::AlreadyExists(_))) {
+        save_account_to_db()?;
+    }
+
+    created
+}
+
+// saved chats are owned by the database copy of the account, which only the
+// cli used to write.
+fn save_account_to_db() -> Result<(), AppError> {
     let db_conn = Dbconn {
         chat: get_db_conn(&DBTYPE::CHAT)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?,
         common: get_db_conn(&DBTYPE::COMMON)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?,
     };
-    init_account(&db_conn).map_err(|e| AppError::InternalServerError(e.to_string()))?;
-
-    Ok(account)
+    init_account(&db_conn).map_err(|e| AppError::InternalServerError(e.to_string()))
 }
 
 async fn do_create_account(
