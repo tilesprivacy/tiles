@@ -118,7 +118,7 @@ fn do_fetch_sessions(
     chat_db_conn: Connection,
 ) -> Result<impl IntoResponse, AppError> {
     let sessions = sessionChats::fetch_sessions(&chat_db_conn, None)
-        .map_err(|e| AppError::NotFound(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     Ok(ApiResponse::success(sessions))
 }
@@ -128,9 +128,9 @@ async fn save_chat(
     ApiJson(save_request): ApiJson<SaveChatRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     let result = do_save_chat(state, save_request, &chat_db_conn, &user_db_conn)?;
 
     Ok(ApiResponse::success(result))
@@ -142,6 +142,12 @@ fn do_save_chat(
     chat_db_conn: &Connection,
     user_db_conn: &Connection,
 ) -> Result<Chats, AppError> {
+    // checked first, so an unknown user leaves no empty session behind
+    let current_user = get_user(user_db_conn, &save_request.user_id).map_err(|_e| {
+        let err_msg = format!("User {} not found", &save_request.user_id);
+        AppError::NotFound(err_msg)
+    })?;
+
     match sessionChats::fetch_session(chat_db_conn, &save_request.session_id) {
         Err(err) if err.to_string().contains("Query returned no rows") => {
             log::info!("Session doesn't exist, create it");
@@ -153,13 +159,13 @@ fn do_save_chat(
                     &save_request.text,
                     &save_request.user_id,
                 )
-                .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+                .map_err(|e| AppError::InternalServerError(e.to_string()))?;
             } else {
                 return Err(AppError::NotFound("Session doesnt exist".to_owned()));
             }
         }
         Err(err) => {
-            return Err(AppError::CannotProcess(err.to_string()));
+            return Err(AppError::InternalServerError(err.to_string()));
         }
         _ => (),
     }
@@ -172,14 +178,10 @@ fn do_save_chat(
         metrics: None,
         model_used: save_request.model_used,
     };
-    let current_user = get_user(user_db_conn, &save_request.user_id).map_err(|_e| {
-        let err_msg = format!("User {} not found", &save_request.user_id);
-        AppError::NotFound(err_msg)
-    })?;
     let chat =
         sessionChats::save_chat(chat_db_conn, &current_user, chat_response).map_err(|e| {
             let err_msg = format!("Saving chat failed due to {}", e);
-            AppError::CannotProcess(err_msg)
+            AppError::InternalServerError(err_msg)
         })?;
 
     Ok(chat)
@@ -189,10 +191,22 @@ async fn fetch_chats_by_session(
     Path(session_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    let delta = sessionChats::fetch_chats_by_session_id(&chat_db_conn, &session_id)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    let session = match sessionChats::fetch_session(&chat_db_conn, &session_id) {
+        Err(err) if err.to_string().contains("Query returned no rows") => {
+            return Err(AppError::NotFound(format!("No session {session_id}")));
+        }
+        result => result.map_err(|e| AppError::InternalServerError(e.to_string()))?,
+    };
+
+    let mut delta = sessionChats::fetch_chats_by_session_id(&chat_db_conn, &session_id)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    // the session only comes along with its messages, so a new one would be missing
+    if delta.sessions.is_empty() {
+        delta.sessions.push(session);
+    }
 
     Ok(ApiResponse::success(delta))
 }

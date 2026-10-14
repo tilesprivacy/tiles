@@ -258,7 +258,10 @@ pub async fn start_server() {
 }
 
 pub async fn stop_server() {
-    let _ = stop_server_daemon().await;
+    match stop_server_daemon().await {
+        Ok(msg) => println!("{msg}"),
+        Err(err) => eprintln!("{err}"),
+    }
 }
 
 pub async fn uninstall_tiles(all: bool) -> Result<()> {

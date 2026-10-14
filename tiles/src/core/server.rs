@@ -67,7 +67,7 @@ pub async fn start_server_daemon() -> Result<String> {
 pub async fn stop_server_daemon() -> Result<&'static str> {
     if (ping().await).is_err() {
         let msg = "Server is not running";
-        println!("{}", msg);
+        log::info!("{}", msg);
         return Ok(msg);
     }
 
@@ -75,7 +75,7 @@ pub async fn stop_server_daemon() -> Result<&'static str> {
 
     if !pid_file.exists() {
         let msg = "server pid doesnt exist";
-        eprintln!("{}", msg);
+        log::warn!("{}", msg);
         return Ok(msg);
     }
 
@@ -89,7 +89,7 @@ pub async fn stop_server_daemon() -> Result<&'static str> {
         .map_err(|e| anyhow!("Failed to remove the server pid file due to {}", e))?;
     let success_msg = "Server stopped";
 
-    println!("{}", success_msg);
+    log::info!("{}", success_msg);
     Ok(success_msg)
 }
 

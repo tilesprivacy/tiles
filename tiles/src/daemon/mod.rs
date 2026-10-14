@@ -447,12 +447,16 @@ async fn callback(
         .callback_sender
         .lock()
         .expect("Failed to get the callback params sender lock");
-    let _ = callback_sender.take().unwrap().send(params);
+    if let Some(sender) = callback_sender.take() {
+        let _ = sender.send(params);
+    }
     let mut shutdown_sender = state
         .shutdown_sender
         .lock()
         .expect("Failed to get shutdown sender lock");
-    let _ = shutdown_sender.take().unwrap().send(true);
+    if let Some(sender) = shutdown_sender.take() {
+        let _ = sender.send(true);
+    }
     "Processed your authorization request, You can close this page"
 }
 
@@ -461,14 +465,11 @@ async fn get_model_cache_path(
     Query(params): Query<SendParams>,
 ) -> Result<String, StatusCode> {
     log::info!("getting model cache path");
-    if let Ok(model_path) = get_model_cache(&params.model_name) {
-        Ok(model_path
-            .to_str()
-            .expect("Pathbuf to str failed")
-            .to_owned())
-    } else {
-        Err(StatusCode::NOT_FOUND)
-    }
+    let model_path = get_model_cache(&params.model_name).map_err(|_| StatusCode::NOT_FOUND)?;
+    model_path
+        .to_str()
+        .map(str::to_owned)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 /// Gets the contents of config.toml in json
@@ -570,9 +571,7 @@ async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<St
     endpoint.online().await;
     let addr = endpoint.addr();
     let ticket = EndpointTicket::from(addr).to_string();
-    println!(" Here the remote connect ticket\n{}", ticket);
-    println!("\nUse `tiles remote connect <ticket>` on the other peer\n");
-    println!("Waiting for connections...");
+    info!("Sharing remote inference, waiting for connections");
     // ok we create the endpoint and ticket here, then pass the endpoint to share fn
     let (sendx, recvx) = oneshot::channel();
 
@@ -607,7 +606,10 @@ async fn unshare_remote_inference(
         .remote_shutdown_sender
         .lock()
         .expect("Failed to get shutdown sender lock");
-    let _ = remote_shutdown_sender.take().unwrap().send(true);
+    // nothing shared is fine, unsharing just leaves it that way
+    if let Some(sender) = remote_shutdown_sender.take() {
+        let _ = sender.send(true);
+    }
     *state
         .remote_running
         .lock()

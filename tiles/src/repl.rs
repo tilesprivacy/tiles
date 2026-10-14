@@ -1006,10 +1006,14 @@ async fn handle_repl_exit(agent_writer: &mut PiWriter) -> Result<()> {
     if !cfg!(debug_assertions) {
         match get_inference_config()? {
             Some(inference_config) if !inference_config.daemon => {
-                let _res = stop_server_daemon().await;
+                if let Ok(msg) = stop_server_daemon().await {
+                    println!("{msg}");
+                }
             }
             None => {
-                let _res = stop_server_daemon().await;
+                if let Ok(msg) = stop_server_daemon().await {
+                    println!("{msg}");
+                }
             }
             _ => (),
         }

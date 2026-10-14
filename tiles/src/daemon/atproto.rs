@@ -12,10 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    core::{
-        account::atproto,
-        storage::db::{Dbconn, get_db_conn},
-    },
+    core::{account::atproto, storage::db::get_db_conn},
     daemon::{ApiJson, ApiResponse, AppError, AppState},
 };
 
@@ -48,16 +45,20 @@ pub async fn login(
 }
 
 pub async fn logout() -> Result<impl IntoResponse, AppError> {
-    let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    let conn = Dbconn {
-        chat: chat_db_conn,
-        common: user_db_conn,
-    };
-    let resp = atproto::logout(&conn).map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    // nobody signed in is a normal answer here, the core's wording is for the cli
+    let signed_in = atproto::fetch_logged_in_data(&user_db_conn)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    if signed_in.is_none() {
+        return Err(AppError::NotFound(
+            "No ATmosphere account is signed in".to_owned(),
+        ));
+    }
+
+    let resp =
+        atproto::logout(&user_db_conn).map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
     Ok(ApiResponse::success(json!(resp)))
 }

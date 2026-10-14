@@ -164,7 +164,7 @@ fn fetch_delta_chats(
         let updated_at: f64 = row.get(7)?;
         let resp_id: Option<String> = row.get(3)?;
         let ctx_id = row.get(5)?;
-        let model_name_db: Option<String> = row.get(9)?;
+        let model_name_db: Option<String> = row.get(10)?;
 
         let model_name: String = model_name_db.unwrap_or("".to_owned());
 
@@ -442,7 +442,7 @@ fn decode_delta_from_bytes(bytes: &[u8]) -> Result<DeltaChat> {
 }
 
 pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<DeltaChat> {
-    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where session_id = ?1 order by id";
+    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id, model_name from chats where session_id = ?1 order by id";
 
     let params = vec![("?1", session_id)];
 
