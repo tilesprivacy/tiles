@@ -604,7 +604,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::Sync(SyncCommands::Remote(remote_args))) => match remote_args.command {
             RemoteCommands::Share => {
                 println!("{}", share_remote_link().await?);
-                println!("\nUse `tiles remote connect <ticket>` on the other peer");
+                println!("\nUse `tiles run --remote <ticket>` on the other peer");
             }
             RemoteCommands::Unshare => {
                 unshare_remote_link().await?;

@@ -143,9 +143,12 @@ fn do_save_chat(
     user_db_conn: &Connection,
 ) -> Result<Chats, AppError> {
     // checked first, so an unknown user leaves no empty session behind
-    let current_user = get_user(user_db_conn, &save_request.user_id).map_err(|_e| {
-        let err_msg = format!("User {} not found", &save_request.user_id);
-        AppError::NotFound(err_msg)
+    let current_user = get_user(user_db_conn, &save_request.user_id).map_err(|err| {
+        if err.to_string().contains("Query returned no rows") {
+            AppError::NotFound(format!("User {} not found", &save_request.user_id))
+        } else {
+            AppError::InternalServerError(err.to_string())
+        }
     })?;
 
     match sessionChats::fetch_session(chat_db_conn, &save_request.session_id) {
