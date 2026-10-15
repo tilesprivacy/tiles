@@ -143,34 +143,25 @@ fn do_save_chat(
     user_db_conn: &Connection,
 ) -> Result<Chats, AppError> {
     // checked first, so an unknown user leaves no empty session behind
-    let current_user = get_user(user_db_conn, &save_request.user_id).map_err(|err| {
-        if err.to_string().contains("Query returned no rows") {
-            AppError::NotFound(format!("User {} not found", &save_request.user_id))
-        } else {
-            AppError::InternalServerError(err.to_string())
-        }
-    })?;
+    let current_user = get_user(user_db_conn, &save_request.user_id)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("User {} not found", &save_request.user_id)))?;
 
-    match sessionChats::fetch_session(chat_db_conn, &save_request.session_id) {
-        Err(err) if err.to_string().contains("Query returned no rows") => {
-            log::info!("Session doesn't exist, create it");
-            // A user prompt should create a session not an agent, as of now
-            if save_request.role == Role::User {
-                sessionChats::create_session(
-                    chat_db_conn,
-                    &save_request.session_id,
-                    &save_request.text,
-                    &save_request.user_id,
-                )
-                .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-            } else {
-                return Err(AppError::NotFound("Session doesnt exist".to_owned()));
-            }
+    let session = sessionChats::fetch_session(chat_db_conn, &save_request.session_id)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    if session.is_none() {
+        // A user prompt should create a session not an agent, as of now
+        if save_request.role != Role::User {
+            return Err(AppError::NotFound("Session doesnt exist".to_owned()));
         }
-        Err(err) => {
-            return Err(AppError::InternalServerError(err.to_string()));
-        }
-        _ => (),
+        log::info!("Session doesn't exist, create it");
+        sessionChats::create_session(
+            chat_db_conn,
+            &save_request.session_id,
+            &save_request.text,
+            &save_request.user_id,
+        )
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     }
 
     let chat_response = ChatResponse {
@@ -196,20 +187,12 @@ async fn fetch_chats_by_session(
     let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    let session = match sessionChats::fetch_session(&chat_db_conn, &session_id) {
-        Err(err) if err.to_string().contains("Query returned no rows") => {
-            return Err(AppError::NotFound(format!("No session {session_id}")));
-        }
-        result => result.map_err(|e| AppError::InternalServerError(e.to_string()))?,
-    };
+    sessionChats::fetch_session(&chat_db_conn, &session_id)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("No session {session_id}")))?;
 
-    let mut delta = sessionChats::fetch_chats_by_session_id(&chat_db_conn, &session_id)
+    let delta = sessionChats::fetch_chats_by_session_id(&chat_db_conn, &session_id)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-
-    // the session only comes along with its messages, so a new one would be missing
-    if delta.sessions.is_empty() {
-        delta.sessions.push(session);
-    }
 
     Ok(ApiResponse::success(delta))
 }
@@ -339,9 +322,7 @@ mod tests {
         let db_conn = setup_db_conn_v2();
 
         let user = create_user();
-        if let Err(err) = sessionChats::fetch_session(&db_conn.chat, "ad")
-            && err.to_string().contains("Query returned no rows")
-        {
+        if let Ok(None) = sessionChats::fetch_session(&db_conn.chat, "ad") {
             println!("No session created")
         }
 
@@ -394,7 +375,11 @@ mod tests {
 
         let _res = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap();
 
-        assert!(sessionChats::fetch_session(&db_conn.chat, "id_non").is_ok());
+        assert!(
+            sessionChats::fetch_session(&db_conn.chat, "id_non")
+                .unwrap()
+                .is_some()
+        );
 
         let chats = sessionChats::fetch_chats_by_session_id(&db_conn.chat, "id_non").unwrap();
 
@@ -451,7 +436,11 @@ mod tests {
 
         let _res = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap();
 
-        assert!(sessionChats::fetch_session(&db_conn.chat, "id-1").is_ok());
+        assert!(
+            sessionChats::fetch_session(&db_conn.chat, "id-1")
+                .unwrap()
+                .is_some()
+        );
 
         let chats = sessionChats::fetch_chats_by_session_id(&db_conn.chat, "id-1").unwrap();
 

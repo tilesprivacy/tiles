@@ -887,7 +887,9 @@ fn show_status(repl_session: &ReplSession, db_conn: &Dbconn) -> Result<()> {
     let cwd_pathbuf = std::env::current_dir()?;
     let cwd = cwd_pathbuf.to_string_lossy();
     let logged_in_atproto = fetch_logged_in_data(&db_conn.common)?;
-    let session_data: Option<Session> = fetch_session(&db_conn.chat, &repl_session.session_id).ok();
+    let session_data: Option<Session> = fetch_session(&db_conn.chat, &repl_session.session_id)
+        .ok()
+        .flatten();
     let status_lines = build_status_lines(&cwd, session_data, repl_session, logged_in_atproto);
 
     println!("\n");
@@ -1384,7 +1386,7 @@ mod tests {
             .expect("session should be created");
         insert_atproto_login(&db_conn.common);
 
-        let session = fetch_session(&db_conn.chat, "session-1").ok();
+        let session = fetch_session(&db_conn.chat, "session-1").ok().flatten();
         let atproto_login =
             fetch_logged_in_data(&db_conn.common).expect("login lookup should succeed");
         let state = GetStateData {
@@ -1518,7 +1520,9 @@ mod tests {
             save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok()
         );
 
-        let session = fetch_session(&db_conn.chat, "abc").unwrap();
+        let session = fetch_session(&db_conn.chat, "abc")
+            .unwrap()
+            .expect("session abc was created above");
 
         let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
 
@@ -1628,7 +1632,9 @@ mod tests {
             save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok()
         );
 
-        let session = fetch_session(&db_conn.chat, "abc").unwrap();
+        let session = fetch_session(&db_conn.chat, "abc")
+            .unwrap()
+            .expect("session abc was created above");
 
         let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
 

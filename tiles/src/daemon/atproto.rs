@@ -48,7 +48,7 @@ pub async fn logout() -> Result<impl IntoResponse, AppError> {
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    // nobody signed in is a normal answer here, the core's wording is for the cli
+    // core::logout errors with cli wording when nobody is signed in, so check first and answer 404
     let signed_in = atproto::fetch_logged_in_data(&user_db_conn)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     if signed_in.is_none() {

@@ -13,7 +13,7 @@ use dialog_varsig::{Did, Principal, Signature, eddsa::Ed25519Signature};
 use iroh::SecretKey;
 use log::{info, warn};
 use rusqlite::{
-    Connection, Row, ToSql, params,
+    Connection, OptionalExtension, Row, ToSql, params,
     types::{FromSql, FromSqlError},
 };
 use serde::Serialize;
@@ -315,7 +315,7 @@ pub fn get_current_user(conn: &Connection) -> Result<User> {
         .map_err(<rusqlite::Error as Into<anyhow::Error>>::into)
 }
 
-pub fn get_user(conn: &Connection, did: &str) -> Result<User> {
+pub fn get_user(conn: &Connection, did: &str) -> Result<Option<User>> {
     let mut fetch_current_user = conn.prepare("select id, user_id, username, account_type, active_profile, root, created_at, updated_at  from users where user_id= ?1")?;
 
     fetch_current_user
@@ -335,6 +335,7 @@ pub fn get_user(conn: &Connection, did: &str) -> Result<User> {
                 updated_at: updated_at as u64,
             })
         })
+        .optional()
         .map_err(<rusqlite::Error as Into<anyhow::Error>>::into)
 }
 

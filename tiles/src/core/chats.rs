@@ -13,7 +13,7 @@ use crate::utils::get_unix_time_now;
 use anyhow::{Result, anyhow};
 use log::{info, warn};
 use rusqlite::types::FromSqlError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tilekit::modelfile::Role;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
@@ -176,9 +176,10 @@ fn fetch_delta_chats(
         if !session_id.is_empty() && !session_map.contains_key(&session_id) {
             // lets fetch the session details
             match fetch_session(conn, &session_id) {
-                Ok(session) => {
+                Ok(Some(session)) => {
                     session_map.insert(session_id.clone(), session);
                 }
+                Ok(None) => warn!("Session {} of a chat does not exist", &session_id),
                 Err(err) => {
                     warn!("Fetching session {} failed due to {:?}", &session_id, err);
                 }
@@ -359,35 +360,35 @@ pub fn create_session(conn: &Connection, id: &str, name: &str, user_id: &str) ->
         get_unix_time_now() as f64,
         None::<String>
     ]) {
-        Ok(_res) => {
-            let sesh = fetch_session(conn, id)?;
-            Ok(sesh)
-        }
+        Ok(_res) => fetch_session(conn, id)?
+            .ok_or_else(|| anyhow!("Session {id} is missing after writing it")),
         Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
             if reason == "UNIQUE constraint failed: sessions.id" =>
         {
             warn!("Session entry already exists, skipping");
-            let sesh = fetch_session(conn, id)?;
-            Ok(sesh)
+            fetch_session(conn, id)?
+                .ok_or_else(|| anyhow!("Session {id} is missing after writing it"))
         }
         Err(err) => Err(anyhow!("Err inserting due to {}", err)),
     }
 }
 
-pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
-    let sesh = conn.query_row(
-        "SELECT id, name, creator_id, created_at, snapshot FROM sessions WHERE id = ?1",
-        [session_id],
-        |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                creator_id: row.get(2)?,
-                created_at: row.get::<usize, f64>(3)? as u64,
-                snapshot: row.get(4)?,
-            })
-        },
-    )?;
+pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Option<Session>> {
+    let sesh = conn
+        .query_row(
+            "SELECT id, name, creator_id, created_at, snapshot FROM sessions WHERE id = ?1",
+            [session_id],
+            |row| {
+                Ok(Session {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    creator_id: row.get(2)?,
+                    created_at: row.get::<usize, f64>(3)? as u64,
+                    snapshot: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
     Ok(sesh)
 }
 
@@ -452,10 +453,8 @@ pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<
 pub fn update_snapshot(conn: &Connection, id: &str, snapshot: String) -> Result<Session> {
     let mut stmt = conn.prepare("update sessions set snapshot = ?1 where id = ?2")?;
     match stmt.execute(params![snapshot, id.to_owned(),]) {
-        Ok(_res) => {
-            let sesh = fetch_session(conn, id)?;
-            Ok(sesh)
-        }
+        Ok(_res) => fetch_session(conn, id)?
+            .ok_or_else(|| anyhow!("Session {id} is missing after writing it")),
         Err(err) => Err(anyhow!("Err updating session snapshot due to {}", err)),
     }
 }
