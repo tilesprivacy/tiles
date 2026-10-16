@@ -217,11 +217,14 @@ fn own_pid() -> Result<Option<Pid>> {
     }
 
     let raw = std::fs::read_to_string(&pid_file).context("Failed to read the server pid file")?;
-    let Ok(pid) = raw.trim().parse::<i32>() else {
-        log::warn!("Ignoring a server pid file that holds {raw:?}");
-        return Ok(None);
+    // 0 and negatives would make kill() signal whole process groups
+    let pid = match raw.trim().parse::<i32>() {
+        Ok(pid) if pid > 0 => Pid::from_raw(pid),
+        _ => {
+            log::warn!("Ignoring a server pid file that holds {raw:?}");
+            return Ok(None);
+        }
     };
-    let pid = Pid::from_raw(pid);
 
     Ok(is_alive(pid).then_some(pid))
 }
