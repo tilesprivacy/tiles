@@ -250,7 +250,7 @@ async fn request(app: &AppHandle, client: &reqwest::Client, on: bool) -> Result<
         set_power(app, Power::Starting);
     }
 
-    let outcome = match client.get(daemon::url(path)).timeout(timeout).send().await {
+    let outcome = match client.post(daemon::url(path)).timeout(timeout).send().await {
         Ok(res) if res.status().is_success() => Ok(()),
         Ok(res) => Err(format!("{path} answered {}", res.status())),
         Err(err) => Err(err.to_string()),

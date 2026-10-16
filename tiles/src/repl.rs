@@ -11,7 +11,7 @@ use crate::core::chats::{
     update_snapshot,
 };
 use crate::core::network;
-use crate::core::server::{ping, start_server_daemon, stop_server_daemon};
+use crate::core::server::{start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::Dbconn;
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_inference_config,
@@ -38,10 +38,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
-use tokio::time::sleep;
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
 
@@ -347,10 +345,10 @@ async fn run_model_with_server(
             .map_err(|e| anyhow!(e))
     } else {
         if !cfg!(debug_assertions) {
+            // start waits until the server answers
             let _ = start_server_daemon().await.inspect_err(|e| {
-                eprintln!("Failed to start inference server due to {:?}", e);
+                eprintln!("Failed to start inference server: {e}");
             });
-            let _ = wait_until_server_is_up().await;
         }
         match load_model(&modelfile, &default_modelfile, &memory_path, 0).await {
             Ok(_) => start_repl(&modelfile, run_args, db_conn)
@@ -611,20 +609,6 @@ async fn load_model(
         .await
     } else {
         Ok(())
-    }
-}
-
-async fn wait_until_server_is_up() {
-    loop {
-        match ping().await {
-            Ok(_) => {
-                break;
-            }
-            Err(_err) => {
-                println!("### tiling ###...");
-                sleep(Duration::from_secs(5)).await;
-            }
-        }
     }
 }
 

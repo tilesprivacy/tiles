@@ -93,6 +93,7 @@ pub enum AppError {
     AlreadyExists(String),
     CannotProcess(String),
     MethodNotAllowed(String),
+    ServiceUnavailable(String),
 }
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -104,6 +105,7 @@ impl IntoResponse for AppError {
             Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
             Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
             Self::MethodNotAllowed(e) => (StatusCode::METHOD_NOT_ALLOWED, e),
+            Self::ServiceUnavailable(e) => (StatusCode::SERVICE_UNAVAILABLE, e),
         };
 
         let body = Json(json!({
