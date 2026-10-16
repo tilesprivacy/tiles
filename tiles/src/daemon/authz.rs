@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use anyhow::Result;
 use axum::{
     Json, Router,
     extract::Path,
@@ -9,15 +10,16 @@ use axum::{
     routing::{get, post},
 };
 use axum_macros::debug_handler;
-use serde::Deserialize;
+use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
     core::{
-        account::local::{Capabilities, fetch_linked_tokens, get_current_user},
+        account::local::{Capabilities, Token, fetch_linked_tokens, get_current_user},
         storage::db::get_db_conn,
     },
-    daemon::{ApiResponse, AppError, AppState},
+    daemon::{ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port},
 };
 
 /// Request format for `/create-token`
@@ -34,7 +36,7 @@ pub struct TokenCreateRequest {
 /// Request format for `/add-token`
 /// - delegated_token: The delegated token string,
 /// - issuer_nickname(Optional): Nickname, which can be used to identify the peer who delegated the token, easily
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct TokenAddRequest {
     delegated_token: String,
     issuer_nickname: Option<String>,
@@ -66,14 +68,7 @@ pub async fn create_token(
     .await
     .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
-    Ok(ApiResponse::success(json!({
-        "token": token.token.clone(),
-        "cid": token.cid,
-        "did": token.did,
-        "aud": token.aud_did,
-        "nickname": token.nickname,
-        "type": token.r#type
-    })))
+    Ok(ApiResponse::success(token))
 }
 
 #[debug_handler]
@@ -127,5 +122,164 @@ pub async fn revoke_token(Path(cid): Path<String>) -> Result<impl IntoResponse, 
     crate::core::account::local::delete_token_by_cid(&common_db_conn, &cid)
         .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
-    Ok(ApiResponse::success(json!("Successfully revoked")))
+    Ok(ApiResponse::success(SimpleResponse {
+        message: "Successfully revoked".to_string(),
+    }))
+}
+
+/// CLI command handler for create-link
+pub async fn create_link_cli(aud_did: Option<String>) -> Result<()> {
+    if let Some(audience_did) = aud_did {
+        let client = Client::new();
+        let port = *get_or_set_daemon_port();
+        let addr = format!("http://127.0.0.1:{}/v1/tilekit/authz/create-token", port);
+        let res = client
+            .post(addr)
+            .header("content-type", "application/json")
+            .body(
+                json!({
+                    "aud_did": audience_did,
+                    "capabilities": [{"type": "all"}]
+                })
+                .to_string(),
+            )
+            .send()
+            .await?;
+
+        if res.status().is_success() {
+            let resp_struct = res.json::<ApiResponse<Token>>().await?;
+            println!(
+                "Use the below token to link your other device `{}`\n using `tiles link join <token> <nickname>` on that device\n{}",
+                audience_did, resp_struct.data.token
+            );
+        } else {
+            eprintln!(
+                "Creating link token failed due to {}",
+                res.text()
+                    .await
+                    .unwrap_or_else(|_| "Couldn't read the body".to_string())
+            );
+        }
+    } else {
+        // TODO: will implement a syncronized linking over offline network
+        eprintln!("Expected peer DID")
+    }
+    Ok(())
+}
+
+/// CLI command handler for joining request to a to-be linked device
+pub async fn join_request_cli(token: String, nickname: Option<String>) -> Result<()> {
+    let client = Client::new();
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/v1/tilekit/authz/add-token", port);
+    let res = client
+        .post(addr)
+        .header("content-type", "application/json")
+        .body(
+            json!(TokenAddRequest {
+                delegated_token: token.to_string(),
+                issuer_nickname: nickname
+            })
+            .to_string(),
+        )
+        .send()
+        .await?;
+
+    if res.status().is_success() {
+        process_device_linking(&client, port, &token).await?
+    } else {
+        eprintln!(
+            "Failed to process the command due to {}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        )
+    }
+
+    Ok(())
+}
+
+pub async fn list_linked_devices_cli() -> Result<()> {
+    let client = Client::new();
+    let port = *get_or_set_daemon_port();
+    let addr = format!(
+        "http://127.0.0.1:{}/v1/tilekit/peers/list-linked-devices",
+        port
+    );
+    let res = client
+        .get(addr)
+        .header("content-type", "application/json")
+        .send()
+        .await?;
+
+    if res.status().is_success() {
+        let resp_struct = res.json::<ApiResponse<Vec<Token>>>().await?;
+        println!();
+        resp_struct.data.iter().for_each(|t| {
+            println!(
+                "Nickname: {}\nDID: {}\nCID: {}\n",
+                t.nickname.clone().unwrap_or("".to_string()),
+                t.did,
+                t.cid
+            );
+
+            println!();
+        });
+    } else {
+        eprintln!(
+            "Failed to list-linked-devices failed due to {}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        );
+    }
+    Ok(())
+}
+
+pub async fn revoke_peers_cli(cid: &str) -> Result<()> {
+    let client = Client::new();
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/v1/tilekit/peers/revoke/{}", port, cid);
+    let res = client
+        .post(addr)
+        .header("content-type", "application/json")
+        .send()
+        .await?;
+
+    if res.status().is_success() {
+        let resp_struct = res.json::<ApiResponse<SimpleResponse>>().await?;
+        println!("{}", resp_struct.data.message)
+    } else {
+        eprintln!(
+            "Failed to revoke peer due to {}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        );
+    }
+    Ok(())
+}
+async fn process_device_linking(client: &Client, port: u32, token: &str) -> Result<()> {
+    let addr = format!(
+        "http://127.0.0.1:{}/v1/tilekit/net/link-device?token={}",
+        port, &token
+    );
+    let res = client
+        .get(addr)
+        .header("content-type", "application/json")
+        .send()
+        .await?;
+
+    if res.status().is_success() {
+        let resp_struct = res.json::<ApiResponse<SimpleResponse>>().await?;
+        println!("{}", resp_struct.data.message);
+    } else {
+        eprintln!(
+            "Failed to process device linking due to {}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        );
+    }
+    Ok(())
 }

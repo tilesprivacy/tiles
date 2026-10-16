@@ -1,4 +1,4 @@
-//! Tilekit apis related to session sync
+//! Tilekit apis related to networking
 
 use std::sync::Arc;
 
@@ -7,6 +7,7 @@ use crate::core::network::{self as core_network, create_endpoint};
 use crate::core::storage::db::get_db_conn;
 use crate::daemon::{ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port};
 use anyhow::Result;
+use axum::extract::Query;
 // use axum::extract::Path;
 use axum::{
     Router,
@@ -16,30 +17,36 @@ use axum::{
 };
 use axum_macros::debug_handler;
 use iroh::Endpoint;
+use iroh_gossip::Gossip;
 use reqwest::Client;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, Sender};
 
+pub const API_TIMEOUT: u16 = 30;
 #[derive(Debug)]
 pub struct NetworkState {
     pub is_endpoint_running: bool,
     pub main_network_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
     pub endpoint: Endpoint,
+    pub gossip: Gossip,
 }
 
 /// Events emitted as part of other tile's processes communicating with the main network
 ///
 /// For ex: A tilekit api communicating with network to stop it
 pub enum NetworkApiEvent {
-    NetworkStarted,
+    NetworkStarted((Gossip, Sender<NetworkApiEvent>)),
     // command event to stop the network
     StopNetwork,
     // confirmation event after stopping a network
     NetworkStopped,
     SyncListenerStarted,
     DirectSyncDone,
+    DeviceLinkFailed(String),
+    DeviceLinkSuccess,
+    Timeout,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -47,12 +54,16 @@ pub struct NetworkStatusResponse {
     is_network_running: bool,
 }
 
+#[derive(Deserialize)]
+pub struct DeviceLinkParams {
+    token: String,
+}
 pub fn network_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/net/start-network", post(start_network))
         .route("/v1/tilekit/net/stop-network", post(stop_network))
         .route("/v1/tilekit/net/status", get(get_network_status))
-    // TODO: We can use the same api to link device too.
+        .route("/v1/tilekit/net/link-device", get(link_device))
     // .route(
     //     "/v1/tilekit/sync/sync-with-device/{did}",
     //     get(sync_with_device),
@@ -86,39 +97,43 @@ async fn do_start_network(
         .await
         .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
-    // sender/recv for cross process communication with the tiles-network
-    let (main_network_sender, main_network_recv) = mpsc::channel::<NetworkApiEvent>(10);
-
     let (api_resp_sendx, mut api_resp_recvx) = mpsc::channel::<NetworkApiEvent>(10);
 
     let endpoint_clone = endpoint.clone();
-    let main_network_sender_clone = main_network_sender.clone();
 
     tokio::spawn(async move {
-        core_network::start_network(
-            user,
-            endpoint,
-            main_network_sender_clone,
-            main_network_recv,
-            api_resp_sendx.clone(),
-        )
-        .await?;
+        core_network::start_network(user, endpoint, api_resp_sendx.clone()).await?;
         anyhow::Result::<()>::Ok(())
     });
 
     // waiting for the confrimation from the above process that network has
     // been started
-    api_resp_recvx.recv().await;
-
-    *network_state = Some(NetworkState {
-        is_endpoint_running: true,
-        main_network_sender: main_network_sender.clone(),
-        endpoint: endpoint_clone.clone(),
-    });
-
-    Ok(ApiResponse::success(SimpleResponse {
-        message: "Started Tiles Network successfully".to_string(),
-    }))
+    if let Some(net_event) = api_resp_recvx.recv().await {
+        match net_event {
+            NetworkApiEvent::NetworkStarted((gossip, main_network_sender)) => {
+                *network_state = Some(NetworkState {
+                    is_endpoint_running: true,
+                    main_network_sender,
+                    endpoint: endpoint_clone.clone(),
+                    gossip,
+                });
+                Ok(ApiResponse::success(SimpleResponse {
+                    message: "Started Tiles Network successfully".to_string(),
+                }))
+            }
+            //TODO: These shld be AppError type
+            _ => Ok(ApiResponse::success(SimpleResponse {
+                message: "Failed to start network due to received wrong event on creating network"
+                    .to_string(),
+            })),
+        }
+    } else {
+        //TODO: These shld be AppError type
+        Ok(ApiResponse::success(SimpleResponse {
+            message: "Failed to start network due to received wrong event on creating network"
+                .to_string(),
+        }))
+    }
 }
 
 /// Stops the tiles network that is running in background
@@ -160,7 +175,54 @@ pub async fn get_network_status(
     }))
 }
 
-// CLI command functions
+#[debug_handler]
+pub async fn link_device(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<DeviceLinkParams>,
+) -> Result<impl IntoResponse, AppError> {
+    // TODO: what we need from network_state is just gossip
+    // and once linked nothing to write to the networ_state too. SO a RwLock suits best, latta..
+
+    let mut network_state = state.network_state.lock().await;
+
+    if let Some(net_state) = network_state.as_mut() {
+        let gossip_clone = net_state.gossip.clone();
+        let handle = tokio::spawn(async move {
+            core_network::initiate_device_linking(&params.token, gossip_clone).await?;
+            anyhow::Result::<()>::Ok(())
+        });
+
+        match handle.await {
+            Ok(_) => Ok(ApiResponse::success(SimpleResponse {
+                message: "Device linking successfull".to_string(),
+            })),
+            Err(err) => Err(AppError::CannotProcess(err.to_string())),
+        }
+    } else {
+        Err(AppError::CannotProcess(
+            "Failed to get the network state".to_string(),
+        ))
+    }
+
+    //     // waiting for the confrimation from the above process that network has
+    //     // been started
+    //     if let Some(net_event) = api_resp_recvx.recv().await {
+    //         match net_event {
+    //             NetworkApiEvent::Timeout => Err(AppError::RequestTimeout),
+    //             NetworkApiEvent::DeviceLinkFailed(reason) => Err(AppError::NotFound(reason)),
+    //             _ => Ok(ApiResponse::success(SimpleResponse {
+    //                 message: "Device linking successfull".to_string(),
+    //             })),
+    //         }
+    //     } else {
+    //         Err(AppError::CannotProcess(
+    //             "Failed to process the request".to_string(),
+    //         ))
+    //     }
+    // }
+}
+
+/////////////  CLI command functions
 
 pub async fn start_network_cli() {
     let client = Client::new();

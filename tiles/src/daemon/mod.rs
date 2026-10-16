@@ -74,6 +74,8 @@ pub struct AppState {
     pub remote_shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
     pub agent: AsyncMutex<Option<PiAgent>>,
     pub ui: Arc<Ui>,
+    // TODO: Instead of Mutex, might be better to use a RwLock, so for
+    // simple read it shldnt need to wait just cuz of another read
     pub network_state: AsyncMutex<Option<NetworkState>>,
 }
 

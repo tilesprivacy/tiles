@@ -113,6 +113,7 @@ pub struct User {
     pub updated_at: u64,
 }
 
+/// Token schema
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Token {
     pub id: String,
@@ -124,6 +125,36 @@ pub struct Token {
     pub updated_at: u64,
     pub aud_did: String,
     pub nickname: Option<String>,
+}
+
+impl Token {
+    /// Returns a `Token`
+    pub fn parse_ucan_delegation(token: &str) -> Result<Self> {
+        let delegation_token_bytes = data_encoding::BASE64
+            .decode(token.as_bytes())
+            .context("Delegation token is in invalid base64")?;
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(&delegation_token_bytes)
+                .context("Invalid Delegation")?;
+
+        // if delegation command list is empty, that means powerline
+        let token_type = if delegation.command().0.is_empty() {
+            TokenType::Linked
+        } else {
+            TokenType::Peer
+        };
+        Ok(Self {
+            id: Uuid::now_v7().to_string(),
+            did: delegation.issuer().to_string(),
+            token: token.to_string(),
+            cid: delegation.to_cid().to_string(),
+            r#type: token_type,
+            created_at: get_unix_time_now(),
+            updated_at: get_unix_time_now(),
+            aud_did: delegation.audience().to_string(),
+            nickname: None,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
@@ -505,9 +536,12 @@ pub async fn create_token(
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
     let user = get_current_user(&db_conn)?;
     let app_name = get_app_name();
-    let signing_key = get_signing_key(&app_name, &user.user_id)?;
+    let signing_key = get_signing_key(&app_name, &user.user_id)
+        .map_err(|e| anyhow!("Failed to process the key from keychain: {}", e))?;
     let keyexport = KeyExport::from(&signing_key.to_bytes());
-    let issuer: Ed25519Signer = Ed25519Signer::import(keyexport).await?;
+    let issuer: Ed25519Signer = Ed25519Signer::import(keyexport)
+        .await
+        .map_err(|_| anyhow!("Failed to convert the key to Ed25519"))?;
     info!("issuer did {}", issuer.ed25519_did());
     // TODO: Getting a db conn again here, cuz the await above could move a
     // db reference to another thread. Used tokio-rusqlite
@@ -538,7 +572,8 @@ async fn generate_delegation_token(
         )?)
         .command(commands)
         .try_build()
-        .await?;
+        .await
+        .map_err(|e| anyhow!("Generating delegation token failed due to {}", e))?;
 
     let delegation_token = save_token(&db_conn, delegation, nickname, token_type)?;
     Ok(delegation_token)
@@ -594,7 +629,7 @@ pub fn add_token(
         .decode(delegation_token.as_bytes())
         .context("Delegation token is in invalid base64")?;
     let delegation: Delegation<Ed25519Signature> =
-        serde_ipld_dagcbor::from_slice(&delegation_token_bytes).context("Invalid DID")?;
+        serde_ipld_dagcbor::from_slice(&delegation_token_bytes).context("Invalid Delegation")?;
 
     // if delegation command list is empty, that means powerline
     let token_type = if delegation.command().0.is_empty() {
@@ -607,6 +642,7 @@ pub fn add_token(
     Ok(token)
 }
 
+/// Fetch all the tokens that are delegated by the given `issuer_did` by the type of token as optional
 pub fn fetch_delegated_tokens(
     issuer_did: &str,
     conn: &Connection,

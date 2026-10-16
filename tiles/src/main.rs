@@ -11,6 +11,7 @@ use tiles::{
         service,
     },
     daemon::{
+        authz::{create_link_cli, join_request_cli, list_linked_devices_cli, revoke_peers_cli},
         get_or_set_daemon_port,
         net::{fetch_network_status_cli, start_network_cli, stop_network_cli},
         remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
@@ -20,8 +21,7 @@ use tiles::{
 };
 
 use crate::commands::{
-    add_link, create_link, fetch_sync_listener_status, set_inference_config_to_daemon, show_peers,
-    toggle_sync_listener, unlink_peer,
+    fetch_sync_listener_status, set_inference_config_to_daemon, toggle_sync_listener,
 };
 
 mod commands;
@@ -426,21 +426,21 @@ struct LinkArgs {
 
 #[derive(Debug, Subcommand)]
 enum LinkCommands {
-    /// Creates an authorization token for linking
-    Create {
-        peer_did: Option<String>,
-    },
+    /// Creates an authorization token for device-linking
+    Create { peer_did: Option<String> },
 
-    /// Adds the sync authorization token from peer
-    Add {
+    /// Complete the device link with the authorization token from to-be-linked device
+    Join {
         token: String,
+        nickname: Option<String>,
     },
     /// List the linked peers
-    ListPeers,
+    LinkedDevices,
 
-    // Revokes the given peer
+    // Revokes the given linked peer
     Revoke {
-        peer_did: String,
+        // CID of the peer token
+        cid: String,
     },
 }
 
@@ -619,16 +619,17 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         Some(Commands::Sync(SyncCommands::Link(link_args))) => match link_args.command {
-            LinkCommands::Revoke { peer_did } => unlink_peer(&db_conn, &peer_did)?,
-
-            LinkCommands::ListPeers => {
-                show_peers(&db_conn)?;
+            LinkCommands::Revoke { cid } => {
+                revoke_peers_cli(&cid).await?;
+            }
+            LinkCommands::LinkedDevices => {
+                list_linked_devices_cli().await?;
             }
             LinkCommands::Create { peer_did } => {
-                create_link(peer_did).await?;
+                create_link_cli(peer_did).await?;
             }
-            LinkCommands::Add { token } => {
-                add_link(token, &db_conn).await?;
+            LinkCommands::Join { token, nickname } => {
+                join_request_cli(token, nickname).await?;
             }
         },
         Some(Commands::Sync(SyncCommands::Sync { did: _ })) => {
