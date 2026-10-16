@@ -188,7 +188,7 @@ pub async fn login(handle: &str) -> Result<String> {
         let session = mem_session_store
             .get(&did_struct)
             .await?
-            .expect("Expected Session");
+            .context("No ATmosphere session was stored for this account")?;
         let session_string = serde_json::to_string(&session)?;
 
         let auth_data = AtprotoAuthData {
@@ -215,14 +215,14 @@ pub async fn login(handle: &str) -> Result<String> {
     }
 }
 
-pub fn logout(conn: &Dbconn) -> Result<String> {
-    if let Some(auth_user) = fetch_logged_in_data(&conn.common)? {
+pub fn logout(conn: &Connection) -> Result<String> {
+    if let Some(auth_user) = fetch_logged_in_data(conn)? {
         let succes_str = format!("Logged out successfully as @{}", auth_user.handle);
         let logout_user = AtprotoAuthData {
             is_logged_in: false,
             ..auth_user
         };
-        upsert_auth_data(&conn.common, &logout_user)?;
+        upsert_auth_data(conn, &logout_user)?;
         info!("{}", succes_str);
         Ok(succes_str)
     } else {
@@ -412,7 +412,7 @@ pub async fn share_session(
         let session = mem_session_store
             .get(&did_struct)
             .await?
-            .expect("Expected Session");
+            .context("No ATmosphere session was stored for this account")?;
         let session_string = serde_json::to_string(&session)?;
 
         let auth_data = AtprotoAuthData {

@@ -639,6 +639,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::Sync(SyncCommands::Remote(remote_args))) => match remote_args.command {
             RemoteCommands::Share => {
                 println!("{}", share_remote_link().await?);
+                println!("\nUse `tiles run --remote <ticket>` on the other peer");
             }
             RemoteCommands::Unshare => {
                 unshare_remote_link().await?;
@@ -658,7 +659,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 login(&handle).await?;
             }
             AtCommands::Logout => {
-                logout(&db_conn)?;
+                logout(&db_conn.common)?;
             }
         },
         Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,

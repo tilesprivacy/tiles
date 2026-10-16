@@ -349,7 +349,7 @@ pub async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
     // In release mode, we will build the endpoint using
     // tiles keypair in keychain
     let usr_data = EndpointUserData::new(&user.user_id, &user.username);
-    if cfg!(debug_assertions) {
+    if !cfg!(debug_assertions) {
         let secret_key = get_app_secret_key(&user.user_id)?;
         Endpoint::builder(presets::N0)
             .user_data_for_address_lookup(UserData::try_from(usr_data.to_string())?)

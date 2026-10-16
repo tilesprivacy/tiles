@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
+    Router,
     extract::Path,
     response::IntoResponse,
     routing::{get, post},
@@ -19,7 +19,7 @@ use crate::{
         account::local::{Capabilities, Token, fetch_linked_tokens, get_current_user},
         storage::db::get_db_conn,
     },
-    daemon::{ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port},
+    daemon::{ApiJson, ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port},
 };
 
 /// Request format for `/create-token`
@@ -56,7 +56,7 @@ pub fn authz_router() -> Router<Arc<AppState>> {
 
 #[debug_handler]
 pub async fn create_token(
-    Json(create_token_req): Json<TokenCreateRequest>,
+    ApiJson(create_token_req): ApiJson<TokenCreateRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let aud_nickname = create_token_req.aud_nickname.unwrap_or(String::from(""));
 
@@ -73,7 +73,7 @@ pub async fn create_token(
 
 #[debug_handler]
 pub async fn add_token(
-    Json(add_token_req): Json<TokenAddRequest>,
+    ApiJson(add_token_req): ApiJson<TokenAddRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let issuer_nickname = add_token_req.issuer_nickname.unwrap_or(String::from(""));
     let common_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)

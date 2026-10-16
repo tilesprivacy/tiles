@@ -5,14 +5,14 @@ use crate::{
         pi::{self, PiAgent, handle_graceful_exit},
         types::PiResponse,
     },
-    daemon::{ApiResponse, AppError, AppState},
+    daemon::{ApiJson, ApiResponse, AppError, AppState},
     repl::{get_default_modelfile, model_spec},
     utils::config::{ConfigProvider, DefaultProvider, PY_PORT},
 };
 
 // use async_stream::stream;
 use axum::{
-    Json, Router,
+    Router,
     extract::State,
     response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
@@ -122,7 +122,7 @@ async fn agent_state(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
 #[debug_handler]
 async fn process_chat_prompt(
     State(state): State<Arc<AppState>>,
-    Json(payload): Json<PromptRequest>,
+    ApiJson(payload): ApiJson<PromptRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let t_state = state.clone();
     let (tx, rx) = mpsc::channel::<SseEvent>(32);

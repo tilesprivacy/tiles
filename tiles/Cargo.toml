@@ -47,6 +47,7 @@ keyring-core = "1.0.0"
 iroh-mdns-address-lookup = "0.4.0"
 tempfile = "3"
 tower = {version = "0.5.3", features = ["timeout"]}
+tower-http = {version = "0.6.11", features = ["cors"]}
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 async-stream = "0.3.6"

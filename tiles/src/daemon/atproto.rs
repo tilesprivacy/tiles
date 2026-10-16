@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use axum::{
-    Json, Router,
+    Router,
     response::IntoResponse,
     routing::{get, post},
 };
@@ -12,11 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    core::{
-        account::atproto,
-        storage::db::{Dbconn, get_db_conn},
-    },
-    daemon::{ApiResponse, AppError, AppState},
+    core::{account::atproto, storage::db::get_db_conn},
+    daemon::{ApiJson, ApiResponse, AppError, AppState},
 };
 
 #[derive(Serialize, Deserialize)]
@@ -37,7 +34,9 @@ pub fn atproto_router() -> Router<Arc<AppState>> {
 }
 
 #[debug_handler]
-pub async fn login(Json(login_request): Json<AtLoginReq>) -> Result<impl IntoResponse, AppError> {
+pub async fn login(
+    ApiJson(login_request): ApiJson<AtLoginReq>,
+) -> Result<impl IntoResponse, AppError> {
     let resp = atproto::login(&login_request.user_handle)
         .map_err(|e| AppError::CannotProcess(e.to_string()))
         .await?;
@@ -46,16 +45,20 @@ pub async fn login(Json(login_request): Json<AtLoginReq>) -> Result<impl IntoRes
 }
 
 pub async fn logout() -> Result<impl IntoResponse, AppError> {
-    let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
-    let conn = Dbconn {
-        chat: chat_db_conn,
-        common: user_db_conn,
-    };
-    let resp = atproto::logout(&conn).map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    // core::logout errors with cli wording when nobody is signed in, so check first and answer 404
+    let signed_in = atproto::fetch_logged_in_data(&user_db_conn)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    if signed_in.is_none() {
+        return Err(AppError::NotFound(
+            "No ATmosphere account is signed in".to_owned(),
+        ));
+    }
+
+    let resp =
+        atproto::logout(&user_db_conn).map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
     Ok(ApiResponse::success(json!(resp)))
 }

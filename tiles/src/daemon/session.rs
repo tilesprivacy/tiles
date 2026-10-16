@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Json, Router,
+    Router,
     extract::{Path, State},
     response::IntoResponse,
     routing::{get, post},
@@ -24,7 +24,7 @@ use crate::{
 
 use crate::utils::config::{ConfigProvider, DefaultProvider};
 use crate::{
-    daemon::{ApiResponse, AppError, AppState, agent::get_agent_start_params},
+    daemon::{ApiJson, ApiResponse, AppError, AppState, agent::get_agent_start_params},
     utils::config::PY_PORT,
 };
 
@@ -118,19 +118,19 @@ fn do_fetch_sessions(
     chat_db_conn: Connection,
 ) -> Result<impl IntoResponse, AppError> {
     let sessions = sessionChats::fetch_sessions(&chat_db_conn, None)
-        .map_err(|e| AppError::NotFound(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     Ok(ApiResponse::success(sessions))
 }
 
 async fn save_chat(
     State(state): State<Arc<AppState>>,
-    Json(save_request): Json<SaveChatRequest>,
+    ApiJson(save_request): ApiJson<SaveChatRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     let result = do_save_chat(state, save_request, &chat_db_conn, &user_db_conn)?;
 
     Ok(ApiResponse::success(result))
@@ -142,26 +142,26 @@ fn do_save_chat(
     chat_db_conn: &Connection,
     user_db_conn: &Connection,
 ) -> Result<Chats, AppError> {
-    match sessionChats::fetch_session(chat_db_conn, &save_request.session_id) {
-        Err(err) if err.to_string().contains("Query returned no rows") => {
-            log::info!("Session doesn't exist, create it");
-            // A user prompt should create a session not an agent, as of now
-            if save_request.role == Role::User {
-                sessionChats::create_session(
-                    chat_db_conn,
-                    &save_request.session_id,
-                    &save_request.text,
-                    &save_request.user_id,
-                )
-                .map_err(|e| AppError::CannotProcess(e.to_string()))?;
-            } else {
-                return Err(AppError::NotFound("Session doesnt exist".to_owned()));
-            }
+    // checked first, so an unknown user leaves no empty session behind
+    let current_user = get_user(user_db_conn, &save_request.user_id)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("User {} not found", &save_request.user_id)))?;
+
+    let session = sessionChats::fetch_session(chat_db_conn, &save_request.session_id)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    if session.is_none() {
+        // A user prompt should create a session not an agent, as of now
+        if save_request.role != Role::User {
+            return Err(AppError::NotFound("Session doesnt exist".to_owned()));
         }
-        Err(err) => {
-            return Err(AppError::CannotProcess(err.to_string()));
-        }
-        _ => (),
+        log::info!("Session doesn't exist, create it");
+        sessionChats::create_session(
+            chat_db_conn,
+            &save_request.session_id,
+            &save_request.text,
+            &save_request.user_id,
+        )
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     }
 
     let chat_response = ChatResponse {
@@ -172,14 +172,10 @@ fn do_save_chat(
         metrics: None,
         model_used: save_request.model_used,
     };
-    let current_user = get_user(user_db_conn, &save_request.user_id).map_err(|_e| {
-        let err_msg = format!("User {} not found", &save_request.user_id);
-        AppError::NotFound(err_msg)
-    })?;
     let chat =
         sessionChats::save_chat(chat_db_conn, &current_user, chat_response).map_err(|e| {
             let err_msg = format!("Saving chat failed due to {}", e);
-            AppError::CannotProcess(err_msg)
+            AppError::InternalServerError(err_msg)
         })?;
 
     Ok(chat)
@@ -189,10 +185,14 @@ async fn fetch_chats_by_session(
     Path(session_id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    sessionChats::fetch_session(&chat_db_conn, &session_id)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        .ok_or_else(|| AppError::NotFound(format!("No session {session_id}")))?;
 
     let delta = sessionChats::fetch_chats_by_session_id(&chat_db_conn, &session_id)
-        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     Ok(ApiResponse::success(delta))
 }
@@ -322,9 +322,7 @@ mod tests {
         let db_conn = setup_db_conn_v2();
 
         let user = create_user();
-        if let Err(err) = sessionChats::fetch_session(&db_conn.chat, "ad")
-            && err.to_string().contains("Query returned no rows")
-        {
+        if let Ok(None) = sessionChats::fetch_session(&db_conn.chat, "ad") {
             println!("No session created")
         }
 
@@ -377,7 +375,11 @@ mod tests {
 
         let _res = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap();
 
-        assert!(sessionChats::fetch_session(&db_conn.chat, "id_non").is_ok());
+        assert!(
+            sessionChats::fetch_session(&db_conn.chat, "id_non")
+                .unwrap()
+                .is_some()
+        );
 
         let chats = sessionChats::fetch_chats_by_session_id(&db_conn.chat, "id_non").unwrap();
 
@@ -434,7 +436,11 @@ mod tests {
 
         let _res = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap();
 
-        assert!(sessionChats::fetch_session(&db_conn.chat, "id-1").is_ok());
+        assert!(
+            sessionChats::fetch_session(&db_conn.chat, "id-1")
+                .unwrap()
+                .is_some()
+        );
 
         let chats = sessionChats::fetch_chats_by_session_id(&db_conn.chat, "id-1").unwrap();
 
