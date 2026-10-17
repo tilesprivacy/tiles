@@ -254,7 +254,10 @@ pub async fn check_health() -> Result<()> {
 }
 
 pub async fn start_server() {
-    let _ = start_server_daemon().await;
+    match start_server_daemon().await {
+        Ok(state) => println!("{state}"),
+        Err(err) => eprintln!("{err}"),
+    }
 }
 
 pub async fn stop_server() {
