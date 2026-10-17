@@ -465,20 +465,24 @@ async fn callback(
 async fn get_model_cache_path(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<SendParams>,
-) -> Result<String, StatusCode> {
+) -> Result<String, AppError> {
     log::info!("getting model cache path");
-    let model_path = get_model_cache(&params.model_name).map_err(|_| StatusCode::NOT_FOUND)?;
-    model_path
-        .to_str()
-        .map(str::to_owned)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    let model_path = get_model_cache(&params.model_name).map_err(|e| {
+        AppError::NotFound(format!("No cached model for {}: {e}", params.model_name))
+    })?;
+    model_path.to_str().map(str::to_owned).ok_or_else(|| {
+        AppError::InternalServerError(format!(
+            "The cache path for {} is not valid UTF-8",
+            params.model_name
+        ))
+    })
 }
 
 /// Gets the contents of config.toml in json
-async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, StatusCode> {
+async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, AppError> {
     get_config_json()
         .and_then(|config| serde_json::to_string(&config).map_err(Into::into))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| AppError::InternalServerError(format!("Failed to read config.toml: {e}")))
 }
 
 async fn stop_server(port: Option<u32>) -> Result<()> {
@@ -552,7 +556,7 @@ fn get_port(port: Option<u32>) -> u32 {
 
 //TODO: handle the api responses correctly with correct msgs later..
 #[debug_handler]
-async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<String, StatusCode> {
+async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<String, AppError> {
     //TODO: Handle these network stuff in network module pleje
 
     if *state
@@ -560,15 +564,18 @@ async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<St
         .lock()
         .expect("Failed to get lock on remote_running")
     {
-        return Err(StatusCode::CONFLICT);
+        return Err(AppError::AlreadyExists(
+            "Remote inference is already being shared".to_owned(),
+        ));
     }
 
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
-        .map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let user = get_current_user(&user_db_conn).map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let endpoint = create_endpoint(&user)
-        .await
-        .map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    let user = get_current_user(&user_db_conn)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    let endpoint = create_endpoint(&user).await.map_err(|e| {
+        AppError::InternalServerError(format!("Failed to create the endpoint: {e}"))
+    })?;
     endpoint.set_alpns(vec![ALPN.to_vec()]);
     endpoint.online().await;
     let addr = endpoint.addr();

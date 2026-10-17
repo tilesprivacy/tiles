@@ -55,7 +55,7 @@ impl fmt::Display for ServerState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoadedModel {
     pub state: ModelState,
-    /// the GGUF llama-server runs, while one is loading or loaded
+    /// the GGUF file llama-server was started with, `None` when the state is `None`
     pub path: Option<String>,
 }
 
@@ -112,7 +112,7 @@ pub async fn start_server_daemon() -> Result<ServerState> {
 
     let data_dir = DefaultProvider.get_data_dir()?;
     let mut server_dir = DefaultProvider.get_lib_dir()?;
-    let pid_file = pid_file()?;
+    let pid_path = pid_file_path()?;
     server_dir = server_dir.join("server");
     let stdout_log = OpenOptions::new()
         .append(true)
@@ -141,7 +141,7 @@ pub async fn start_server_daemon() -> Result<ServerState> {
     };
     let pid = Pid::from_raw(child.id() as i32);
 
-    if std::fs::write(&pid_file, child.id().to_string()).is_err() {
+    if std::fs::write(&pid_path, child.id().to_string()).is_err() {
         stop_pid(pid).await;
         return Err(anyhow!(
             "Server start failed due to cannot write PID to file"
@@ -152,7 +152,7 @@ pub async fn start_server_daemon() -> Result<ServerState> {
     if let Err(err) = wait_until_ready(pid).await {
         // a slow one is left to finish booting, a dead one is cleaned up
         if !is_alive(pid) {
-            let _ = std::fs::remove_file(&pid_file);
+            let _ = std::fs::remove_file(&pid_path);
         }
         return Err(err);
     }
@@ -169,20 +169,21 @@ pub async fn stop_server_daemon() -> Result<ServerState> {
         if up {
             return Err(ServerError::PortInUse.into());
         }
-        let _ = std::fs::remove_file(pid_file()?);
+        let _ = std::fs::remove_file(pid_file_path()?);
         log::info!("{}", ServerState::NotRunning);
         return Ok(ServerState::NotRunning);
     };
 
     stop_pid(pid).await;
-    std::fs::remove_file(pid_file()?)
+    std::fs::remove_file(pid_file_path()?)
         .map_err(|e| anyhow!("Failed to remove the server pid file due to {}", e))?;
 
     log::info!("{}", ServerState::Stopped);
     Ok(ServerState::Stopped)
 }
 
-/// Up when the server answers. The model is `None` from a server too old to report it
+/// `Ok` when the inference server answers, along with the model it reports. The model is
+/// `None` when the server is an older version that does not report one
 pub async fn ping() -> Result<Option<LoadedModel>> {
     let url = format!("http://127.0.0.1:{}/ping", PY_PORT);
     let res = Client::new()
@@ -205,18 +206,18 @@ pub async fn ping() -> Result<Option<LoadedModel>> {
     }
 }
 
-fn pid_file() -> Result<PathBuf> {
+fn pid_file_path() -> Result<PathBuf> {
     Ok(DefaultProvider.get_config_dir()?.join("server.pid"))
 }
 
 /// The server this install started, if it is still alive
 fn own_pid() -> Result<Option<Pid>> {
-    let pid_file = pid_file()?;
-    if !pid_file.exists() {
+    let pid_path = pid_file_path()?;
+    if !pid_path.exists() {
         return Ok(None);
     }
 
-    let raw = std::fs::read_to_string(&pid_file).context("Failed to read the server pid file")?;
+    let raw = std::fs::read_to_string(&pid_path).context("Failed to read the server pid file")?;
     // 0 and negatives would make kill() signal whole process groups
     let pid = match raw.trim().parse::<i32>() {
         Ok(pid) if pid > 0 => Pid::from_raw(pid),
@@ -230,9 +231,10 @@ fn own_pid() -> Result<Option<Pid>> {
 }
 
 fn is_alive(pid: Pid) -> bool {
-    // a server the daemon spawned stays a zombie until it is killed, and a zombie
-    // still answers signal 0. for a pid that is not our child this is a no-op
+    // a crashed server the daemon started lingers as a zombie, which kill() still
+    // sees as alive. waitpid clears it, and returns at once if it is still running
     let _ = waitpid(pid, Some(WaitPidFlag::WNOHANG));
+    // signal 0 sends nothing, it only checks that the pid exists
     kill(pid, None).is_ok()
 }
 
