@@ -7,7 +7,7 @@ use crate::core::agent::types::{
 };
 use crate::core::agent::{pi, types};
 use crate::core::chats::{
-    Session, create_session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat,
+    Session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat, save_first_chat,
     update_snapshot,
 };
 use crate::core::network;
@@ -1153,27 +1153,29 @@ fn save_agent_session(
         match msg.role {
             Role::User => {
                 let input = get_pi_msg_content(msg.content);
-                let parent_chat_id = if !repl_session.session_started {
-                    create_session(
-                        &db_conn.chat,
-                        &repl_session.session_id,
-                        &repl_session.session_snapshot.name,
-                        &current_user.user_id,
-                    )?;
-                    repl_session.session_started = true;
-                    None
-                } else {
-                    repl_session.last_chat_id.clone()
-                };
                 let chat_response = ChatResponse {
                     input,
                     session_id: repl_session.session_id.clone(),
                     role: Role::User,
-                    parent_chat_id,
+                    parent_chat_id: repl_session
+                        .session_started
+                        .then(|| repl_session.last_chat_id.clone())
+                        .flatten(),
                     metrics: None,
                     model_used: repl_session.current_modelname.clone(),
                 };
-                let prompt_chat = save_chat(&db_conn.chat, current_user, chat_response)?;
+                let prompt_chat = if repl_session.session_started {
+                    save_chat(&db_conn.chat, current_user, chat_response)?
+                } else {
+                    let chat = save_first_chat(
+                        &db_conn.chat,
+                        current_user,
+                        &repl_session.session_snapshot.name,
+                        chat_response,
+                    )?;
+                    repl_session.session_started = true;
+                    chat
+                };
                 repl_session.last_chat_id = Some(prompt_chat.id);
             }
             Role::Assistant => {
