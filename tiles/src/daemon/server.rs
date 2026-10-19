@@ -27,7 +27,7 @@ pub fn server_router() -> Router<Arc<AppState>> {
 
 /// Api handler for starting inference server
 ///
-/// Answers once the server is up, with `started` or `already_running`
+/// Answers once the server is reachable, with `started` or `already_running`
 async fn start_server() -> Result<impl IntoResponse, AppError> {
     let state = start_server_daemon().map_err(to_app_error).await?;
 
@@ -45,7 +45,7 @@ async fn stop_server() -> Result<impl IntoResponse, AppError> {
 
 /// Api handler for inference server health check
 ///
-/// `model` says whether a model is loaded, and is null from an older server
+/// `model` is the server's model state, null from older servers that don't report it
 async fn ping_server() -> Result<impl IntoResponse, AppError> {
     let model = ping().map_err(to_app_error).await?;
 

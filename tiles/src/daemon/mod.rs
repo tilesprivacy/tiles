@@ -52,7 +52,9 @@ use crate::{
         storage::db::get_db_conn,
         ui::{self, Ui},
     },
-    utils::config::{ConfigProvider, DefaultProvider, get_config_json, get_model_cache},
+    utils::config::{
+        ConfigProvider, DefaultProvider, ModelCacheError, get_config_json, get_model_cache,
+    },
 };
 
 pub struct AppState {
@@ -374,7 +376,7 @@ fn listen_for_signals(state: Arc<AppState>) {
 }
 
 /// The one teardown every stop goes through. The inference server is first
-/// because it is setsid'd and outlives the rest otherwise
+/// because it runs in its own process group and outlives the rest otherwise
 pub async fn shutdown_all(state: Arc<AppState>) {
     info!("Daemon server shutting down");
     ui::begin_stop(&state.ui);
@@ -468,7 +470,12 @@ async fn get_model_cache_path(
 ) -> Result<String, AppError> {
     log::info!("getting model cache path");
     let model_path = get_model_cache(&params.model_name).map_err(|e| {
-        AppError::NotFound(format!("No cached model for {}: {e}", params.model_name))
+        let reason = format!("{}: {e}", params.model_name);
+        match e.downcast_ref::<ModelCacheError>() {
+            Some(ModelCacheError::InvalidSpec) => AppError::BadRequest(reason),
+            Some(ModelCacheError::NotCached) => AppError::NotFound(reason),
+            None => AppError::InternalServerError(reason),
+        }
     })?;
     model_path.to_str().map(str::to_owned).ok_or_else(|| {
         AppError::InternalServerError(format!(
