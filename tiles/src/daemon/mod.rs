@@ -38,10 +38,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::OpenOptions;
 use std::sync::Mutex;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    sync::RwLock as AsyncRwLock,
+};
 use tower_http::cors::CorsLayer;
 
 pub mod account;
@@ -77,7 +80,7 @@ pub struct AppState {
     pub ui: Arc<Ui>,
     // TODO: Instead of Mutex, might be better to use a RwLock, so for
     // simple read it shldnt need to wait just cuz of another read
-    pub network_state: AsyncMutex<Option<NetworkState>>,
+    pub network_state: AsyncRwLock<Option<NetworkState>>,
 }
 
 #[derive(Deserialize, Serialize)]

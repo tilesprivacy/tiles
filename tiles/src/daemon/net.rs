@@ -25,7 +25,7 @@ use serde_json::json;
 use tokio::sync::mpsc::{self, Sender};
 
 pub const API_TIMEOUT: u16 = 30;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NetworkState {
     pub is_endpoint_running: bool,
     pub main_network_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
@@ -82,14 +82,16 @@ async fn do_start_network(
     state: Arc<AppState>,
     db_conn: Connection,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut network_state = state.network_state.lock().await;
-    if let Some(net_state) = network_state.as_mut()
-        && net_state.is_endpoint_running
     {
-        log::info!("network already running");
-        return Ok(ApiResponse::success(SimpleResponse {
-            message: "Tiles Network already running".to_string(),
-        }));
+        let network_state = state.network_state.read().await;
+        if let Some(net_state) = network_state.as_ref()
+            && net_state.is_endpoint_running
+        {
+            log::info!("network already running");
+            return Ok(ApiResponse::success(SimpleResponse {
+                message: "Tiles Network already running".to_string(),
+            }));
+        }
     }
 
     let user = get_current_user(&db_conn).map_err(|e| AppError::NotFound(e.to_string()))?;
@@ -111,12 +113,14 @@ async fn do_start_network(
     if let Some(net_event) = api_resp_recvx.recv().await {
         match net_event {
             NetworkApiEvent::NetworkStarted((gossip, main_network_sender)) => {
+                let mut network_state = state.network_state.write().await;
                 *network_state = Some(NetworkState {
                     is_endpoint_running: true,
                     main_network_sender,
                     endpoint: endpoint_clone.clone(),
                     gossip,
                 });
+
                 Ok(ApiResponse::success(SimpleResponse {
                     message: "Started Tiles Network successfully".to_string(),
                 }))
@@ -139,7 +143,7 @@ async fn do_start_network(
 /// Stops the tiles network that is running in background
 #[debug_handler]
 async fn stop_network(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let mut network_state = state.network_state.lock().await;
+    let mut network_state = state.network_state.write().await;
 
     if let Some(net_state) = network_state.as_mut()
         && net_state.is_endpoint_running
@@ -163,9 +167,9 @@ async fn stop_network(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
 pub async fn get_network_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut network_state = state.network_state.lock().await;
+    let network_state = state.network_state.read().await;
 
-    let is_running = if let Some(net_state) = network_state.as_mut() {
+    let is_running = if let Some(net_state) = network_state.as_ref() {
         net_state.is_endpoint_running
     } else {
         false
@@ -180,12 +184,9 @@ pub async fn link_device(
     State(state): State<Arc<AppState>>,
     Query(params): Query<DeviceLinkParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    // TODO: what we need from network_state is just gossip
-    // and once linked nothing to write to the networ_state too. SO a RwLock suits best, latta..
+    let network_state = state.network_state.read().await;
 
-    let mut network_state = state.network_state.lock().await;
-
-    if let Some(net_state) = network_state.as_mut() {
+    if let Some(net_state) = network_state.as_ref() {
         let gossip_clone = net_state.gossip.clone();
         let handle = tokio::spawn(async move {
             core_network::initiate_device_linking(&params.token, gossip_clone).await?;
@@ -203,23 +204,6 @@ pub async fn link_device(
             "Failed to get the network state".to_string(),
         ))
     }
-
-    //     // waiting for the confrimation from the above process that network has
-    //     // been started
-    //     if let Some(net_event) = api_resp_recvx.recv().await {
-    //         match net_event {
-    //             NetworkApiEvent::Timeout => Err(AppError::RequestTimeout),
-    //             NetworkApiEvent::DeviceLinkFailed(reason) => Err(AppError::NotFound(reason)),
-    //             _ => Ok(ApiResponse::success(SimpleResponse {
-    //                 message: "Device linking successfull".to_string(),
-    //             })),
-    //         }
-    //     } else {
-    //         Err(AppError::CannotProcess(
-    //             "Failed to process the request".to_string(),
-    //         ))
-    //     }
-    // }
 }
 
 /////////////  CLI command functions
@@ -343,9 +327,9 @@ mod tests {
         assert!(
             shared_state
                 .network_state
-                .lock()
+                .read()
                 .await
-                .as_mut()
+                .clone()
                 .unwrap()
                 .is_endpoint_running
         )
@@ -367,9 +351,9 @@ mod tests {
         assert!(
             shared_state
                 .network_state
-                .lock()
+                .read()
                 .await
-                .as_mut()
+                .clone()
                 .unwrap()
                 .is_endpoint_running
         );
@@ -396,9 +380,9 @@ mod tests {
         assert!(
             !shared_state
                 .network_state
-                .lock()
+                .read()
                 .await
-                .as_mut()
+                .clone()
                 .unwrap()
                 .is_endpoint_running
         );

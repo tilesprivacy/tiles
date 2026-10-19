@@ -521,7 +521,6 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
                 NetworkApiEvent::DeviceLinkFailed(reason) => Err(anyhow!(reason)),
                 _ => Ok(()),
             }
-            // api_resp_sender.send(r.unwrap()).await?;
         }
     }
 }
