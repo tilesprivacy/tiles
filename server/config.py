@@ -125,3 +125,27 @@ def _fetch_llama_config() -> dict:
         pass
 
     return _read_llama_config_from_toml()
+
+
+# pid file the server writes for itself once it has PORT. the daemon reads it to
+# stop the server, no matter who started it. keep the path in sync with
+# `server_pid_path` in tiles/src/core/server.rs.
+def pid_path() -> Path:
+    state = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    return Path(state) / "tiles" / f"inference-{PORT}.pid"
+
+
+def write_pid_file() -> None:
+    path = pid_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(os.getpid()))
+
+
+def remove_pid_file() -> None:
+    """Delete the pid file, unless a newer server has written its own pid since."""
+    path = pid_path()
+    try:
+        if path.read_text().strip() == str(os.getpid()):
+            path.unlink()
+    except OSError:
+        pass

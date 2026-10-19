@@ -1,9 +1,18 @@
+import os
 from unittest.mock import Mock, patch
 
 import httpx
 import pytest
 
-from server.config import LLAMA_CONFIG_FIELDS, LlamaConfig, get_llama_config
+from server.config import (
+    LLAMA_CONFIG_FIELDS,
+    PORT,
+    LlamaConfig,
+    get_llama_config,
+    pid_path,
+    remove_pid_file,
+    write_pid_file,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -89,3 +98,23 @@ def test_llama_config_fields_match_rust_struct():
     assert rust_fields, "no pub fields parsed from Rust LlamaConfig"
     assert rust_fields == set(LLAMA_CONFIG_FIELDS)
     assert rust_fields == set(LlamaConfig.model_fields.keys())
+
+
+def test_pid_file_written_and_removed(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    write_pid_file()
+    path = tmp_path / "tiles" / f"inference-{PORT}.pid"
+    assert path.read_text() == str(os.getpid())
+
+    remove_pid_file()
+    assert not path.exists()
+
+
+def test_remove_pid_file_leaves_another_servers_pid(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    path = pid_path()
+    path.parent.mkdir(parents=True)
+    path.write_text("424242")
+
+    remove_pid_file()
+    assert path.read_text() == "424242"

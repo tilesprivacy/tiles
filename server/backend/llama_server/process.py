@@ -193,8 +193,10 @@ def is_server_ready(timeout: float = 2.0) -> bool:
 
 
 def model_state() -> tuple[str, str | None]:
-    """The model state /ping reports: none, loading or loaded, with its GGUF.
-    The health check is kept short so a wedged llama-server cannot stall /ping.
+    """Model state for /ping: ("none" | "loading" | "loaded", gguf path or None).
+
+    "loading" means llama-server is running but the model isn't ready yet. The
+    check uses a short timeout, so a stuck llama-server can't slow down /ping.
     """
     proc, gguf = _process, _loaded_gguf
     if proc is None or proc.poll() is not None or gguf is None:

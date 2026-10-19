@@ -25,7 +25,7 @@ app = FastAPI()
 
 @app.get("/ping")
 async def ping():
-    # the llama-server health check is a blocking call
+    # checking llama-server blocks, so run it off the event loop
     state, path = await asyncio.to_thread(runtime.backend.model_state)
     return {"model": {"state": state, "path": path}}
 
