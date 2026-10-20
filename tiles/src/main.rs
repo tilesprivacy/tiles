@@ -13,16 +13,14 @@ use tiles::{
     daemon::{
         authz::{create_link_cli, join_request_cli, list_linked_devices_cli, revoke_peers_cli},
         get_or_set_daemon_port,
-        net::{fetch_network_status_cli, start_network_cli, stop_network_cli},
+        net::{fetch_network_status_cli, start_network_cli, stop_network_cli, sync_with_peer_cli},
         remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
 };
 
-use crate::commands::{
-    fetch_sync_listener_status, set_inference_config_to_daemon, toggle_sync_listener,
-};
+use crate::commands::set_inference_config_to_daemon;
 
 mod commands;
 
@@ -160,12 +158,10 @@ enum SyncCommands {
     /// Sync chats with peers
     Sync {
         /// The DID of the peer you want to sync
-        did: Option<String>,
+        did: String,
     },
 
-    SyncToggle,
-    SyncStatus,
-    /// Remote stuff
+    /// Remote Inference
     Remote(RemoteArgs),
 }
 
@@ -632,9 +628,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 join_request_cli(token, nickname).await?;
             }
         },
-        Some(Commands::Sync(SyncCommands::Sync { did: _ })) => {
-            // sync(did, None, None).await?
-            println!("will update this")
+        Some(Commands::Sync(SyncCommands::Sync { did })) => {
+            sync_with_peer_cli(did).await?;
         }
         Some(Commands::Sync(SyncCommands::Remote(remote_args))) => match remote_args.command {
             RemoteCommands::Share => {
@@ -648,12 +643,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 println!("{}", remote_status().await?);
             }
         },
-        Some(Commands::Sync(SyncCommands::SyncToggle)) => {
-            toggle_sync_listener().await;
-        }
-        Some(Commands::Sync(SyncCommands::SyncStatus)) => {
-            fetch_sync_listener_status().await;
-        }
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
                 login(&handle).await?;

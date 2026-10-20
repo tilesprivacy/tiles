@@ -19,7 +19,10 @@ use crate::{
         account::local::{Capabilities, Token, fetch_linked_tokens, get_current_user},
         storage::db::get_db_conn,
     },
-    daemon::{ApiJson, ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port},
+    daemon::{
+        ApiJson, ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port,
+        net::DeviceLinkParams,
+    },
 };
 
 /// Request format for `/create-token`
@@ -265,8 +268,14 @@ async fn process_device_linking(client: &Client, port: u32, token: &str) -> Resu
         port, &token
     );
     let res = client
-        .get(addr)
+        .post(addr)
         .header("content-type", "application/json")
+        .body(
+            json!(DeviceLinkParams {
+                token: token.to_string(),
+            })
+            .to_string(),
+        )
         .send()
         .await?;
 

@@ -4,12 +4,11 @@ use std::io;
 
 use anyhow::{Context, Result, anyhow};
 use owo_colors::OwoColorize;
-use reqwest::Client;
 use tiles::core::account::local::{
     RootUser, create_root_account, get_root_user_details, save_root_account, set_nickname,
 };
 use tiles::core::server::{ping, start_server_daemon, stop_server_daemon};
-use tiles::daemon::{get_or_set_daemon_port, ping as ping_daemon, stop_cmd};
+use tiles::daemon::{ping as ping_daemon, stop_cmd};
 use tiles::utils::config::{
     ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
     set_user_data_path, update_inference_config,
@@ -349,33 +348,6 @@ fn get_account_not_created_msg() -> String {
     )
 }
 
-pub async fn fetch_sync_listener_status() {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!(
-        "http://127.0.0.1:{}/v1/tilekit/sync/sync-listener-status",
-        port
-    );
-    let res = client.get(addr).send().await;
-    match res {
-        Err(err) => println!("Fetching sync listener status failed due to {:?}", err),
-        Ok(response) => println!("{}", response.text().await.unwrap()),
-    }
-}
-
-pub async fn toggle_sync_listener() {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!(
-        "http://127.0.0.1:{}/v1/tilekit/sync/toggle-sync-listener",
-        port
-    );
-    let res = client.get(addr).send().await;
-    match res {
-        Err(err) => println!("toggle sync listener failed due to {:?}", err),
-        Ok(response) => println!("{}", response.text().await.unwrap()),
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;

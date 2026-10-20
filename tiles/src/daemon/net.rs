@@ -5,9 +5,10 @@ use std::sync::Arc;
 use crate::core::account::local::get_current_user;
 use crate::core::network::{self as core_network, create_endpoint};
 use crate::core::storage::db::get_db_conn;
-use crate::daemon::{ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port};
+use crate::daemon::{
+    ApiJson, ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port,
+};
 use anyhow::Result;
-use axum::extract::Query;
 // use axum::extract::Path;
 use axum::{
     Router,
@@ -46,6 +47,8 @@ pub enum NetworkApiEvent {
     DirectSyncDone,
     DeviceLinkFailed(String),
     DeviceLinkSuccess,
+    SyncFailed(String),
+    SyncSuccess,
     Timeout,
 }
 
@@ -54,20 +57,21 @@ pub struct NetworkStatusResponse {
     is_network_running: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct DeviceLinkParams {
-    token: String,
+    pub token: String,
+}
+#[derive(Serialize, Deserialize)]
+pub struct SyncParams {
+    did: String,
 }
 pub fn network_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/net/start-network", post(start_network))
         .route("/v1/tilekit/net/stop-network", post(stop_network))
         .route("/v1/tilekit/net/status", get(get_network_status))
-        .route("/v1/tilekit/net/link-device", get(link_device))
-    // .route(
-    //     "/v1/tilekit/sync/sync-with-device/{did}",
-    //     get(sync_with_device),
-    // )
+        .route("/v1/tilekit/net/link-device", post(link_device))
+        .route("/v1/tilekit/net/sync-with-device", post(sync_with_device))
 }
 
 /// Starts a p2p iroh endpoint and creates a gossip network for the device over which all the message based communication btw peers happen
@@ -182,20 +186,51 @@ pub async fn get_network_status(
 #[debug_handler]
 pub async fn link_device(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<DeviceLinkParams>,
+    ApiJson(params): ApiJson<DeviceLinkParams>,
 ) -> Result<impl IntoResponse, AppError> {
     let network_state = state.network_state.read().await;
 
     if let Some(net_state) = network_state.as_ref() {
         let gossip_clone = net_state.gossip.clone();
         let handle = tokio::spawn(async move {
-            core_network::initiate_device_linking(&params.token, gossip_clone).await?;
-            anyhow::Result::<()>::Ok(())
+            core_network::initiate_device_linking(&params.token, gossip_clone).await
         });
 
-        match handle.await {
-            Ok(_) => Ok(ApiResponse::success(SimpleResponse {
+        match handle
+            .await
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        {
+            Ok(_res) => Ok(ApiResponse::success(SimpleResponse {
                 message: "Device linking successfull".to_string(),
+            })),
+            Err(err) => Err(AppError::CannotProcess(err.to_string())),
+        }
+    } else {
+        Err(AppError::CannotProcess(
+            "Failed to get the network state".to_string(),
+        ))
+    }
+}
+
+#[debug_handler]
+pub async fn sync_with_device(
+    State(state): State<Arc<AppState>>,
+    ApiJson(params): ApiJson<SyncParams>,
+) -> Result<impl IntoResponse, AppError> {
+    let network_state = state.network_state.read().await;
+
+    if let Some(net_state) = network_state.as_ref() {
+        let gossip = net_state.gossip.clone();
+        let endpoint = net_state.endpoint.clone();
+        let handle =
+            tokio::spawn(async move { core_network::sync(&params.did, gossip, endpoint).await });
+
+        match handle
+            .await
+            .map_err(|e| AppError::InternalServerError(e.to_string()))?
+        {
+            Ok(_) => Ok(ApiResponse::success(SimpleResponse {
+                message: "syncing successfull".to_string(),
             })),
             Err(err) => Err(AppError::CannotProcess(err.to_string())),
         }
@@ -258,49 +293,31 @@ pub async fn fetch_network_status_cli() {
         }
     }
 }
-// pub async fn sync_with_device(
-//     State(state): State<Arc<AppState>>,
-//     Path(did): Path<String>,
-// ) -> Result<impl IntoResponse, AppError> {
-//     let mut network_state = state.network_state.lock().await;
 
-//     // start the endpoint if not running
-//     if let Some(sync) = network_state.as_mut()
-//         && !sync.is_endpoint_running
-//     {
-//         let (_endpoint, _main_network_sender) = start_network(state.clone())
-//             .await
-//             .map_err(|e| AppError::CannotProcess(e.to_string()))?;
-//     };
+pub async fn sync_with_peer_cli(did: String) -> Result<()> {
+    let client = Client::new();
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/v1/tilekit/net/sync-with-device", port);
+    let res = client
+        .post(addr)
+        .header("content-type", "application/json")
+        .body(json!(SyncParams { did }).to_string())
+        .send()
+        .await?;
 
-//     let (main_network_sender, sync_main_receiver) = mpsc::channel::<u8>(10);
-
-//     let (api_resp_sendx, mut api_resp_recvx) = mpsc::channel::<NetworkApiResponse>(10);
-
-//     if let Some(sync) = network_state.as_mut() {
-//         let endpoint_clone = sync.endpoint.clone();
-//         let sync_sender_clone = main_network_sender.clone();
-//         tokio::spawn(async move {
-//             core_network::sync(
-//                 None,
-//                 endpoint_clone,
-//                 sync_sender_clone,
-//                 sync_main_receiver,
-//                 api_resp_sendx.clone(),
-//             )
-//             .await?;
-//             anyhow::Result::<()>::Ok(())
-//         });
-//         api_resp_recvx.recv().await;
-
-//         let resp_str = format!("Syncing completed with {}", did);
-//         Ok(ApiResponse::success(json!(resp_str)))
-//     } else {
-//         Err(AppError::CannotProcess(
-//             "Failed to get the network_state".to_owned(),
-//         ))
-//     }
-// }
+    if res.status().is_success() {
+        let resp_struct = res.json::<ApiResponse<SimpleResponse>>().await?;
+        println!("{}", resp_struct.data.message);
+    } else {
+        eprintln!(
+            "Failed to process the sync due to {}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        )
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {

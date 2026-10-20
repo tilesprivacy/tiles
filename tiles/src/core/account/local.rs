@@ -788,14 +788,17 @@ fn save_token<S: Signature>(
     }
 }
 
-/// Create an invocation token from the delegation token
-pub async fn create_invocation_token(token_delegated: &str, conn: Connection) -> Result<String> {
+/// Create an invocation token with the delegation tokens
+pub async fn create_invocation_token(
+    tokens_delegated: Vec<&str>,
+    conn: Connection,
+) -> Result<String> {
     let user = get_current_user(&conn)?;
     let app_name = get_app_name();
     let signing_key = get_signing_key(&app_name, &user.user_id)?;
     let keyexport = KeyExport::from(&signing_key.to_bytes());
     let issuer: Ed25519Signer = Ed25519Signer::import(keyexport).await?;
-    generate_invocation_token(issuer, token_delegated).await
+    generate_invocation_token(issuer, tokens_delegated).await
 }
 
 // TODO: Later add more validations as in  expiry, signature or are theses
@@ -811,19 +814,26 @@ pub fn is_valid_delegation(token: &str) -> Result<()> {
     }
 }
 
-async fn generate_invocation_token(issuer: Ed25519Signer, token_delegated: &str) -> Result<String> {
-    let token_delegated_in_bytes = data_encoding::BASE64.decode(token_delegated.as_bytes())?;
-    let delegation: Delegation<Ed25519Signature> =
-        serde_ipld_dagcbor::from_slice(&token_delegated_in_bytes)?;
+async fn generate_invocation_token(
+    issuer: Ed25519Signer,
+    tokens_delegated: Vec<&str>,
+) -> Result<String> {
+    if tokens_delegated.is_empty() {
+        return Err(anyhow!("Atleast one delegated token was expected"));
+    };
 
-    let token_cid = delegation.to_cid();
+    let mut delegations: Vec<Delegation<Ed25519Signature>> = vec![];
+    for token in tokens_delegated {
+        let token_delegated_in_bytes = data_encoding::BASE64.decode(token.as_bytes())?;
+        delegations.push(serde_ipld_dagcbor::from_slice(&token_delegated_in_bytes)?)
+    }
 
     let invocation = InvocationBuilder::<Ed25519Signature>::new()
         .issuer(issuer)
-        .audience(delegation.issuer())
-        .subject(delegation.issuer())
+        .audience(delegations[0].issuer())
+        .subject(delegations[0].issuer())
         .command(vec![])
-        .proofs(vec![token_cid])
+        .proofs(delegations.iter().map(|d| d.to_cid()).collect())
         .try_build()
         .await?;
 
@@ -1676,9 +1686,10 @@ pub mod tests {
         let _delegation: Delegation<Ed25519Signature> =
             serde_ipld_dagcbor::from_slice(&token_delegated_in_bytes).unwrap();
 
-        let invocation_token = generate_invocation_token(audience_signer, &token_delegated.token)
-            .await
-            .unwrap();
+        let invocation_token =
+            generate_invocation_token(audience_signer, vec![&token_delegated.token])
+                .await
+                .unwrap();
 
         let invocation_token_bytes = data_encoding::BASE64
             .decode(invocation_token.as_bytes())
