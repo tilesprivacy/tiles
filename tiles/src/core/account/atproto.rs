@@ -30,7 +30,7 @@ use std::error::Error;
 use hickory_resolver::TokioResolver;
 
 use crate::{
-    core::storage::db::{Dbconn, get_db_conn},
+    core::storage::db::get_db_conn,
     daemon::start_internal_server,
     utils::{crypto::encrypt_to_base64, get_unix_time_now, lexicons::SessionSnapshotRecord},
 };
@@ -112,21 +112,42 @@ impl DnsTxtResolver for HickoryDnsTxtResolver {
     }
 }
 
-pub async fn login(handle: &str) -> Result<String> {
-    let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
-    let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)?;
-    let conn = Dbconn {
-        chat: chat_db_conn,
-        common: user_db_conn,
-    };
+/// How long a sign in waits for the browser to come back
+pub const LOGIN_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
-    let (client, mem_session_store) = create_oauth_client()?;
+/// The ATmosphere account a sign in ended up with
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AtprotoAccount {
+    pub handle: String,
+    pub did: String,
+}
 
-    println!("Processing, will be redirected to auth page");
+/// The handle did not resolve to an account
+#[derive(Debug)]
+pub struct HandleNotFound(pub String);
 
-    let did = resolve_handle_to_did(handle)
-        .await
-        .inspect_err(|_| eprintln!("Failed to resolve handle"))?;
+impl std::fmt::Display for HandleNotFound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "No ATmosphere account for {}", self.0)
+    }
+}
+
+impl Error for HandleNotFound {}
+
+/// A sign in that has its authorize url and is waiting for the browser
+pub struct PendingLogin {
+    pub url: String,
+    handle: String,
+    did: String,
+    client: TOAuthClient,
+    sessions: MemorySessionStore,
+}
+
+/// Starts a sign in: resolves the handle and makes the url to authorize at.
+/// Nothing listens for the browser until `PendingLogin::finish`.
+pub async fn begin_login(handle: &str) -> Result<PendingLogin> {
+    let (client, sessions) = create_oauth_client()?;
+    let did = resolve_handle_to_did(handle).await?;
 
     let url = client
         .authorize(
@@ -140,13 +161,78 @@ pub async fn login(handle: &str) -> Result<String> {
             },
         )
         .await
-        .inspect_err(|_| eprintln!("Failed to generate authorization url"))?;
+        .context("Failed to generate the authorization url")?;
 
-    println!(
-        "\nIf the browser doesn't open automatically, open this URL:\n\n{}\n",
-        url
-    );
+    Ok(PendingLogin {
+        url,
+        handle: handle.to_owned(),
+        did,
+        client,
+        sessions,
+    })
+}
 
+impl PendingLogin {
+    /// Waits for the browser on the callback port, then saves the session.
+    /// Dropping the future stops listening and frees the port.
+    pub async fn finish(self, timeout: Duration) -> Result<AtprotoAccount> {
+        let (callback_tx, callback_rx) = oneshot::channel();
+        let params = tokio::time::timeout(timeout, async {
+            start_internal_server(Some(LOGIN_PORT), callback_tx).await?;
+            Ok::<_, anyhow::Error>(callback_rx.await?)
+        })
+        .await
+        .map_err(|_| anyhow!("The sign in timed out"))??;
+        // the params carry the authorization code, so they stay out of the log
+        info!("Sign in callback received");
+
+        let Some(code) = params.code else {
+            return Err(anyhow!(
+                "Error authorizing due to {}",
+                params
+                    .error_description
+                    .unwrap_or("unknown reason".to_owned())
+            ));
+        };
+
+        self.client
+            .callback(CallbackParams {
+                code,
+                state: params.state,
+                iss: params.iss,
+            })
+            .await?;
+
+        let did_struct =
+            Did::new(self.did.clone()).map_err(|_e| anyhow!("Failed to convert to Did"))?;
+        let session = self
+            .sessions
+            .get(&did_struct)
+            .await?
+            .context("No ATmosphere session was stored for this account")?;
+
+        let auth_data = AtprotoAuthData {
+            key: self.did.clone(),
+            session: serde_json::to_string(&session)?,
+            state: "".to_owned(),
+            is_logged_in: true,
+            created_at: get_unix_time_now(),
+            updated_at: get_unix_time_now(),
+            handle: self.handle.clone(),
+        };
+        let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
+        upsert_auth_data(&user_db_conn, &auth_data)?;
+        info!("Logged in successfully as @{}", self.handle);
+
+        Ok(AtprotoAccount {
+            handle: self.handle,
+            did: self.did,
+        })
+    }
+}
+
+/// Opens `url` in the default browser, where the platform has a way to
+pub fn open_in_browser(url: &str) {
     let program_name = cfg_select! {
         target_os = "macos" => {
             "open"
@@ -162,56 +248,11 @@ pub async fn login(handle: &str) -> Result<String> {
     // adding this override due to  clippy not playing good w macro above
     #[allow(clippy::const_is_empty)]
     if !program_name.is_empty()
-        && let Ok(mut child) = Command::new(program_name).arg(&url).spawn()
+        && let Ok(mut child) = Command::new(program_name).arg(url).spawn()
     {
         tokio::spawn(async move {
             let _ = child.wait().await;
         });
-    }
-
-    let (callback_tx, callback_rx) = oneshot::channel();
-
-    start_internal_server(Some(LOGIN_PORT), callback_tx).await?;
-    let params = callback_rx.await?;
-    info!("params recieved {:?}", params);
-
-    if let Some(code) = params.code {
-        let cb_params = CallbackParams {
-            code,
-            state: params.state,
-            iss: params.iss,
-        };
-        let (_auth_session, _) = client.callback(cb_params).await?;
-
-        let did_struct = Did::new(did.clone()).map_err(|_e| anyhow!("Failed to convert to Did"))?;
-
-        let session = mem_session_store
-            .get(&did_struct)
-            .await?
-            .context("No ATmosphere session was stored for this account")?;
-        let session_string = serde_json::to_string(&session)?;
-
-        let auth_data = AtprotoAuthData {
-            key: did.clone(),
-            session: session_string,
-            state: "".to_owned(),
-            is_logged_in: true,
-            created_at: get_unix_time_now(),
-            updated_at: get_unix_time_now(),
-            handle: handle.to_owned(),
-        };
-
-        upsert_auth_data(&conn.common, &auth_data)?;
-        let success_str = format!("Logged in successfully as @{}\n", handle);
-        info!("Logged in successfully as @{}\n", handle);
-        Ok(success_str)
-    } else {
-        Err(anyhow!(
-            "Error authorizing due to {}",
-            params
-                .error_description
-                .unwrap_or("unknow reason".to_owned())
-        ))
     }
 }
 
@@ -250,6 +291,7 @@ async fn resolve_handle_to_did(handle: &str) -> Result<String> {
             let resolve_data = res.json::<HandleResolve>().await?;
             Ok(resolve_data.did)
         }
+        Ok(res) if res.status() == 400 => Err(HandleNotFound(handle.to_owned()).into()),
         Ok(res) => Err(anyhow!("Api failed with status {}", res.status())),
     }
 }

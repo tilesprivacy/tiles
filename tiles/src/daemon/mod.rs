@@ -70,6 +70,8 @@ pub struct AppState {
     /// The model the running agent was started with. Kept outside the agent lock, so
     /// saving a chat never waits behind a streaming reply
     pub agent_model: Mutex<Option<String>>,
+    /// The ATmosphere sign in waiting for the browser, if any
+    pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
 }
 
@@ -85,6 +87,7 @@ impl AppState {
             remote_running: Mutex::new(false),
             agent: None.into(),
             agent_model: Mutex::new(None),
+            login: None.into(),
             ui: Ui::new(),
         }
     }
@@ -312,6 +315,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         remote_running: Mutex::new(false),
         agent: None.into(),
         agent_model: Mutex::new(None),
+        login: None.into(),
         ui: ui.clone(),
     };
 
@@ -430,7 +434,8 @@ pub async fn start_internal_server(
 }
 
 async fn shutdown_signal(rx: Receiver<bool>) {
-    rx.await.expect("shutdown receiver paniced");
+    // a dropped sender means the sign in was cancelled or timed out, which is a stop too
+    let _ = rx.await;
 }
 
 async fn watch_shutdown(mut rx: watch::Receiver<bool>) {
