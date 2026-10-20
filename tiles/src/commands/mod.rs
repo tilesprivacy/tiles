@@ -5,12 +5,9 @@ use std::io;
 use anyhow::{Context, Result, anyhow};
 use owo_colors::OwoColorize;
 use tiles::core::account::local::{
-    RootUser, add_token, create_root_account, create_token, get_peer_list, get_root_user_details,
-    is_valid_delegation, save_root_account, set_nickname, unlink,
+    RootUser, create_root_account, get_root_user_details, save_root_account, set_nickname,
 };
-use tiles::core::network::link;
 use tiles::core::server::{ping, start_server_daemon, stop_server_daemon};
-use tiles::core::storage::db::Dbconn;
 use tiles::daemon::{ping as ping_daemon, stop_cmd};
 use tiles::utils::config::{
     ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
@@ -354,52 +351,6 @@ fn get_account_not_created_msg() -> String {
     )
 }
 
-pub fn show_peers(db_conn: &Dbconn) -> Result<()> {
-    let peers = get_peer_list(&db_conn.common)?;
-
-    println!("DID\tNickname\n");
-    for peer in peers {
-        println!("{}\t{}", peer.user_id, peer.username)
-    }
-    Ok(())
-}
-
-pub fn unlink_peer(db_conn: &Dbconn, user_id: &str) -> Result<()> {
-    if let Err(err) = unlink(&db_conn.common, user_id) {
-        println!("{:?}", err)
-    } else {
-        println!("Succesfully disabled the peer")
-    }
-    Ok(())
-}
-
-pub async fn create_link(aud_did: Option<String>, db_conn: &Dbconn) -> Result<()> {
-    if let Some(audience_did) = aud_did {
-        // aud_did is there, so definitely trying online syncing
-        let token = create_token(&audience_did, db_conn).await?;
-        println!(
-            "\nHere's the UCAN token:\n\n{}\n\nPlease share this with {} out-of-band",
-            token, audience_did
-        );
-    } else {
-        // will do a syncronized linking over offline network
-        link(None).await?;
-    }
-    Ok(())
-}
-
-pub async fn add_link(token: String, db_conn: &Dbconn) -> Result<()> {
-    // 8 letter hex-code is used for offline link
-    if token.len() == 8 {
-        link(Some(token)).await?;
-    } else if is_valid_delegation(&token).is_ok() {
-        let token = add_token(&token, db_conn)?;
-        println!("Added the token from DID={}", token.did);
-    } else {
-        eprintln!("Invalid token")
-    }
-    Ok(())
-}
 #[cfg(test)]
 mod tests {
     use super::*;

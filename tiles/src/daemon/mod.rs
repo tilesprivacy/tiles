@@ -4,15 +4,20 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
 use crate::{
     core::agent::pi::PiAgent,
     daemon::{
-        account::account_router, agent::agent_router, atproto::atproto_router,
-        server::server_router, session::session_router,
+        account::account_router,
+        agent::agent_router,
+        atproto::atproto_router,
+        authz::authz_router,
+        net::{NetworkState, network_router, start_network_cli},
+        server::server_router,
+        session::session_router,
     },
 };
 use anyhow::{Result, anyhow};
@@ -29,21 +34,27 @@ use log::info;
 use nix::unistd::setsid;
 use reqwest::Client;
 use semver::Version;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::OpenOptions;
 use std::sync::Mutex;
-use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
+use tokio::{
+    signal::unix::{SignalKind, signal},
+    sync::RwLock as AsyncRwLock,
+};
 use tower_http::cors::CorsLayer;
 
 pub mod account;
 pub mod agent;
 pub mod atproto;
+pub mod authz;
+pub mod net;
 pub mod server;
 pub mod session;
+
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
@@ -57,6 +68,7 @@ use crate::{
     },
 };
 
+#[derive(Debug)]
 pub struct AppState {
     /// A watch rather than a one-shot: quit, `tiles daemon stop` and a SIGTERM
     /// from launchd all land here, and a one-shot panics on the second of them
@@ -71,8 +83,15 @@ pub struct AppState {
     /// saving a chat never waits behind a streaming reply
     pub agent_model: Mutex<Option<String>>,
     pub ui: Arc<Ui>,
+    // TODO: Instead of Mutex, might be better to use a RwLock, so for
+    // simple read it shldnt need to wait just cuz of another read
+    pub network_state: AsyncRwLock<Option<NetworkState>>,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct SimpleResponse {
+    pub message: String,
+}
 #[cfg(test)]
 impl AppState {
     /// the routes under test never shut anything down, so the handles are inert
@@ -86,6 +105,7 @@ impl AppState {
             agent: None.into(),
             agent_model: Mutex::new(None),
             ui: Ui::new(),
+            network_state: None.into(),
         }
     }
 }
@@ -138,7 +158,7 @@ impl From<JsonRejection> for AppError {
 #[from_request(via(Json), rejection(AppError))]
 pub struct ApiJson<T>(pub T);
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, Deserialize)]
 pub struct ApiResponse<T> {
     status: String,
     data: T,
@@ -183,10 +203,22 @@ pub struct RemoteStatus {
 }
 const ALPN: &[u8] = b"remote-link/v1";
 
-//TODO: Add a different PORT for development
-// We should update that in py server too for the daemon api calls
-const DEFAULT_PORT: u32 = 1729;
+const DEFAULT_DAEMON_PORT: u32 = 1729;
 
+static DAEMON_PORT: OnceLock<u32> = OnceLock::new();
+
+pub fn get_or_set_daemon_port() -> &'static u32 {
+    DAEMON_PORT.get_or_init(|| {
+        if cfg!(debug_assertions) {
+            std::env::var("TILES_DAEMON_DEV_PORT")
+                .ok()
+                .and_then(|val| val.parse().ok())
+                .unwrap_or(DEFAULT_DAEMON_PORT)
+        } else {
+            DEFAULT_DAEMON_PORT
+        }
+    })
+}
 /// the inference server is the slowest thing in a shutdown, and the only one
 /// that can hang it
 const INFERENCE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -313,6 +345,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         agent: None.into(),
         agent_model: Mutex::new(None),
         ui: ui.clone(),
+        network_state: None.into(),
     };
 
     let shared_state = Arc::new(state);
@@ -335,6 +368,8 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         .merge(account_router())
         .merge(session_router())
         .merge(atproto_router())
+        .merge(authz_router())
+        .merge(network_router())
         .fallback(no_route)
         .method_not_allowed_fallback(wrong_method)
         // .layer(service)
@@ -345,6 +380,10 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     info!("Daemon server started at {}", dyn_port);
+
+    tokio::spawn(async move {
+        start_network_cli().await;
+    });
 
     if with_ui {
         ui::start(ui);
@@ -562,7 +601,7 @@ fn get_port(port: Option<u32>) -> u32 {
     if let Some(port_number) = port {
         port_number
     } else {
-        DEFAULT_PORT
+        *get_or_set_daemon_port()
     }
 }
 
@@ -664,7 +703,8 @@ async fn show_remote_status(State(state): State<Arc<AppState>>) -> Result<String
 
 pub async fn share_remote_link() -> Result<String> {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-share";
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/remote-share", port);
     let res = client.get(addr).send().await;
     match res {
         Err(err) => Err(anyhow!("Daemon remote share failed due to {:?}", err)),
@@ -682,7 +722,8 @@ pub async fn share_remote_link() -> Result<String> {
 
 pub async fn unshare_remote_link() -> Result<()> {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-unshare";
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/remote-unshare", port);
     let res = client.get(addr).send().await;
 
     match res {
@@ -693,7 +734,8 @@ pub async fn unshare_remote_link() -> Result<()> {
 
 pub async fn remote_status() -> Result<String> {
     let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-status";
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/remote-status", port);
     let res = client.get(addr).send().await;
 
     match res {
@@ -723,7 +765,8 @@ async fn connect_remote_inference(
 
 pub async fn connect_remote(ticket: &str) -> Result<()> {
     let client = Client::new();
-    let addr = format!("http://127.0.0.1:1729/connect-remote?ticket={}", ticket);
+    let port = *get_or_set_daemon_port();
+    let addr = format!("http://127.0.0.1:{}/connect-remote?ticket={}", port, ticket);
     let res = client.get(addr).send().await;
 
     match res {

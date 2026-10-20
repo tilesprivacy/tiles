@@ -1,26 +1,26 @@
 // #![warn(clippy::pedantic)]
 
-use std::error::Error;
+use std::{env, error::Error};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use tiles::{
     core::{
         self,
         account::atproto::{login, logout},
-        network::sync,
         plugin::{self, install, uninstall},
         service,
     },
     daemon::{
+        authz::{create_link_cli, join_request_cli, list_linked_devices_cli, revoke_peers_cli},
+        get_or_set_daemon_port,
+        net::{fetch_network_status_cli, start_network_cli, stop_network_cli, sync_with_peer_cli},
         remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
 };
 
-use crate::commands::{
-    add_link, create_link, set_inference_config_to_daemon, show_peers, unlink_peer,
-};
+use crate::commands::set_inference_config_to_daemon;
 
 mod commands;
 
@@ -57,7 +57,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    account   Manage your user account\n",
     "    at        ATProto-related commands\n",
     "    data      Configure your data and storage\n\n",
-    "  Sync\n",
+    "  Collaboration\n",
     "    link      Link devices via peer-to-peer\n",
     "    sync      Sync chats with peers\n",
     "    remote    Remote inference commands\n\n",
@@ -67,7 +67,8 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
     "    daemon    Configure daemon behavior\n",
-    "    service   Run Tiles in the background from login\n\n",
+    "    service   Run Tiles in the background from login\n",
+    "    network   Configure Tiles network\n\n",
     "  Tools\n",
     "    plugin    Manage plugins such as skills, extensions etc\n\n",
     "Options:\n",
@@ -157,10 +158,10 @@ enum SyncCommands {
     /// Sync chats with peers
     Sync {
         /// The DID of the peer you want to sync
-        did: Option<String>,
+        did: String,
     },
 
-    /// Remote stuff
+    /// Remote Inference
     Remote(RemoteArgs),
 }
 
@@ -180,6 +181,9 @@ enum SystemCommands {
 
     /// Run Tiles in the background from login
     Service(ServiceArgs),
+
+    /// Configure Tiles networking
+    Network(NetworkArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -362,6 +366,26 @@ enum ServiceCommands {
     Stop,
 }
 
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct NetworkArgs {
+    #[command(subcommand)]
+    command: NetworkCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworkCommands {
+    /// Start Tiles network
+    Start,
+
+    /// Get Tiles network status
+    Status,
+
+    /// Start Tiles network
+    Stop,
+}
+
 #[derive(Debug, Subcommand)]
 enum ToolsCommandsGroup {
     /// Manage Plugins
@@ -398,21 +422,21 @@ struct LinkArgs {
 
 #[derive(Debug, Subcommand)]
 enum LinkCommands {
-    /// Creates an authorization token for linking
-    Create {
-        peer_did: Option<String>,
-    },
+    /// Creates an authorization token for device-linking
+    Create { peer_did: Option<String> },
 
-    /// Adds the sync authorization token from peer
-    Add {
+    /// Complete the device link with the authorization token from to-be-linked device
+    Join {
         token: String,
+        nickname: Option<String>,
     },
     /// List the linked peers
-    ListPeers,
+    LinkedDevices,
 
-    // Revokes the given peer
+    // Revokes the given linked peer
     Revoke {
-        peer_did: String,
+        // CID of the peer token
+        cid: String,
     },
 }
 
@@ -450,6 +474,7 @@ enum AtCommands {
     #[command(about = "Log out of your Atproto account.")]
     Logout,
 }
+
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
@@ -460,6 +485,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    let daemon_port = get_or_set_daemon_port();
+    log::info!("DAEMON PORT: {}", daemon_port);
     let db_conn = core::init()?;
 
     match cli.command {
@@ -588,19 +615,22 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         Some(Commands::Sync(SyncCommands::Link(link_args))) => match link_args.command {
-            LinkCommands::Revoke { peer_did } => unlink_peer(&db_conn, &peer_did)?,
-
-            LinkCommands::ListPeers => {
-                show_peers(&db_conn)?;
+            LinkCommands::Revoke { cid } => {
+                revoke_peers_cli(&cid).await?;
+            }
+            LinkCommands::LinkedDevices => {
+                list_linked_devices_cli().await?;
             }
             LinkCommands::Create { peer_did } => {
-                create_link(peer_did, &db_conn).await?;
+                create_link_cli(peer_did).await?;
             }
-            LinkCommands::Add { token } => {
-                add_link(token, &db_conn).await?;
+            LinkCommands::Join { token, nickname } => {
+                join_request_cli(token, nickname).await?;
             }
         },
-        Some(Commands::Sync(SyncCommands::Sync { did })) => sync(did).await?,
+        Some(Commands::Sync(SyncCommands::Sync { did })) => {
+            sync_with_peer_cli(did).await?;
+        }
         Some(Commands::Sync(SyncCommands::Remote(remote_args))) => match remote_args.command {
             RemoteCommands::Share => {
                 println!("{}", share_remote_link().await?);
@@ -622,6 +652,19 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,
+        Some(Commands::System(SystemCommands::Network(network_args))) => {
+            match network_args.command {
+                NetworkCommands::Start => {
+                    start_network_cli().await;
+                }
+                NetworkCommands::Stop => {
+                    stop_network_cli().await;
+                }
+                NetworkCommands::Status => {
+                    fetch_network_status_cli().await;
+                }
+            }
+        }
     }
     Ok(())
 }
