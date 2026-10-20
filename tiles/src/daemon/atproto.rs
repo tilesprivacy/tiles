@@ -96,9 +96,11 @@ pub async fn login(
     });
     drop(current);
 
-    // closing the stream cancels the sign in
+    // closing the stream cancels the sign in. the guard is made here, not inside the
+    // stream, which runs nothing until it is polled and would miss a drop before that
+    let cancel_on_close = cancel.drop_guard();
     let stream = async_stream::stream! {
-        let _cancel_on_close = cancel.drop_guard();
+        let _cancel_on_close = cancel_on_close;
         let mut events = ReceiverStream::new(rx);
         while let Some(event) = events.next().await {
             yield Ok::<_, Infallible>(event);
