@@ -14,7 +14,7 @@ use tilekit::modelfile::Role;
 
 use crate::{
     core::{
-        account::local::get_user,
+        account::local::get_current_user,
         agent::pi::{self, PiAgent},
         chats::{self as sessionChats, Chats},
         storage::db::get_db_conn,
@@ -33,14 +33,14 @@ struct Session {
     id: String,
 }
 
+// the account and the model come from the daemon, so clients that still send
+// `user_id` or `model_used` have them ignored
 #[derive(Deserialize)]
 struct SaveChatRequest {
     text: String,
     session_id: String,
     role: Role,
     parent_chat_id: Option<String>,
-    user_id: String,
-    model_used: String,
 }
 
 // factory type for Pi::new() fn, so that we can write some test
@@ -91,6 +91,10 @@ async fn do_create_session(
         let pi_agent = create_agent_fn(&modelname, &system_prompt, PY_PORT)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         *agent = Some(pi_agent);
+        *state
+            .agent_model
+            .lock()
+            .expect("Failed to get agent_model lock") = Some(modelname);
         let agent = agent.as_mut().ok_or(AppError::InternalServerError(
             "No agent instance available, start one first".to_string(),
         ))?;
@@ -137,48 +141,56 @@ async fn save_chat(
 }
 
 fn do_save_chat(
-    _state: Arc<AppState>,
+    state: Arc<AppState>,
     save_request: SaveChatRequest,
     chat_db_conn: &Connection,
     user_db_conn: &Connection,
 ) -> Result<Chats, AppError> {
-    // checked first, so an unknown user leaves no empty session behind
-    let current_user = get_user(user_db_conn, &save_request.user_id)
-        .map_err(|e| AppError::InternalServerError(e.to_string()))?
-        .ok_or_else(|| AppError::NotFound(format!("User {} not found", &save_request.user_id)))?;
+    let current_user =
+        get_current_user(user_db_conn).map_err(|e| match e.downcast_ref::<rusqlite::Error>() {
+            Some(rusqlite::Error::QueryReturnedNoRows) => {
+                AppError::NotFound("No local account, create one first".to_owned())
+            }
+            _ => AppError::InternalServerError(e.to_string()),
+        })?;
 
     let session = sessionChats::fetch_session(chat_db_conn, &save_request.session_id)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-    if session.is_none() {
-        // A user prompt should create a session not an agent, as of now
-        if save_request.role != Role::User {
-            return Err(AppError::NotFound("Session doesnt exist".to_owned()));
-        }
-        log::info!("Session doesn't exist, create it");
-        sessionChats::create_session(
-            chat_db_conn,
-            &save_request.session_id,
-            &save_request.text,
-            &save_request.user_id,
-        )
-        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    // only a user's message can start a session
+    if session.is_none() && save_request.role != Role::User {
+        return Err(AppError::NotFound("Session doesnt exist".to_owned()));
     }
 
+    let session_name = save_request.text.clone();
     let chat_response = ChatResponse {
         input: save_request.text,
         session_id: save_request.session_id,
         role: save_request.role,
         parent_chat_id: save_request.parent_chat_id,
         metrics: None,
-        model_used: save_request.model_used,
+        model_used: agent_model(&state)?,
     };
-    let chat =
-        sessionChats::save_chat(chat_db_conn, &current_user, chat_response).map_err(|e| {
-            let err_msg = format!("Saving chat failed due to {}", e);
-            AppError::InternalServerError(err_msg)
-        })?;
+    let saved = if session.is_none() {
+        log::info!("Session doesn't exist, create it");
+        sessionChats::save_first_chat(chat_db_conn, &current_user, &session_name, chat_response)
+    } else {
+        sessionChats::save_chat(chat_db_conn, &current_user, chat_response)
+    };
 
-    Ok(chat)
+    saved.map_err(|e| AppError::InternalServerError(format!("Saving chat failed due to {}", e)))
+}
+
+/// The model the agent runs, or the one it will start with when it isn't running yet
+fn agent_model(state: &AppState) -> Result<String, AppError> {
+    let running = state
+        .agent_model
+        .lock()
+        .expect("Failed to get agent_model lock")
+        .clone();
+    match running {
+        Some(model) => Ok(model),
+        None => get_agent_start_params(DefaultProvider).map(|(model, _)| model),
+    }
 }
 
 async fn fetch_chats_by_session(
@@ -215,6 +227,7 @@ mod tests {
     use std::{
         fs::{self, File},
         io::Write,
+        sync::Mutex,
     };
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
@@ -359,6 +372,7 @@ mod tests {
 
         let state = AppState {
             agent: AsyncMutex::new(None),
+            agent_model: Mutex::new(Some("ada".to_owned())),
             ..AppState::for_tests()
         };
 
@@ -369,8 +383,6 @@ mod tests {
             session_id: "id_non".to_owned(),
             role: Role::User,
             parent_chat_id: None,
-            user_id: user.user_id.clone(),
-            model_used: "ada".to_owned(),
         };
 
         let _res = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap();
@@ -385,16 +397,46 @@ mod tests {
 
         assert_eq!(chats.chats.len(), 1);
         assert_eq!(chats.sessions.len(), 1);
+        let chat = serde_json::to_value(&chats.chats[0]).unwrap();
+        assert_eq!(chat["user_id"], user.user_id);
+        assert_eq!(chat["model_name"], "ada");
+    }
+
+    #[test]
+    fn test_save_chat_api_without_an_account() {
+        let db_conn = setup_db_conn_v2();
+
+        let state = AppState {
+            agent: AsyncMutex::new(None),
+            agent_model: Mutex::new(Some("ada".to_owned())),
+            ..AppState::for_tests()
+        };
+
+        let save_req = SaveChatRequest {
+            text: "capital of India".to_string(),
+            session_id: "id_non".to_owned(),
+            role: Role::User,
+            parent_chat_id: None,
+        };
+
+        let err = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)));
+        assert!(
+            sessionChats::fetch_session(&db_conn.chat, "id_non")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn test_save_chat_api_as_non_user_role_session_doesnt_exist() {
         let db_conn = setup_db_conn_v2();
 
-        let user = create_dummy_user(&db_conn.common, Some("did:key:xyz".to_owned()));
+        create_dummy_user(&db_conn.common, Some("did:key:xyz".to_owned()));
 
         let state = AppState {
             agent: AsyncMutex::new(None),
+            agent_model: Mutex::new(Some("ada".to_owned())),
             ..AppState::for_tests()
         };
 
@@ -405,8 +447,6 @@ mod tests {
             session_id: "id_non".to_owned(),
             role: Role::Assistant,
             parent_chat_id: None,
-            user_id: user.user_id.clone(),
-            model_used: "ada".to_owned(),
         };
 
         assert!(do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).is_err())
@@ -422,6 +462,7 @@ mod tests {
 
         let state = AppState {
             agent: AsyncMutex::new(None),
+            agent_model: Mutex::new(Some("ada".to_owned())),
             ..AppState::for_tests()
         };
 
@@ -430,8 +471,6 @@ mod tests {
             session_id: "id-1".to_owned(),
             role: Role::User,
             parent_chat_id: None,
-            user_id: user.user_id.clone(),
-            model_used: "ada".to_owned(),
         };
 
         let _res = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap();

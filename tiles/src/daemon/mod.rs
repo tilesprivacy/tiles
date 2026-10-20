@@ -67,6 +67,9 @@ pub struct AppState {
     pub remote_running: Mutex<bool>,
     pub remote_shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
     pub agent: AsyncMutex<Option<PiAgent>>,
+    /// The model the running agent was started with. Kept outside the agent lock, so
+    /// saving a chat never waits behind a streaming reply
+    pub agent_model: Mutex<Option<String>>,
     pub ui: Arc<Ui>,
 }
 
@@ -81,6 +84,7 @@ impl AppState {
             remote_shutdown_sender: Mutex::new(None),
             remote_running: Mutex::new(false),
             agent: None.into(),
+            agent_model: Mutex::new(None),
             ui: Ui::new(),
         }
     }
@@ -307,6 +311,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         remote_shutdown_sender: Mutex::new(None),
         remote_running: Mutex::new(false),
         agent: None.into(),
+        agent_model: Mutex::new(None),
         ui: ui.clone(),
     };
 
