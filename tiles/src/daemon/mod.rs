@@ -539,21 +539,13 @@ async fn stop_server_and_wait(port: Option<u32>) -> Result<()> {
     let dyn_port = get_port(port);
     let client = Client::new();
     let addr = format!("http://127.0.0.1:{}/shutdown", dyn_port);
-    let mut res = client
+    client
         .post(&addr)
         .header(CONTENT_TYPE, "application/json")
         .send()
         .await
-        .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?;
-    // daemons up to 0.4.19 only stop on a GET, and an upgrade has to stop the old one
-    if res.status() == StatusCode::METHOD_NOT_ALLOWED {
-        res = client
-            .get(&addr)
-            .send()
-            .await
-            .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?;
-    }
-    res.error_for_status()
+        .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?
+        .error_for_status()
         .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?;
 
     let addr = format!("http://127.0.0.1:{dyn_port}");
@@ -864,29 +856,6 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Timed out"));
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn stop_falls_back_to_get_for_an_older_daemon() -> Result<()> {
-        // older daemons only stop on a GET, the upgrade path still has to stop them
-        let stop = Arc::new(tokio::sync::Notify::new());
-        let notify = stop.clone();
-        let app = Router::new()
-            .route("/", get(|| async { "0.4.19" }))
-            .route("/shutdown", get(move || async move { notify.notify_one() }));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let port = listener.local_addr()?.port() as u32;
-        let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app)
-                .with_graceful_shutdown(async move { stop.notified().await })
-                .await;
-        });
-
-        let result = stop_server_with_timeout(Some(port), Duration::from_secs(5)).await;
-        task.abort();
-
-        assert!(result.is_ok(), "{result:?}");
         Ok(())
     }
 

@@ -6,6 +6,9 @@ info:
 http:
   method: POST
   url: "{{tilekit_base_url}}/server/start"
+  body:
+    type: json
+    data: "{}"
   auth: inherit
 
 settings:
