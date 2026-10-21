@@ -204,17 +204,15 @@ pub async fn stop_cmd() -> Result<()> {
     stop_server(None).await
 }
 
-/// The client every CLI call to the daemon goes through. The first call in a process
-/// makes sure the daemon is up and on this version, so commands never check it
-/// themselves. Starting and stopping the daemon don't use it
+/// The client every CLI call to the daemon goes through. Each call makes sure the
+/// daemon is up and on this version, so commands never check it themselves, and a
+/// REPL that outlives a daemon restart still finds it. Starting and stopping the
+/// daemon don't use it
 pub async fn daemon_client() -> Result<&'static Client> {
     static CLIENT: OnceCell<Client> = OnceCell::const_new();
-    CLIENT
-        .get_or_try_init(|| async {
-            start_cmd(None).await?;
-            Ok(Client::new())
-        })
-        .await
+    // a running daemon on this version costs one ping
+    start_cmd(None).await?;
+    Ok(CLIENT.get_or_init(|| async { Client::new() }).await)
 }
 
 /// The daemon's address for `path`, to call through `daemon_client`
