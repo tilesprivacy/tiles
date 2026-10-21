@@ -5,7 +5,7 @@ info:
 
 http:
   method: POST
-  url: "{{tilekit_base_url}}/net/start-network"
+  url: "{{tilekit_base_url}}/net/stop-network"
   auth: inherit
 
 settings:

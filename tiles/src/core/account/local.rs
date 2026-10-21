@@ -15,7 +15,7 @@ use dialog_varsig::{Did, Principal, Signature, eddsa::Ed25519Signature};
 use iroh::SecretKey;
 use log::{info, warn};
 use rusqlite::{
-    Connection, OptionalExtension, Row, ToSql, params,
+    Connection, OptionalExtension, Row, ToSql, params, params_from_iter,
     types::{FromSql, FromSqlError},
 };
 use serde::{Deserialize, Serialize};
@@ -167,7 +167,7 @@ pub enum TokenType {
 // TODO: Prolly we got move this token stuff to its own module
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")]
-pub enum Capabilities {
+pub enum Capability {
     #[serde(rename = "all")]
     All,
     #[serde(rename = "sync")]
@@ -528,11 +528,11 @@ pub fn save_peer_account_db(db_conn: &Connection, user_id: &str, nickname: &str)
     Ok(())
 }
 
-/// Create a Token which has ucan token string for the given `aud_did` with the given `capabilities`
+/// Create a Token which has ucan token string for the given `aud_did` with the given `Capability`
 pub async fn create_token(
     aud_did: &str,
     nickname: Option<&str>,
-    capabilities: Vec<Capabilities>,
+    capability: Capability,
 ) -> Result<Token> {
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
     let user = get_current_user(&db_conn)?;
@@ -547,7 +547,7 @@ pub async fn create_token(
     // TODO: Getting a db conn again here, cuz the await above could move a
     // db reference to another thread. Used tokio-rusqlite
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
-    let token = generate_delegation_token(issuer, aud_did, nickname, capabilities, db_conn).await?;
+    let token = generate_delegation_token(issuer, aud_did, nickname, capability, db_conn).await?;
     Ok(token)
 }
 
@@ -556,7 +556,7 @@ async fn generate_delegation_token(
     issuer: Ed25519Signer,
     aud_did: &str,
     nickname: Option<&str>,
-    capabilities: Vec<Capabilities>,
+    capabilities: Capability,
     db_conn: Connection,
 ) -> Result<Token> {
     let aud_did = Did::from_str(aud_did)?;
@@ -580,45 +580,28 @@ async fn generate_delegation_token(
     Ok(delegation_token)
 }
 
-/// Infer rules needed for token generation from the passed capabilities
+/// Infer rules needed for token generation from the passed capability
 fn generate_commands_and_predicates(
-    capabilities: Vec<Capabilities>,
+    capability: Capability,
 ) -> (Vec<String>, Vec<Predicate>, TokenType) {
     let mut commands = vec![];
     let predicates: Vec<Predicate> = vec![];
-    let mut token_type: Option<TokenType> = None;
-    let mut is_linked = false;
-    for caps in &capabilities {
-        match caps {
-            Capabilities::All => {
-                token_type = {
-                    is_linked = true;
-                    Some(TokenType::Linked)
-                }
-            }
-            Capabilities::Sync(SyncCaps {
-                session_ids: _,
-                command,
-            }) => {
-                commands.push(command.to_string());
-                token_type = Some(TokenType::Peer)
-            }
-            Capabilities::RemoteInference(RemoteInferenceCaps { command }) => {
-                commands.push(command.to_string());
-                token_type = Some(TokenType::Peer)
-            }
+    let token_type = match capability {
+        Capability::All => TokenType::Linked,
+        Capability::Sync(SyncCaps {
+            session_ids: _,
+            command,
+        }) => {
+            commands.push(command.to_string());
+            TokenType::Peer
         }
-    }
-
-    // Prevents overwriting of token_type in case of multiple capabilities
-    let tok_type = if let Some(TokenType::Peer) = token_type
-        && is_linked
-    {
-        TokenType::Linked
-    } else {
-        token_type.unwrap_or(TokenType::Peer)
+        Capability::RemoteInference(RemoteInferenceCaps { command }) => {
+            commands.push(command.to_string());
+            TokenType::Peer
+        }
     };
-    (commands, predicates, tok_type)
+
+    (commands, predicates, token_type)
 }
 
 pub fn add_token(
@@ -696,25 +679,33 @@ pub fn fetch_tokens(conn: &Connection, filter: TokenQueryOptions) -> Result<Vec<
         "SELECT id, did, token, cid, created_at, updated_at, type, aud_did, nickname FROM tokens";
 
     final_query.push_str(base_query);
-    if !filter.is_empty() {
-        final_query.push_str(" where");
-    }
+
+    let mut clauses: Vec<&str> = vec![];
+    let mut params: Vec<String> = vec![];
     if let Some(issuer_did) = filter.issuer_did {
-        final_query.push_str(&format!(" did = '{}' and", issuer_did));
+        clauses.push("did = ?");
+        params.push(issuer_did);
     }
 
     if let Some(aud_did) = filter.aud_did {
-        final_query.push_str(&format!(" aud_did= '{}' and", aud_did));
+        clauses.push("aud_did = ?");
+        params.push(aud_did);
     }
 
     if let Some(token_type) = filter.token_type {
-        final_query.push_str(&format!(" type = '{}' and", token_type));
+        clauses.push("type = ?");
+        params.push(token_type.to_string());
     }
-    let mut final_query = final_query.trim_end_matches("and").to_string();
-    final_query.push_str(" order by updated_at");
+
+    if !clauses.is_empty() {
+        final_query.push_str(" WHERE ");
+        final_query.push_str(&clauses.join(" AND "));
+    }
+
+    final_query.push_str(" ORDER BY updated_at");
 
     let mut stmt = conn.prepare(&final_query)?;
-    let token_rows = stmt.query_map([], |row| {
+    let token_rows = stmt.query_map(params_from_iter(params.iter()), |row| {
         Ok(Token {
             id: row.get(0)?,
             did: row.get(1)?,
@@ -1546,7 +1537,7 @@ pub mod tests {
             signer,
             "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
             None,
-            vec![Capabilities::All],
+            Capability::All,
             db_conn.common,
         )
         .await;
@@ -1575,14 +1566,9 @@ pub mod tests {
     async fn test_generate_token_with_invalid_aud_did() {
         let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
         let db_conn = setup_db_conn_v2();
-        let token = generate_delegation_token(
-            signer,
-            "did:ka",
-            None,
-            vec![Capabilities::All],
-            db_conn.common,
-        )
-        .await;
+        let token =
+            generate_delegation_token(signer, "did:ka", None, Capability::All, db_conn.common)
+                .await;
         assert!(token.is_err())
     }
 
@@ -1597,10 +1583,10 @@ pub mod tests {
             signer,
             audience_did,
             Some("alice"),
-            vec![Capabilities::Sync(SyncCaps {
+            Capability::Sync(SyncCaps {
                 session_ids: None,
                 command: SyncCapsCommand::Push,
-            })],
+            }),
             db.common,
         )
         .await
@@ -1624,48 +1610,6 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_capabilities_in_create_token() {
-        let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
-        let issuer_did = signer.ed25519_did().to_string();
-        let audience_did = "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww";
-        let db = setup_db_conn_v2();
-
-        let token = generate_delegation_token(
-            signer,
-            audience_did,
-            Some("alice"),
-            vec![
-                Capabilities::All,
-                Capabilities::Sync(SyncCaps {
-                    session_ids: None,
-                    command: SyncCapsCommand::Push,
-                }),
-                Capabilities::RemoteInference(RemoteInferenceCaps {
-                    command: RemoteInferenceCapsCommand::All,
-                }),
-            ],
-            db.common,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(token.did, issuer_did);
-        assert_eq!(token.aud_did, audience_did);
-        assert_eq!(token.nickname.as_deref(), Some("alice"));
-        assert!(matches!(token.r#type, TokenType::Linked));
-        assert!(!token.cid.is_empty());
-
-        let t_token = token.token.clone();
-        let delegation_token_bytes = data_encoding::BASE64.decode(t_token.as_bytes()).unwrap();
-        let delegation: Delegation<Ed25519Signature> =
-            serde_ipld_dagcbor::from_slice(&delegation_token_bytes)
-                .context("Invalid DID")
-                .unwrap();
-
-        let commands: Vec<&str> = vec!["sync", "push", "remote_inference"];
-        assert_eq!(commands, delegation.command().0);
-    }
-    #[tokio::test]
     async fn test_invocation_verification() {
         let db_conn = setup_db_conn_v2();
         let issued_signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
@@ -1674,7 +1618,7 @@ pub mod tests {
             issued_signer,
             &audience_signer.ed25519_did().to_string(),
             None,
-            vec![Capabilities::All],
+            Capability::All,
             db_conn.common,
         )
         .await
@@ -1715,7 +1659,7 @@ pub mod tests {
     fn test_caps_structs() {
         let caps = json!({"type": "sync", "command": "all"});
 
-        let _cap_s: Capabilities = serde_json::from_value(caps).unwrap();
+        let _cap_s: Capability = serde_json::from_value(caps).unwrap();
     }
     pub fn setup_db_conn_v2() -> Dbconn {
         Dbconn {

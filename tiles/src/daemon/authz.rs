@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::{
     core::{
-        account::local::{Capabilities, Token, fetch_linked_tokens, get_current_user},
+        account::local::{Capability, Token, fetch_linked_tokens, get_current_user},
         storage::db::get_db_conn,
     },
     daemon::{
@@ -27,12 +27,12 @@ use crate::{
 
 /// Request format for `/create-token`
 /// - aud_did: receiver DID,
-/// - capabilities: Define the capabilities the token should be eligible for in a list
+/// - capability: Define the capability the token should be authorized for.
 /// - aud_nickname (Optional): Nickname, which can be used to identify the peer who you want to delegate the token, easily
 #[derive(Deserialize)]
 pub struct TokenCreateRequest {
     aud_did: String,
-    capabilities: Vec<Capabilities>,
+    capability: Capability,
     aud_nickname: Option<String>,
 }
 
@@ -66,7 +66,7 @@ pub async fn create_token(
     let token = crate::core::account::local::create_token(
         &create_token_req.aud_did,
         Some(&aud_nickname),
-        create_token_req.capabilities,
+        create_token_req.capability,
     )
     .await
     .map_err(|e| AppError::CannotProcess(e.to_string()))?;

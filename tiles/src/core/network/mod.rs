@@ -36,7 +36,7 @@ use crate::{
         account::{
             self, get_did_from_public_key, get_public_key_from_did, get_random_bytes,
             local::{
-                Capabilities, Token, TokenType, User, add_token, create_invocation_token,
+                Capability, Token, TokenType, User, add_token, create_invocation_token,
                 create_token, fetch_delegated_tokens, get_app_secret_key, get_current_user,
                 verify_invocation,
             },
@@ -431,12 +431,7 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
         issuer_delegated_token
     } else {
         // create a reverse delegated token
-        create_token(
-            &delegation_token.did,
-            Some(&user.username),
-            vec![Capabilities::All],
-        )
-        .await?
+        create_token(&delegation_token.did, Some(&user.username), Capability::All).await?
     };
 
     // create invocation token
