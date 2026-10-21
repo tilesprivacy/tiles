@@ -3,7 +3,7 @@
 pub mod ticket;
 use std::{str::FromStr, time::Duration};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use axum::body::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use iroh::{
@@ -130,6 +130,14 @@ pub struct SyncAcceptLoopData {
     db_channel_sender: Sender<SyncOp>,
 }
 
+/// At onces there can be multiple initiator gossip loop processes but only
+/// one Listener loop. This flag for each process will help us in which gossip
+/// events should be ignored and not
+enum GossipProcessType {
+    Listener,
+    Initiator,
+}
+
 /// Codes used inside the accept gossip loop that decides the exit or contination of the loop.
 /// This is useful to shutdown request based spawned process_loops, so that the gossip recievers goes out of scope and automatically disconnect from the topic
 enum GossipLoopCode {
@@ -154,6 +162,7 @@ async fn process_gossip_network_events(
     user: account::local::User,
     sync_helpers: Option<SyncAcceptLoopData>,
     caller_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
+    process_type: GossipProcessType,
 ) -> Result<()> {
     while let Some(event) = msg_receiver.try_next().await? {
         info!(
@@ -162,24 +171,73 @@ async fn process_gossip_network_events(
         );
         if let Event::Received(msg) = event {
             let pub_key = msg.delivered_from;
-            let msg = NetworkMessage::from_bytes(&msg.content)?;
+            let msg = match NetworkMessage::from_bytes(&msg.content) {
+                Ok(msg) => msg,
+                Err(err) => {
+                    log::error!("Failed to decode msg due to {:?}", err);
+                    continue;
+                }
+            };
+
             // TODO: signature validation should happen here
-            if !is_did_valid(&msg.from_did, pub_key)? {
-                log::warn!(
-                    "Incoming peer DID {} invalid, blocking request",
-                    msg.from_did
-                );
-                continue;
+
+            match is_did_valid(&msg.from_did, pub_key) {
+                Ok(false) => {
+                    log::warn!(
+                        "Incoming peer DID {} invalid, blocking request",
+                        msg.from_did
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    log::error!(
+                        "Failed to validate incoming DID {} due to {:?}",
+                        msg.from_did,
+                        err
+                    );
+                    continue;
+                }
+                _ => (),
             }
+
             let loop_code = match msg.msg_type {
                 NetworkMessageType::Link => {
-                    handle_device_link_events(msg, &user, &caller_sender, &msg_sender).await?
+                    match handle_device_link_events(
+                        msg,
+                        &user,
+                        &caller_sender,
+                        &msg_sender,
+                        &process_type,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(err) => {
+                            log::error!("Error handling device event due to {:?}", err);
+                            continue;
+                        }
+                    }
                 }
                 NetworkMessageType::Sync => {
                     if let Some(sync_helpers) = sync_helpers.clone() {
-                        handle_sync_events(msg, sync_helpers, &caller_sender, pub_key, &msg_sender)
-                            .await?
+                        match handle_sync_events(
+                            msg,
+                            sync_helpers,
+                            &caller_sender,
+                            pub_key,
+                            &msg_sender,
+                            &process_type,
+                        )
+                        .await
+                        {
+                            Ok(res) => res,
+                            Err(err) => {
+                                log::error!("Error handling sync events due to {:?}", err);
+                                continue;
+                            }
+                        }
                     } else {
+                        log::error!("No sync helper passed, critical error exiting");
                         GossipLoopCode::Exit
                     }
                 }
@@ -187,7 +245,7 @@ async fn process_gossip_network_events(
 
             // exiting the accept loop, thus removing thyself from the topic on which this process was spawned
             if matches!(loop_code, GossipLoopCode::Exit) {
-                info!("Exiting the gossip accepter loop");
+                info!("Exiting the gossip accepter loop, DID: {}", user.user_id);
                 return Ok(());
             }
         }
@@ -200,6 +258,7 @@ async fn handle_device_link_events(
     user: &User,
     caller_sender: &tokio::sync::mpsc::Sender<NetworkApiEvent>,
     msg_sender: &GossipSender,
+    process_type: &GossipProcessType,
 ) -> Result<GossipLoopCode> {
     log::info!("Handling device link requests");
     match msg.body {
@@ -209,6 +268,10 @@ async fn handle_device_link_events(
             nickname,
         } => {
             log::info!("on Link request");
+            if matches!(process_type, GossipProcessType::Initiator) {
+                log::warn!("Rejected the Link request on an Initiator process");
+                return Ok(GossipLoopCode::Continue);
+            }
             if let Err(err) = verify_invocation(&auth_token).await {
                 let err_reason =
                     format!("link token invocation verification failed due to {:?}", err);
@@ -248,6 +311,10 @@ async fn handle_device_link_events(
         }
         MessageBody::LinkAccepted => {
             log::info!("On link accepted");
+            if matches!(process_type, GossipProcessType::Listener) {
+                log::warn!("Rejected the Link Accepted on a listener process");
+                return Ok(GossipLoopCode::Continue);
+            }
             caller_sender
                 .send(NetworkApiEvent::DeviceLinkSuccess)
                 .await?;
@@ -257,6 +324,10 @@ async fn handle_device_link_events(
 
         MessageBody::LinkRejected { reason } => {
             log::info!("On link rejected");
+            if matches!(process_type, GossipProcessType::Listener) {
+                log::warn!("Rejected the Link Rejected event on a listener process");
+                return Ok(GossipLoopCode::Continue);
+            }
             caller_sender
                 .send(NetworkApiEvent::DeviceLinkFailed(reason))
                 .await?;
@@ -275,6 +346,7 @@ async fn handle_sync_events(
     caller_sender: &tokio::sync::mpsc::Sender<NetworkApiEvent>,
     pub_key: PublicKey,
     msg_sender: &GossipSender,
+    process_type: &GossipProcessType,
 ) -> Result<GossipLoopCode> {
     match msg.body {
         MessageBody::SyncStart {
@@ -282,6 +354,10 @@ async fn handle_sync_events(
             auth_token: _,
         } => {
             info!("Received sync start event...");
+            if matches!(process_type, GossipProcessType::Initiator) {
+                log::warn!("Rejected the SyncStart event on an initiator process");
+                return Ok(GossipLoopCode::Continue);
+            }
             let senders: (
                 &tokio::sync::mpsc::Sender<SyncOp>,
                 &tokio::sync::mpsc::Sender<NetworkApiEvent>,
@@ -292,6 +368,8 @@ async fn handle_sync_events(
             blob_ticket: _,
             last_row_counter: _,
         } => {
+            info!("on syncSendDeltaInfo");
+
             let senders: (
                 &tokio::sync::mpsc::Sender<SyncOp>,
                 &tokio::sync::mpsc::Sender<NetworkApiEvent>,
@@ -301,11 +379,19 @@ async fn handle_sync_events(
         MessageBody::SyncEnd => {
             // SyncEnd is received by the initiator
             println!("Sync completed..., exiting..");
+            if matches!(process_type, GossipProcessType::Listener) {
+                log::warn!("Rejected the SyncEnd event on an Listener process");
+                return Ok(GossipLoopCode::Continue);
+            }
             caller_sender.send(NetworkApiEvent::SyncSuccess).await?;
             Ok(GossipLoopCode::Exit)
         }
         MessageBody::SyncRejected { reason } => {
             log::warn!("On sync rejected");
+            if matches!(process_type, GossipProcessType::Listener) {
+                log::warn!("Rejected the SyncRejected event on an Listener process");
+                return Ok(GossipLoopCode::Continue);
+            }
             caller_sender
                 .send(NetworkApiEvent::SyncFailed(reason))
                 .await?;
@@ -381,6 +467,7 @@ pub async fn start_network(
         user.clone(),
         Some(sync_helpers),
         main_network_sender.clone(),
+        GossipProcessType::Listener,
     ));
 
     info!("{}", "Ready to accept requests from peers...".blue());
@@ -399,10 +486,23 @@ pub async fn start_network(
     };
 
     let mut main_network_recv = main_network_recv;
-    main_network_recv.recv().await;
-    router_recv.shutdown().await?;
-    endpoint.close().await;
-    info!("Closing the tiles network listener");
+
+    // such that the main listener should only exit on StopNetwork event
+    while let Some(network_api_event) = main_network_recv.recv().await {
+        match network_api_event {
+            NetworkApiEvent::StopNetwork => {
+                router_recv.shutdown().await?;
+                endpoint.close().await;
+                info!("Closing the tiles network listener");
+                break;
+            }
+            event => log::info!(
+                "Noop for the event {:?} on the main listener process",
+                event
+            ),
+        }
+    }
+
     Ok(())
 }
 
@@ -470,6 +570,7 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
                 user.clone(),
                 None,
                 caller_sender.clone(),
+                GossipProcessType::Initiator,
             ));
 
             let link_req_msg = NetworkMessage::new(
@@ -485,10 +586,18 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
             gossip_network_sender
                 .broadcast(link_req_msg.to_bytes().into())
                 .await?;
-            let r = caller_recv.recv().await;
-            match r.unwrap() {
-                NetworkApiEvent::DeviceLinkFailed(reason) => Err(anyhow!(reason)),
-                _ => Ok(()),
+
+            if let Some(net_event) = caller_recv.recv().await {
+                match net_event {
+                    NetworkApiEvent::DeviceLinkFailed(reason) => Err(anyhow!(reason)),
+                    NetworkApiEvent::DeviceLinkSuccess => Ok(()),
+                    event => {
+                        log::error!("Invalid event {:?}, while processing device linking", event);
+                        Err(anyhow!("Invalid event"))
+                    }
+                }
+            } else {
+                Err(anyhow!("Network process closed unexpectedly"))
             }
         }
     }
@@ -549,6 +658,7 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
                 user.clone(),
                 Some(sync_helpers),
                 caller_sender.clone(),
+                GossipProcessType::Initiator,
             ));
 
             let sync_start_msg = NetworkMessage::new(
@@ -726,7 +836,7 @@ async fn on_sync_start_event(
         let ticket = fetch_encoded_delta_ticket(
             &sync_helpers.user.user_id,
             sync_db_channel_sender,
-            lrc.expect("lrc failed"),
+            lrc.context("lrc failed")?,
             &sync_helpers.store,
             delivered_from,
         )

@@ -37,6 +37,7 @@ pub struct NetworkState {
 /// Events emitted as part of other tile's processes communicating with the main network
 ///
 /// For ex: A tilekit api communicating with network to stop it
+#[derive(Debug)]
 pub enum NetworkApiEvent {
     NetworkStarted((Gossip, Sender<NetworkApiEvent>)),
     // command event to stop the network
@@ -188,12 +189,16 @@ pub async fn link_device(
     State(state): State<Arc<AppState>>,
     ApiJson(params): ApiJson<DeviceLinkParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    let network_state = state.network_state.read().await;
+    let gossip_clone = {
+        let network_state = state.network_state.read().await;
+        network_state
+            .as_ref()
+            .map(|net_state| net_state.gossip.clone())
+    };
 
-    if let Some(net_state) = network_state.as_ref() {
-        let gossip_clone = net_state.gossip.clone();
+    if let Some(gossip) = gossip_clone {
         let handle = tokio::spawn(async move {
-            core_network::initiate_device_linking(&params.token, gossip_clone).await
+            core_network::initiate_device_linking(&params.token, gossip).await
         });
 
         match handle
@@ -206,6 +211,7 @@ pub async fn link_device(
             Err(err) => Err(AppError::CannotProcess(err.to_string())),
         }
     } else {
+        log::error!("Failed to get the gossip state");
         Err(AppError::CannotProcess(
             "Failed to get the network state".to_string(),
         ))
@@ -217,11 +223,15 @@ pub async fn sync_with_device(
     State(state): State<Arc<AppState>>,
     ApiJson(params): ApiJson<SyncParams>,
 ) -> Result<impl IntoResponse, AppError> {
-    let network_state = state.network_state.read().await;
+    let net_objs = {
+        let network_state = state.network_state.read().await;
 
-    if let Some(net_state) = network_state.as_ref() {
-        let gossip = net_state.gossip.clone();
-        let endpoint = net_state.endpoint.clone();
+        network_state
+            .as_ref()
+            .map(|net_state| (net_state.endpoint.clone(), net_state.gossip.clone()))
+    };
+
+    if let Some((endpoint, gossip)) = net_objs {
         let handle =
             tokio::spawn(async move { core_network::sync(&params.did, gossip, endpoint).await });
 
@@ -235,6 +245,7 @@ pub async fn sync_with_device(
             Err(err) => Err(AppError::CannotProcess(err.to_string())),
         }
     } else {
+        log::error!("Failed to get the endpoint and gossip objs");
         Err(AppError::CannotProcess(
             "Failed to get the network state".to_string(),
         ))
