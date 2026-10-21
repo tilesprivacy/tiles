@@ -4,7 +4,7 @@ info:
   seq: 1
 
 http:
-  method: GET
+  method: POST
   url: "{{tilekit_base_url}}/server/start"
   auth: inherit
 

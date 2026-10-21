@@ -142,7 +142,11 @@ pub fn quit(app: &AppHandle) {
             .expect("a client with only a timeout set always builds");
 
         // a dropped connection here is the graceful shutdown, not a failure
-        let _ = client.get(url("/shutdown")).send().await;
+        let _ = client
+            .post(url("/shutdown"))
+            .header("content-type", "application/json")
+            .send()
+            .await;
 
         tokio::time::sleep(QUIT_FALLBACK).await;
         app.exit(0);

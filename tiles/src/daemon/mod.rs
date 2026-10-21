@@ -18,10 +18,11 @@ use crate::{
 use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
-    extract::{Query, State, rejection::JsonRejection},
-    http::{HeaderValue, Method, StatusCode, Uri, header::CONTENT_TYPE},
-    response::IntoResponse,
-    routing::get,
+    extract::{Query, Request, State, rejection::JsonRejection},
+    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header::CONTENT_TYPE},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use axum_macros::{FromRequest, debug_handler};
 use iroh_tickets::endpoint::EndpointTicket;
@@ -99,6 +100,7 @@ pub enum AppError {
     AlreadyExists(String),
     CannotProcess(String),
     MethodNotAllowed(String),
+    UnsupportedMediaType(String),
     ServiceUnavailable(String),
 }
 impl IntoResponse for AppError {
@@ -111,6 +113,7 @@ impl IntoResponse for AppError {
             Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
             Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
             Self::MethodNotAllowed(e) => (StatusCode::METHOD_NOT_ALLOWED, e),
+            Self::UnsupportedMediaType(e) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e),
             Self::ServiceUnavailable(e) => (StatusCode::SERVICE_UNAVAILABLE, e),
         };
 
@@ -128,6 +131,7 @@ impl From<JsonRejection> for AppError {
     fn from(rejection: JsonRejection) -> Self {
         match rejection.status() {
             StatusCode::UNPROCESSABLE_ENTITY => Self::CannotProcess(rejection.body_text()),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE => Self::UnsupportedMediaType(rejection.body_text()),
             _ => Self::BadRequest(rejection.body_text()),
         }
     }
@@ -199,6 +203,56 @@ pub async fn start_cmd(port: Option<u32>) -> Result<()> {
 pub async fn stop_cmd() -> Result<()> {
     stop_server(None).await
 }
+
+/// Every route the daemon serves on its port
+fn router(state: Arc<AppState>) -> Router {
+    // let service = ServiceBuilder::new()
+    //     .layer(HandleErrorLayer::new(handle_timeout_error))
+    //     .layer(TimeoutLayer::new(Duration::from_secs(30)));
+
+    Router::new()
+        .route("/", get(root))
+        .route("/config", get(get_config))
+        .route("/shutdown", post(shutdown))
+        .route("/model-cache-path", get(get_model_cache_path))
+        .route("/remote-share", post(share_remote_inference))
+        .route("/remote-unshare", post(unshare_remote_inference))
+        .route("/remote-status", get(show_remote_status))
+        .route("/connect-remote", post(connect_remote_inference))
+        .merge(agent_router())
+        .merge(server_router())
+        .merge(account_router())
+        .merge(session_router())
+        .merge(atproto_router())
+        // only on matched routes, so an unknown path is still a 404 and a wrong method a 405
+        .route_layer(middleware::from_fn(require_json))
+        .fallback(no_route)
+        .method_not_allowed_fallback(wrong_method)
+        // .layer(service)
+        .layer(cors_layer())
+        .with_state(state)
+}
+
+/// Every POST has to say its body is JSON, even one with no body. Any web page can
+/// send a form or a plain POST to localhost without asking, but this content type
+/// needs a CORS preflight first, which the daemon refuses for other sites
+async fn require_json(req: Request, next: Next) -> Result<Response, AppError> {
+    if req.method() == Method::POST && !is_json(req.headers()) {
+        return Err(AppError::UnsupportedMediaType(
+            "Expected a `Content-Type: application/json` header".to_owned(),
+        ));
+    }
+    Ok(next.run(req).await)
+}
+
+fn is_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
+}
+
 async fn root(State(state): State<Arc<AppState>>) -> String {
     state.vsn.clone()
 }
@@ -317,29 +371,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
 
     let shared_state = Arc::new(state);
 
-    // let service = ServiceBuilder::new()
-    //     .layer(HandleErrorLayer::new(handle_timeout_error))
-    //     .layer(TimeoutLayer::new(Duration::from_secs(30)));
-
-    let app = Router::new()
-        .route("/", get(root))
-        .route("/config", get(get_config))
-        .route("/shutdown", get(shutdown))
-        .route("/model-cache-path", get(get_model_cache_path))
-        .route("/remote-share", get(share_remote_inference))
-        .route("/remote-unshare", get(unshare_remote_inference))
-        .route("/remote-status", get(show_remote_status))
-        .route("/connect-remote", get(connect_remote_inference))
-        .merge(agent_router())
-        .merge(server_router())
-        .merge(account_router())
-        .merge(session_router())
-        .merge(atproto_router())
-        .fallback(no_route)
-        .method_not_allowed_fallback(wrong_method)
-        // .layer(service)
-        .layer(cors_layer())
-        .with_state(shared_state.clone());
+    let app = router(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -511,12 +543,21 @@ async fn stop_server_and_wait(port: Option<u32>) -> Result<()> {
     let dyn_port = get_port(port);
     let client = Client::new();
     let addr = format!("http://127.0.0.1:{}/shutdown", dyn_port);
-    client
-        .get(addr)
+    let mut res = client
+        .post(&addr)
+        .header(CONTENT_TYPE, "application/json")
         .send()
         .await
-        .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?
-        .error_for_status()
+        .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?;
+    // daemons up to 0.4.19 only stop on a GET, and an upgrade has to stop the old one
+    if res.status() == StatusCode::METHOD_NOT_ALLOWED {
+        res = client
+            .get(&addr)
+            .send()
+            .await
+            .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?;
+    }
+    res.error_for_status()
         .map_err(|err| anyhow!("Daemon shutdown failed due to {err:?}"))?;
 
     let addr = format!("http://127.0.0.1:{dyn_port}");
@@ -665,7 +706,11 @@ async fn show_remote_status(State(state): State<Arc<AppState>>) -> Result<String
 pub async fn share_remote_link() -> Result<String> {
     let client = Client::new();
     let addr = "http://127.0.0.1:1729/remote-share";
-    let res = client.get(addr).send().await;
+    let res = client
+        .post(addr)
+        .header(CONTENT_TYPE, "application/json")
+        .send()
+        .await;
     match res {
         Err(err) => Err(anyhow!("Daemon remote share failed due to {:?}", err)),
         Ok(response) => {
@@ -683,7 +728,11 @@ pub async fn share_remote_link() -> Result<String> {
 pub async fn unshare_remote_link() -> Result<()> {
     let client = Client::new();
     let addr = "http://127.0.0.1:1729/remote-unshare";
-    let res = client.get(addr).send().await;
+    let res = client
+        .post(addr)
+        .header(CONTENT_TYPE, "application/json")
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!("Daemon remote unshare failed due to {:?}", err)),
@@ -723,8 +772,12 @@ async fn connect_remote_inference(
 
 pub async fn connect_remote(ticket: &str) -> Result<()> {
     let client = Client::new();
-    let addr = format!("http://127.0.0.1:1729/connect-remote?ticket={}", ticket);
-    let res = client.get(addr).send().await;
+    let res = client
+        .post("http://127.0.0.1:1729/connect-remote")
+        .query(&[("ticket", ticket)])
+        .header(CONTENT_TYPE, "application/json")
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!("Daemon remote connect failed due to {:?}", err)),
@@ -745,12 +798,25 @@ mod tests {
     use std::time::Duration;
 
     use anyhow::Result;
-    use axum::{Router, http::StatusCode, routing::get};
+    use axum::{
+        Router,
+        http::StatusCode,
+        routing::{get, post},
+    };
     use serial_test::serial;
 
     use crate::daemon::{
-        ping, start_server, stop_server, stop_server_with_timeout, wait_until_server_is_up,
+        AppState, ping, router, start_server, stop_server, stop_server_with_timeout,
+        wait_until_server_is_up,
     };
+    use axum::{
+        body::Body,
+        http::{Request, header::CONTENT_TYPE},
+    };
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use std::sync::Arc;
+    use tower::ServiceExt;
 
     #[tokio::test]
     #[serial]
@@ -779,7 +845,7 @@ mod tests {
     async fn stop_rejects_an_unsuccessful_response() -> Result<()> {
         let app = Router::new().route(
             "/shutdown",
-            get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+            post(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
         );
         let (port, task) = serve(app).await?;
 
@@ -794,7 +860,7 @@ mod tests {
     async fn stop_times_out_while_the_server_remains_reachable() -> Result<()> {
         let app = Router::new()
             .route("/", get(|| async { "up" }))
-            .route("/shutdown", get(|| async {}));
+            .route("/shutdown", post(|| async {}));
         let (port, task) = serve(app).await?;
 
         let result = stop_server_with_timeout(Some(port), Duration::from_millis(100)).await;
@@ -803,5 +869,99 @@ mod tests {
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Timed out"));
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn stop_falls_back_to_get_for_an_older_daemon() -> Result<()> {
+        // older daemons only stop on a GET, the upgrade path still has to stop them
+        let stop = Arc::new(tokio::sync::Notify::new());
+        let notify = stop.clone();
+        let app = Router::new()
+            .route("/", get(|| async { "0.4.19" }))
+            .route("/shutdown", get(move || async move { notify.notify_one() }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let port = listener.local_addr()?.port() as u32;
+        let task = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async move { stop.notified().await })
+                .await;
+        });
+
+        let result = stop_server_with_timeout(Some(port), Duration::from_secs(5)).await;
+        task.abort();
+
+        assert!(result.is_ok(), "{result:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn state_changing_root_routes_refuse_get() {
+        for path in [
+            "/shutdown",
+            "/remote-share",
+            "/remote-unshare",
+            "/connect-remote",
+        ] {
+            let (status, _) = call("GET", path, None).await;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{path}");
+        }
+    }
+
+    async fn call(method: &str, path: &str, content_type: Option<&str>) -> (StatusCode, Value) {
+        let mut req = Request::builder().method(method).uri(path);
+        if let Some(content_type) = content_type {
+            req = req.header(CONTENT_TYPE, content_type);
+        }
+        let res = router(Arc::new(AppState::for_tests()))
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    #[tokio::test]
+    async fn a_post_without_json_content_type_is_refused_before_the_handler() {
+        // server/stop would stop the inference server if it got through
+        for content_type in [
+            None,
+            Some("text/plain"),
+            Some("application/x-www-form-urlencoded"),
+        ] {
+            let (status, body) = call("POST", "/v1/tilekit/server/stop", content_type).await;
+            assert_eq!(
+                status,
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{content_type:?}"
+            );
+            assert_eq!(body["status"], "failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_post_with_json_content_type_reaches_the_handler() {
+        // with no agent running, end_session's own error proves the request got through
+        for content_type in ["application/json", "Application/JSON; charset=utf-8"] {
+            let (status, body) =
+                call("POST", "/v1/tilekit/agent/end_session", Some(content_type)).await;
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{content_type}");
+            assert!(body["reason"].as_str().unwrap().contains("agent"));
+        }
+    }
+
+    #[tokio::test]
+    async fn state_changing_agent_routes_refuse_get() {
+        for path in ["/v1/tilekit/agent/start", "/v1/tilekit/agent/end_session"] {
+            let (status, body) = call("GET", path, None).await;
+            assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{path}");
+            assert_eq!(body["status"], "failed");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_path_is_a_404_whatever_its_content_type() {
+        let (status, _) = call("POST", "/v1/tilekit/nope", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
