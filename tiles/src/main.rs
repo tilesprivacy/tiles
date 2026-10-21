@@ -616,8 +616,6 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
-                // the sign in goes through the daemon, like every other client's
-                start_cmd(None).await?;
                 let account = sign_in(&handle).await?;
                 println!("Logged in successfully as @{}", account.handle);
             }

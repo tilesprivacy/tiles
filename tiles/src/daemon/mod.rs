@@ -35,6 +35,7 @@ use std::fs::OpenOptions;
 use std::sync::Mutex;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::OnceCell;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tower_http::cors::CorsLayer;
@@ -201,6 +202,24 @@ pub async fn start_cmd(port: Option<u32>) -> Result<()> {
 
 pub async fn stop_cmd() -> Result<()> {
     stop_server(None).await
+}
+
+/// The client every CLI call to the daemon goes through. The first call in a process
+/// makes sure the daemon is up and on this version, so commands never check it
+/// themselves. Starting and stopping the daemon don't use it
+pub async fn daemon_client() -> Result<&'static Client> {
+    static CLIENT: OnceCell<Client> = OnceCell::const_new();
+    CLIENT
+        .get_or_try_init(|| async {
+            start_cmd(None).await?;
+            Ok(Client::new())
+        })
+        .await
+}
+
+/// The daemon's address for `path`, to call through `daemon_client`
+pub fn daemon_url(path: &str) -> String {
+    format!("http://127.0.0.1:{DEFAULT_PORT}{path}")
 }
 async fn root(State(state): State<Arc<AppState>>) -> String {
     state.vsn.clone()
@@ -668,9 +687,11 @@ async fn show_remote_status(State(state): State<Arc<AppState>>) -> Result<String
 }
 
 pub async fn share_remote_link() -> Result<String> {
-    let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-share";
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/remote-share"))
+        .send()
+        .await;
     match res {
         Err(err) => Err(anyhow!("Daemon remote share failed due to {:?}", err)),
         Ok(response) => {
@@ -686,9 +707,11 @@ pub async fn share_remote_link() -> Result<String> {
 }
 
 pub async fn unshare_remote_link() -> Result<()> {
-    let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-unshare";
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/remote-unshare"))
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!("Daemon remote unshare failed due to {:?}", err)),
@@ -697,9 +720,11 @@ pub async fn unshare_remote_link() -> Result<()> {
 }
 
 pub async fn remote_status() -> Result<String> {
-    let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-status";
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/remote-status"))
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!(
@@ -727,9 +752,12 @@ async fn connect_remote_inference(
 }
 
 pub async fn connect_remote(ticket: &str) -> Result<()> {
-    let client = Client::new();
-    let addr = format!("http://127.0.0.1:1729/connect-remote?ticket={}", ticket);
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/connect-remote"))
+        .query(&[("ticket", ticket)])
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!("Daemon remote connect failed due to {:?}", err)),

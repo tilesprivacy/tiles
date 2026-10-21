@@ -23,7 +23,7 @@ use crate::{
         account::atproto::{self, AtprotoAccount, HandleNotFound, LOGIN_TIMEOUT},
         storage::db::get_db_conn,
     },
-    daemon::{ApiJson, ApiResponse, AppError, AppState, DEFAULT_PORT},
+    daemon::{ApiJson, ApiResponse, AppError, AppState, daemon_client, daemon_url},
 };
 
 /// A sign in waiting for the browser. Cancelling it frees the callback port
@@ -117,10 +117,9 @@ fn event(name: &str, data: Value) -> Event {
 /// Signs in through the daemon, the same flow every client uses: prints and
 /// opens the url, then waits for the browser to come back
 pub async fn sign_in(handle: &str) -> Result<AtprotoAccount> {
-    let res = reqwest::Client::new()
-        .post(format!(
-            "http://127.0.0.1:{DEFAULT_PORT}/v1/tilekit/atproto/login"
-        ))
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/v1/tilekit/atproto/login"))
         .json(&json!({ "user_handle": handle }))
         .send()
         .await
@@ -136,10 +135,9 @@ pub async fn sign_in(handle: &str) -> Result<AtprotoAccount> {
     let mut pending = String::new();
     while let Some(chunk) = res.chunk().await? {
         pending.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(end) = pending.find("\n\n") {
-            let block: String = pending.drain(..end + 2).collect();
-            match sse_event(&block) {
-                Some((name, data)) if name == "authorize" => {
+        for (name, data) in take_events(&mut pending) {
+            match name.as_str() {
+                "authorize" => {
                     let url = data["url"]
                         .as_str()
                         .context("The sign in came without a url")?;
@@ -148,10 +146,8 @@ pub async fn sign_in(handle: &str) -> Result<AtprotoAccount> {
                     );
                     atproto::open_in_browser(url);
                 }
-                Some((name, data)) if name == "signed_in" => {
-                    return Ok(serde_json::from_value(data)?);
-                }
-                Some((name, data)) if name == "error" => {
+                "signed_in" => return Ok(serde_json::from_value(data)?),
+                "error" => {
                     let reason = data["reason"].as_str().unwrap_or("The sign in failed");
                     return Err(anyhow!(reason.to_owned()));
                 }
@@ -161,6 +157,16 @@ pub async fn sign_in(handle: &str) -> Result<AtprotoAccount> {
     }
 
     Err(anyhow!("The daemon closed the sign in before it finished"))
+}
+
+// takes the finished event blocks off the buffer, a block cut off mid chunk waits for the next one
+fn take_events(pending: &mut String) -> Vec<(String, Value)> {
+    let mut events = vec![];
+    while let Some(end) = pending.find("\n\n") {
+        let block: String = pending.drain(..end + 2).collect();
+        events.extend(sse_event(&block));
+    }
+    events
 }
 
 // one event block as its name and json data, keep-alive comments come back as none
@@ -216,15 +222,74 @@ pub async fn status() -> Result<impl IntoResponse, AppError> {
 
 #[cfg(test)]
 mod tests {
-    use super::sse_event;
+    use super::*;
+    use futures_util::stream;
+    use http_body_util::BodyExt;
+
+    // the bytes axum sends for these events, so the tests read what a client really gets
+    async fn wire(events: Vec<Event>) -> String {
+        let body = Sse::new(stream::iter(events.into_iter().map(Ok::<_, Infallible>)))
+            .into_response()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        String::from_utf8(body.to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn sign_in_reads_every_event_the_daemon_sends() {
+        let account = AtprotoAccount {
+            handle: "alice.bsky.social".to_owned(),
+            did: "did:plc:alice".to_owned(),
+        };
+        let mut pending = wire(vec![
+            event("authorize", json!({ "url": "https://bsky.social/oauth" })),
+            event("signed_in", json!(account)),
+            event("error", json!({ "reason": "The sign in timed out" })),
+        ])
+        .await;
+
+        let events = take_events(&mut pending);
+        assert!(pending.is_empty());
+        let names: Vec<_> = events.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, ["authorize", "signed_in", "error"]);
+
+        // the same fields sign_in reads
+        assert_eq!(events[0].1["url"], "https://bsky.social/oauth");
+        let signed_in: AtprotoAccount = serde_json::from_value(events[1].1.clone()).unwrap();
+        assert_eq!(signed_in.handle, "alice.bsky.social");
+        assert_eq!(signed_in.did, "did:plc:alice");
+        assert_eq!(events[2].1["reason"], "The sign in timed out");
+    }
+
+    #[tokio::test]
+    async fn an_event_cut_across_chunks_is_read_once_it_is_whole() {
+        let sent = wire(vec![event(
+            "authorize",
+            json!({ "url": "https://bsky.social/oauth" }),
+        )])
+        .await;
+        let (first, rest) = sent.split_at(sent.len() / 2);
+
+        let mut pending = first.to_owned();
+        assert!(take_events(&mut pending).is_empty());
+
+        pending.push_str(rest);
+        let events = take_events(&mut pending);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["url"], "https://bsky.social/oauth");
+    }
 
     #[test]
-    fn sign_in_events_are_read_and_keep_alives_skipped() {
-        let (name, data) =
-            sse_event("event: authorize\ndata: {\"url\":\"https://bsky.social/x\"}\n\n").unwrap();
-        assert_eq!(name, "authorize");
-        assert_eq!(data["url"], "https://bsky.social/x");
+    fn keep_alives_and_broken_events_are_skipped() {
+        let mut pending =
+            ":\n\nevent: error\ndata: not json\n\nevent: authorize\ndata: {\"url\":\"u\"}\n\n"
+                .to_owned();
 
-        assert!(sse_event(":\n\n").is_none());
+        let events = take_events(&mut pending);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "authorize");
     }
 }
