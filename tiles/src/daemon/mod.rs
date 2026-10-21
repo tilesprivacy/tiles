@@ -206,10 +206,6 @@ pub async fn stop_cmd() -> Result<()> {
 
 /// Every route the daemon serves on its port
 fn router(state: Arc<AppState>) -> Router {
-    // let service = ServiceBuilder::new()
-    //     .layer(HandleErrorLayer::new(handle_timeout_error))
-    //     .layer(TimeoutLayer::new(Duration::from_secs(30)));
-
     Router::new()
         .route("/", get(root))
         .route("/config", get(get_config))
