@@ -587,17 +587,14 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
                 .broadcast(link_req_msg.to_bytes().into())
                 .await?;
 
-            if let Some(net_event) = caller_recv.recv().await {
-                match net_event {
-                    NetworkApiEvent::DeviceLinkFailed(reason) => Err(anyhow!(reason)),
-                    NetworkApiEvent::DeviceLinkSuccess => Ok(()),
-                    event => {
-                        log::error!("Invalid event {:?}, while processing device linking", event);
-                        Err(anyhow!("Invalid event"))
-                    }
-                }
-            } else {
-                Err(anyhow!("Network process closed unexpectedly"))
+            match tokio::time::timeout(Duration::from_secs(API_TIMEOUT as u64), caller_recv.recv())
+                .await
+            {
+                Ok(Some(NetworkApiEvent::DeviceLinkFailed(reason))) => Err(anyhow!(reason)),
+                Ok(Some(NetworkApiEvent::DeviceLinkSuccess)) => Ok(()),
+                Ok(Some(_)) => Err(anyhow!("Invalid event")),
+                Ok(None) => Err(anyhow!("Network process closed unexpectedly")),
+                Err(_err) => Err(anyhow!("Timed out waiting for linking response")),
             }
         }
     }
@@ -673,10 +670,15 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
             gossip_network_sender
                 .broadcast(sync_start_msg.to_bytes().into())
                 .await?;
-            let r = caller_recv.recv().await;
-            match r.unwrap() {
-                NetworkApiEvent::SyncFailed(reason) => Err(anyhow!(reason)),
-                _ => Ok(()),
+
+            match tokio::time::timeout(Duration::from_secs(API_TIMEOUT as u64), caller_recv.recv())
+                .await
+            {
+                Ok(Some(NetworkApiEvent::SyncFailed(reason))) => Err(anyhow!(reason)),
+                Ok(Some(NetworkApiEvent::SyncSuccess)) => Ok(()),
+                Ok(Some(_)) => Err(anyhow!("Invalid event")),
+                Ok(None) => Err(anyhow!("Network process closed unexpectedly")),
+                Err(_err) => Err(anyhow!("Timed out waiting for linking response")),
             }
         }
     }

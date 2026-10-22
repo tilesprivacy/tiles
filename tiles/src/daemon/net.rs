@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc::{self, Sender};
 
-pub const API_TIMEOUT: u16 = 30;
+pub const API_TIMEOUT: u16 = 60;
 #[derive(Debug, Clone)]
 pub struct NetworkState {
     pub is_endpoint_running: bool,
