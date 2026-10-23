@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::{
     core::{
-        account::local::{Capability, Token, fetch_linked_tokens, get_current_user},
+        account::local::{self, Capability, Token, fetch_linked_tokens, get_current_user},
         storage::db::get_db_conn,
     },
     daemon::{
@@ -45,6 +45,11 @@ pub struct TokenAddRequest {
     issuer_nickname: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct RevokeParams {
+    peer_did: String,
+}
+
 pub fn authz_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/authz/create-token", post(create_token))
@@ -54,7 +59,7 @@ pub fn authz_router() -> Router<Arc<AppState>> {
             "/v1/tilekit/peers/list-linked-devices",
             get(fetch_linked_devices),
         )
-        .route("/v1/tilekit/peers/revoke/{cid}", post(revoke_token))
+        .route("/v1/tilekit/peers/revoke", post(revoke_token))
 }
 
 #[debug_handler]
@@ -119,10 +124,14 @@ pub async fn fetch_linked_devices() -> Result<impl IntoResponse, AppError> {
 
 // Later we will see into UCAN revocation
 #[debug_handler]
-pub async fn revoke_token(Path(cid): Path<String>) -> Result<impl IntoResponse, AppError> {
+pub async fn revoke_token(
+    ApiJson(revoke_params): ApiJson<RevokeParams>,
+) -> Result<impl IntoResponse, AppError> {
     let common_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-    crate::core::account::local::delete_token_by_cid(&common_db_conn, &cid)
+
+    let user = get_current_user(&common_db_conn).map_err(|e| AppError::NotFound(e.to_string()))?;
+    local::revoke_token(&revoke_params.peer_did, &user, &common_db_conn)
         .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
     Ok(ApiResponse::success(SimpleResponse {
@@ -239,10 +248,13 @@ pub async fn list_linked_devices_cli() -> Result<()> {
     Ok(())
 }
 
-pub async fn revoke_peers_cli(cid: &str) -> Result<()> {
+pub async fn revoke_peers_cli(peer_did: &str) -> Result<()> {
     let client = Client::new();
     let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/v1/tilekit/peers/revoke/{}", port, cid);
+    let addr = format!(
+        "http://127.0.0.1:{}/v1/tilekit/peers/revoke/{}",
+        port, peer_did
+    );
     let res = client
         .post(addr)
         .header("content-type", "application/json")
@@ -263,10 +275,7 @@ pub async fn revoke_peers_cli(cid: &str) -> Result<()> {
     Ok(())
 }
 async fn process_device_linking(client: &Client, port: u32, token: &str) -> Result<()> {
-    let addr = format!(
-        "http://127.0.0.1:{}/v1/tilekit/net/link-device?token={}",
-        port, &token
-    );
+    let addr = format!("http://127.0.0.1:{}/v1/tilekit/net/link-device", port);
     let res = client
         .post(addr)
         .header("content-type", "application/json")

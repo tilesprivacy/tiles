@@ -668,9 +668,50 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
     }
 }
 
-pub fn delete_token_by_cid(conn: &Connection, cid: &str) -> Result<usize> {
+/// Revokes the peer by deleting the related delegations
+/// TODO: Need test
+pub fn revoke_token(peer_did: &str, user: &User, conn: &Connection) -> Result<()> {
+    let tokens = fetch_linked_tokens(conn, &user.user_id)?;
+
+    let link_token = tokens.iter().find(|t| t.aud_did == peer_did);
+
+    if let Some(token) = link_token {
+        if let Err(err) = delete_token_by_cid(conn, &token.cid) {
+            return Err(anyhow!(
+                "Failed to delete the delegation token from peer due to {:?}",
+                err
+            ));
+        }
+    } else {
+        return Err(anyhow!("Delegation token from the peer not found"));
+    }
+
+    // also try to delete the link token this peer delegated to us
+    let tokens = fetch_linked_tokens(conn, peer_did)?;
+    let link_token = tokens.iter().find(|t| t.aud_did == user.user_id);
+    // We don't error out if below fails. Since its a cleanup process and returning error leaks abstraction of reverse delegation while linking
+    // See core::network::mod.rs::initiate_device_linking()
+    if let Some(token) = link_token {
+        if let Err(err) = delete_token_by_cid(conn, &token.cid) {
+            log::error!(
+                "Failed to delete the delegation token from peer due to {:?}",
+                err
+            )
+        };
+    } else {
+        log::error!("Delegation token from the peer not found")
+    }
+
+    Ok(())
+}
+
+pub fn delete_token_by_cid(conn: &Connection, cid: &str) -> Result<()> {
     let mut stmt = conn.prepare("DELETE FROM tokens WHERE cid= ?1")?;
-    stmt.execute([cid]).map_err(|e| anyhow!(e.to_string()))
+    match stmt.execute([cid]) {
+        Ok(0) => Err(anyhow!("Token was not deleted")),
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!(err.to_string())),
+    }
 }
 
 pub fn fetch_tokens(conn: &Connection, filter: TokenQueryOptions) -> Result<Vec<Token>> {
@@ -727,11 +768,12 @@ pub fn fetch_tokens(conn: &Connection, filter: TokenQueryOptions) -> Result<Vec<
     Ok(tokens)
 }
 
-pub fn fetch_linked_tokens(conn: &Connection, did: &str) -> Result<Vec<Token>> {
+/// Fetch the tokens with given issuer_did and that are linked
+pub fn fetch_linked_tokens(conn: &Connection, issuer_did: &str) -> Result<Vec<Token>> {
     fetch_tokens(
         conn,
         TokenQueryOptions {
-            aud_did: Some(did.to_string()),
+            issuer_did: Some(issuer_did.to_string()),
             token_type: Some(TokenType::Linked),
             ..Default::default()
         },
@@ -1469,8 +1511,11 @@ pub mod tests {
         let token_struct = resp.unwrap();
         assert_eq!(token_struct.token, token);
         assert_eq!(token_struct.r#type, TokenType::Linked);
-        let linked_tokens =
-            fetch_linked_tokens(&db_conn.common, "did:plc:mbk6wgmxiatotzy5b3q57naw").unwrap();
+        let linked_tokens = fetch_linked_tokens(
+            &db_conn.common,
+            "did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5",
+        )
+        .unwrap();
 
         assert_eq!(linked_tokens.len(), 1)
     }
@@ -1666,5 +1711,36 @@ pub mod tests {
             chat: crate::core::chats::tests::setup_db_schema(),
             common: setup_db_schema(),
         }
+    }
+
+    //TODO: Rework this test, once we add tokio-rusqlite
+    #[tokio::test]
+    async fn test_revoke_tokens() {
+        let db_conn = setup_db_conn_v2();
+        let _user = create_dummy_user(
+            &db_conn.common,
+            Some("did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5wl".to_string()),
+        );
+        let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
+        let _token = generate_delegation_token(
+            signer,
+            "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
+            None,
+            Capability::All,
+            db_conn.common,
+        )
+        .await
+        .unwrap();
+
+        // let resp = add_token(&token.token, &db_conn.common, None);
+
+        // assert!(resp.is_ok());
+        // let token_struct = resp.unwrap();
+        // assert_eq!(token_struct.token, token.token);
+        // assert_eq!(token_struct.r#type, TokenType::Linked);
+        // let linked_tokens =
+        //     fetch_linked_tokens(&db_conn.common, "did:plc:mbk6wgmxiatotzy5b3q57naw").unwrap();
+
+        // assert_eq!(linked_tokens.len(), 1)
     }
 }

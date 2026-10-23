@@ -435,8 +435,8 @@ enum LinkCommands {
 
     // Revokes the given linked peer
     Revoke {
-        // CID of the peer token
-        cid: String,
+        // DID of the peer token
+        did: String,
     },
 }
 
@@ -615,8 +615,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         Some(Commands::Sync(SyncCommands::Link(link_args))) => match link_args.command {
-            LinkCommands::Revoke { cid } => {
-                revoke_peers_cli(&cid).await?;
+            LinkCommands::Revoke { did } => {
+                revoke_peers_cli(&did).await?;
             }
             LinkCommands::LinkedDevices => {
                 list_linked_devices_cli().await?;
