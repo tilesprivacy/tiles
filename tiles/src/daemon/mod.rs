@@ -4,7 +4,7 @@ use std::{
     os::unix::process::CommandExt,
     path::PathBuf,
     process::{Command, Stdio},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -19,7 +19,11 @@ use anyhow::{Result, anyhow};
 use axum::{
     Json, Router,
     extract::{Query, Request, State, rejection::JsonRejection},
-    http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header::CONTENT_TYPE},
+    http::{
+        HeaderMap, HeaderValue, Method, StatusCode, Uri,
+        header::{CONTENT_TYPE, HOST},
+        uri::Authority,
+    },
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -46,6 +50,7 @@ pub mod agent;
 pub mod atproto;
 pub mod server;
 pub mod session;
+pub mod web;
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
@@ -75,6 +80,8 @@ pub struct AppState {
     /// The ATmosphere sign in waiting for the browser, if any
     pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
+    /// Set once at startup, when the web UI's port is bound or not
+    pub web_ui: OnceLock<web::WebUiState>,
 }
 
 #[cfg(test)]
@@ -91,6 +98,7 @@ impl AppState {
             agent_model: Mutex::new(None),
             login: None.into(),
             ui: Ui::new(),
+            web_ui: OnceLock::new(),
         }
     }
 }
@@ -103,6 +111,7 @@ pub enum AppError {
     BadRequest(String),
     AlreadyExists(String),
     CannotProcess(String),
+    Forbidden(String),
     MethodNotAllowed(String),
     UnsupportedMediaType(String),
     ServiceUnavailable(String),
@@ -116,6 +125,7 @@ impl IntoResponse for AppError {
             Self::BadRequest(e) => (StatusCode::BAD_REQUEST, e),
             Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
             Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
+            Self::Forbidden(e) => (StatusCode::FORBIDDEN, e),
             Self::MethodNotAllowed(e) => (StatusCode::METHOD_NOT_ALLOWED, e),
             Self::UnsupportedMediaType(e) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e),
             Self::ServiceUnavailable(e) => (StatusCode::SERVICE_UNAVAILABLE, e),
@@ -208,6 +218,27 @@ pub async fn stop_cmd() -> Result<()> {
     stop_server(None).await
 }
 
+/// `tiles daemon status`: whether the daemon and the web UI are up. Starts nothing
+pub async fn status_cmd() {
+    match ping(None).await {
+        Ok(version) => println!(
+            "Daemon running, version {version}, at http://127.0.0.1:{}",
+            get_port(None)
+        ),
+        Err(_) => {
+            println!("Daemon not running. Start it with `tiles daemon start`");
+            return;
+        }
+    }
+    // a plain client, so asking doesn't start anything
+    match web::fetch_state(&Client::new()).await {
+        Some(web::WebUiState::Serving { url }) => println!("Web UI at {url}"),
+        Some(web::WebUiState::NotInstalled) => println!("Web UI not installed"),
+        Some(web::WebUiState::PortInUse { reason }) => println!("Web UI not started: {reason}"),
+        None => println!("Web UI state unknown"),
+    }
+}
+
 /// Every route the daemon serves on its port
 fn router(state: Arc<AppState>) -> Router {
     Router::new()
@@ -219,18 +250,57 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/remote-unshare", post(unshare_remote_inference))
         .route("/remote-status", get(show_remote_status))
         .route("/connect-remote", post(connect_remote_inference))
-        .merge(agent_router())
-        .merge(server_router())
-        .merge(account_router())
-        .merge(session_router())
-        .merge(atproto_router())
+        .merge(tilekit_router())
         // only on matched routes, so an unknown path is still a 404 and a wrong method a 405
         .route_layer(middleware::from_fn(require_json))
         .fallback(no_route)
         .method_not_allowed_fallback(wrong_method)
         // .layer(service)
         .layer(cors_layer())
+        // a request for another host is refused before anything else runs
+        .layer(middleware::from_fn(require_local_host))
         .with_state(state)
+}
+
+/// Every `/v1/tilekit` route. The daemon's port and the web UI's port both serve
+/// these, so a new route lands on both
+fn tilekit_router() -> Router<Arc<AppState>> {
+    Router::new()
+        .merge(agent_router())
+        .merge(server_router())
+        .merge(account_router())
+        .merge(session_router())
+        .merge(atproto_router())
+        .route("/v1/tilekit/ui", get(web::ui_state))
+}
+
+const LOCAL_HOSTS: [&str; 3] = ["127.0.0.1", "localhost", "[::1]"];
+
+/// Refuses requests addressed to any other host. A web page can point its own domain
+/// at 127.0.0.1 (DNS rebinding), and the browser then treats the daemon as that site
+/// and lets the page read its answers. The page can't make the browser send a local
+/// `Host` though, so checking it stops that
+async fn require_local_host(req: Request, next: Next) -> Result<Response, AppError> {
+    if !is_local_host(&req) {
+        return Err(AppError::Forbidden(
+            "The Tiles daemon only answers requests made to localhost".to_owned(),
+        ));
+    }
+    Ok(next.run(req).await)
+}
+
+fn is_local_host(req: &Request) -> bool {
+    // http/2 carries it in the uri instead of a header
+    let host = match req.headers().get(HOST) {
+        Some(value) => value.to_str().ok(),
+        None => req.uri().authority().map(Authority::as_str),
+    };
+    host.and_then(|host| host.parse::<Authority>().ok())
+        .is_some_and(|authority| {
+            LOCAL_HOSTS
+                .iter()
+                .any(|name| authority.host().eq_ignore_ascii_case(name))
+        })
 }
 
 /// Every POST has to say its body is JSON, even one with no body. Any web page can
@@ -383,6 +453,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         agent_model: Mutex::new(None),
         login: None.into(),
         ui: ui.clone(),
+        web_ui: OnceLock::new(),
     };
 
     let shared_state = Arc::new(state);
@@ -394,14 +465,27 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
 
     info!("Daemon server started at {}", dyn_port);
 
+    let (web_ui_state, web_ui) = web::bind().await;
+    let _ = shared_state.web_ui.set(web_ui_state);
+
     if with_ui {
         ui::start(ui);
     }
     listen_for_signals(shared_state.clone());
 
-    let _ = axum::serve(listener, app)
-        .with_graceful_shutdown(watch_shutdown(shutdown_rx))
-        .await;
+    // one shutdown stops both ports
+    let api =
+        axum::serve(listener, app).with_graceful_shutdown(watch_shutdown(shutdown_rx.clone()));
+    let web_ui = async {
+        if let Some((listener, dir)) = web_ui {
+            let app = web::router(shared_state.clone(), dir);
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(watch_shutdown(shutdown_rx))
+                .await;
+        }
+    };
+    let (api, ()) = tokio::join!(api, web_ui);
+    let _ = api;
 
     Ok(())
 }
@@ -820,7 +904,10 @@ mod tests {
     };
     use axum::{
         body::Body,
-        http::{Request, header::CONTENT_TYPE},
+        http::{
+            Request,
+            header::{CONTENT_TYPE, HOST},
+        },
     };
     use http_body_util::BodyExt;
     use serde_json::Value;
@@ -894,7 +981,10 @@ mod tests {
     }
 
     async fn call(method: &str, path: &str, content_type: Option<&str>) -> (StatusCode, Value) {
-        let mut req = Request::builder().method(method).uri(path);
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(HOST, "127.0.0.1:1729");
         if let Some(content_type) = content_type {
             req = req.header(CONTENT_TYPE, content_type);
         }
@@ -949,5 +1039,67 @@ mod tests {
     async fn an_unknown_path_is_a_404_whatever_its_content_type() {
         let (status, _) = call("POST", "/v1/tilekit/nope", None).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    async fn status_for_host(host: Option<&str>) -> StatusCode {
+        let mut req = Request::builder().uri("/");
+        if let Some(host) = host {
+            req = req.header(HOST, host);
+        }
+        router(Arc::new(AppState::for_tests()))
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn local_hosts_are_answered_on_any_port() {
+        for host in [
+            "127.0.0.1:1729",
+            "localhost:1729",
+            "[::1]:1729",
+            "LocalHost:1730",
+            "127.0.0.1",
+        ] {
+            assert_eq!(status_for_host(Some(host)).await, StatusCode::OK, "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn other_hosts_are_refused() {
+        // a rebound domain keeps its own name, whatever address it points at
+        for host in [
+            Some("evil.example:1729"),
+            Some("127.0.0.1.evil.example:1729"),
+            Some("localhost.evil.example"),
+            Some("127.0.0.2:1729"),
+            Some("not a host"),
+            None,
+        ] {
+            assert_eq!(
+                status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "{host:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unknown_path_for_another_host_is_refused_too() {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/v1/tilekit/nope")
+            .header(HOST, "evil.example:1729")
+            .body(Body::empty())
+            .unwrap();
+        let res = router(Arc::new(AppState::for_tests()))
+            .oneshot(req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["status"], "failed");
     }
 }

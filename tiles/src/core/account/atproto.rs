@@ -23,7 +23,7 @@ use reqwest::Client;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, sync::Arc, time::Duration};
-use tokio::{process::Command, sync::oneshot};
+use tokio::sync::oneshot;
 
 use std::error::Error;
 
@@ -228,31 +228,6 @@ impl PendingLogin {
             handle: self.handle,
             did: self.did,
         })
-    }
-}
-
-/// Opens `url` in the default browser, where the platform has a way to
-pub fn open_in_browser(url: &str) {
-    let program_name = cfg_select! {
-        target_os = "macos" => {
-            "open"
-                    }
-        target_os = "linux" => {
-            "xdg-open"
-                    }
-        _ => {
-            ""
-        }
-    };
-
-    // adding this override due to  clippy not playing good w macro above
-    #[allow(clippy::const_is_empty)]
-    if !program_name.is_empty()
-        && let Ok(mut child) = Command::new(program_name).arg(url).spawn()
-    {
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
     }
 }
 
