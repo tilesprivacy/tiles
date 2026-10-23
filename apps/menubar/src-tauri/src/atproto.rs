@@ -31,8 +31,9 @@ const MISSES_BEFORE_UNKNOWN: u32 = 3;
 
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// the browser round trip, not a network read
-const LOGIN_TIMEOUT: Duration = Duration::from_secs(300);
+/// The daemon gives up on the browser after five minutes and says so. This only
+/// catches a daemon that went quiet
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(330);
 
 const STATUS_PATH: &str = "/v1/tilekit/atproto/status";
 const LOGIN_PATH: &str = "/v1/tilekit/atproto/login";
@@ -553,11 +554,59 @@ async fn request(handle: &str) -> Result<(), String> {
         })?;
 
     let status = res.status();
-    if status.is_success() {
-        return Ok(());
+    if !status.is_success() {
+        return Err(reason(&res.text().await.unwrap_or_default(), status));
     }
 
-    Err(reason(&res.text().await.unwrap_or_default(), status))
+    // the daemon streams the sign in: the url to open, then how it ended
+    let mut res = res;
+    let mut pending = String::new();
+    while let Some(chunk) = res.chunk().await.map_err(|err| err.to_string())? {
+        pending.push_str(&String::from_utf8_lossy(&chunk));
+        while let Some(end) = pending.find("\n\n") {
+            let block: String = pending.drain(..end + 2).collect();
+            match sse_event(&block) {
+                Some((name, data)) if name == "authorize" => {
+                    let url = data["url"]
+                        .as_str()
+                        .ok_or("The sign in came without a url")?;
+                    let mut open = std::process::Command::new("open")
+                        .arg(url)
+                        .spawn()
+                        .map_err(|err| format!("Could not open the browser: {err}"))?;
+                    // open exits as soon as it hands the url over, wait so it's not left a zombie
+                    std::thread::spawn(move || {
+                        let _ = open.wait();
+                    });
+                }
+                Some((name, _)) if name == "signed_in" => return Ok(()),
+                Some((name, data)) if name == "error" => {
+                    return Err(data["reason"]
+                        .as_str()
+                        .unwrap_or("The sign in failed")
+                        .to_owned());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Err("The daemon closed the sign in before it finished".into())
+}
+
+/// One server-sent event block as its name and JSON data. Keep-alive
+/// comments and blocks without data come back as `None`
+fn sse_event(block: &str) -> Option<(String, serde_json::Value)> {
+    let mut name = None;
+    let mut data = None;
+    for line in block.lines() {
+        if let Some(value) = line.strip_prefix("event:") {
+            name = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data = serde_json::from_str(value.trim()).ok();
+        }
+    }
+    Some((name?, data?))
 }
 
 fn reason(body: &str, status: reqwest::StatusCode) -> String {
@@ -572,7 +621,9 @@ fn reason(body: &str, status: reqwest::StatusCode) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{State, did_doc_url, no_record, parse, parse_profile, pds_from_doc, tally};
+    use super::{
+        State, did_doc_url, no_record, parse, parse_profile, pds_from_doc, sse_event, tally,
+    };
 
     const SUCCESS: &str = r#"{"status":"success","data":{"handle":"codelif.in","did":"did:plc:7iza6de2dwap2sbkpav7c6c6"}}"#;
 
@@ -690,5 +741,22 @@ mod tests {
         for code in [401, 429, 500, 502, 503] {
             assert!(!no_record(reqwest::StatusCode::from_u16(code).unwrap()));
         }
+    }
+
+    #[test]
+    fn sign_in_events_are_read_and_keep_alives_skipped() {
+        let (name, data) =
+            sse_event("event: authorize\ndata: {\"url\":\"https://bsky.social/x\"}\n\n").unwrap();
+        assert_eq!(name, "authorize");
+        assert_eq!(data["url"], "https://bsky.social/x");
+
+        let (name, data) = sse_event(
+            "event: signed_in\ndata: {\"handle\":\"alice.bsky.social\",\"did\":\"did:plc:x\"}\n\n",
+        )
+        .unwrap();
+        assert_eq!(name, "signed_in");
+        assert_eq!(data["handle"], "alice.bsky.social");
+
+        assert!(sse_event(":\n\n").is_none());
     }
 }

@@ -36,6 +36,7 @@ use std::fs::OpenOptions;
 use std::sync::Mutex;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::OnceCell;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tower_http::cors::CorsLayer;
@@ -71,6 +72,8 @@ pub struct AppState {
     /// The model the running agent was started with. Kept outside the agent lock, so
     /// saving a chat never waits behind a streaming reply
     pub agent_model: Mutex<Option<String>>,
+    /// The ATmosphere sign in waiting for the browser, if any
+    pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
 }
 
@@ -86,6 +89,7 @@ impl AppState {
             remote_running: Mutex::new(false),
             agent: None.into(),
             agent_model: Mutex::new(None),
+            login: None.into(),
             ui: Ui::new(),
         }
     }
@@ -249,6 +253,21 @@ fn is_json(headers: &HeaderMap) -> bool {
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
 }
 
+/// The client every CLI call to the daemon goes through. Each call makes sure the
+/// daemon is up and on this version, so commands never check it themselves, and a
+/// REPL that outlives a daemon restart still finds it. Starting and stopping the
+/// daemon don't use it
+pub async fn daemon_client() -> Result<&'static Client> {
+    static CLIENT: OnceCell<Client> = OnceCell::const_new();
+    // a running daemon on this version costs one ping
+    start_cmd(None).await?;
+    Ok(CLIENT.get_or_init(|| async { Client::new() }).await)
+}
+
+/// The daemon's address for `path`, to call through `daemon_client`
+pub fn daemon_url(path: &str) -> String {
+    format!("http://127.0.0.1:{DEFAULT_PORT}{path}")
+}
 async fn root(State(state): State<Arc<AppState>>) -> String {
     state.vsn.clone()
 }
@@ -362,6 +381,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         remote_running: Mutex::new(false),
         agent: None.into(),
         agent_model: Mutex::new(None),
+        login: None.into(),
         ui: ui.clone(),
     };
 
@@ -458,7 +478,8 @@ pub async fn start_internal_server(
 }
 
 async fn shutdown_signal(rx: Receiver<bool>) {
-    rx.await.expect("shutdown receiver paniced");
+    // a dropped sender means the sign in was cancelled or timed out, which is a stop too
+    let _ = rx.await;
 }
 
 async fn watch_shutdown(mut rx: watch::Receiver<bool>) {
@@ -692,10 +713,9 @@ async fn show_remote_status(State(state): State<Arc<AppState>>) -> Result<String
 }
 
 pub async fn share_remote_link() -> Result<String> {
-    let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-share";
-    let res = client
-        .post(addr)
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/remote-share"))
         .header(CONTENT_TYPE, "application/json")
         .send()
         .await;
@@ -714,10 +734,9 @@ pub async fn share_remote_link() -> Result<String> {
 }
 
 pub async fn unshare_remote_link() -> Result<()> {
-    let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-unshare";
-    let res = client
-        .post(addr)
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/remote-unshare"))
         .header(CONTENT_TYPE, "application/json")
         .send()
         .await;
@@ -729,9 +748,11 @@ pub async fn unshare_remote_link() -> Result<()> {
 }
 
 pub async fn remote_status() -> Result<String> {
-    let client = Client::new();
-    let addr = "http://127.0.0.1:1729/remote-status";
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/remote-status"))
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!(
@@ -759,9 +780,9 @@ async fn connect_remote_inference(
 }
 
 pub async fn connect_remote(ticket: &str) -> Result<()> {
-    let client = Client::new();
-    let res = client
-        .post("http://127.0.0.1:1729/connect-remote")
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/connect-remote"))
         .query(&[("ticket", ticket)])
         .header(CONTENT_TYPE, "application/json")
         .send()

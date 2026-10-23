@@ -1,4 +1,4 @@
-use crate::core::account::atproto::{fetch_logged_in_data, login, share_session};
+use crate::core::account::atproto::{fetch_logged_in_data, share_session};
 use crate::core::account::local::get_current_user;
 use crate::core::agent::pi::{PiAgent, PiWriter};
 use crate::core::agent::types::{
@@ -13,6 +13,7 @@ use crate::core::chats::{
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::Dbconn;
+use crate::daemon::atproto::sign_in;
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_inference_config,
     get_memory_path, get_model_cache, update_current_model, update_llama_config,
@@ -796,8 +797,11 @@ async fn process_share_session(
                 input.clear();
                 println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
                 stdin.read_line(&mut input)?;
-                login(input.trim()).await?;
-                share_session(&conn.common, &shared_session, is_private).await?;
+                // a bad handle is reported, it does not end the session
+                match sign_in(input.trim()).await {
+                    Ok(_) => share_session(&conn.common, &shared_session, is_private).await?,
+                    Err(err) => eprintln!("Could not sign in: {err}"),
+                }
             }
         }
         Err(err) => {
