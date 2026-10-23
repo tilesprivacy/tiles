@@ -22,6 +22,8 @@ exclude-newer = "2026-07-28T19:44:30+05:30"
 
 [tool.uv.exclude-newer-package]
 openresponses-types = "2026-08-06T00:00:00Z"
+# 2026.10.19 drops the emSign ECC Root CA - G3 root (CVE-2026-111943)
+certifi = "2026-10-21T00:00:00Z"
 
 [dependency-groups]
 dev = [
