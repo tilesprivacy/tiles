@@ -145,7 +145,8 @@ async fn request(app: &AppHandle, on: bool) -> Result<(), String> {
     };
 
     let res = client
-        .get(daemon::url(path))
+        .post(daemon::url(path))
+        .header("content-type", "application/json")
         .timeout(timeout)
         .send()
         .await

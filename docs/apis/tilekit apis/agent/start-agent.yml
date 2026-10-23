@@ -4,8 +4,11 @@ info:
   seq: 1
 
 http:
-  method: GET
+  method: POST
   url: "{{tilekit_base_url}}/agent/start"
+  body:
+    type: json
+    data: "{}"
   auth: inherit
 
 settings:

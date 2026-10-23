@@ -48,8 +48,8 @@ impl Drop for SseGuard {
 }
 pub fn agent_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/tilekit/agent/start", get(start_agent))
-        .route("/v1/tilekit/agent/end_session", get(end_current_session))
+        .route("/v1/tilekit/agent/start", post(start_agent))
+        .route("/v1/tilekit/agent/end_session", post(end_current_session))
         .route("/v1/tilekit/agent/state", get(agent_state))
         .route("/v1/tilekit/agent/prompt", post(process_chat_prompt))
 }

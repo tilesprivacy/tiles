@@ -24,6 +24,7 @@ use crate::{
         storage::db::get_db_conn,
     },
     daemon::{ApiJson, ApiResponse, AppError, AppState, daemon_client, daemon_url},
+    utils::open_in_browser,
 };
 
 /// A sign in waiting for the browser. Cancelling it frees the callback port
@@ -144,7 +145,7 @@ pub async fn sign_in(handle: &str) -> Result<AtprotoAccount> {
                     println!(
                         "\nIf the browser doesn't open automatically, open this URL:\n\n{url}\n"
                     );
-                    atproto::open_in_browser(url);
+                    open_in_browser(url);
                 }
                 "signed_in" => return Ok(serde_json::from_value(data)?),
                 "error" => {
