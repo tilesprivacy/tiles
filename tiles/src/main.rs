@@ -6,13 +6,14 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use tiles::{
     core::{
         self,
-        account::atproto::{login, logout},
+        account::atproto::logout,
         network::sync,
         plugin::{self, install, uninstall},
         service,
     },
     daemon::{
-        remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
+        atproto::sign_in, remote_status, share_remote_link, start_cmd, start_server, stop_cmd,
+        unshare_remote_link,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
@@ -615,7 +616,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
-                login(&handle).await?;
+                let account = sign_in(&handle).await?;
+                println!("Logged in successfully as @{}", account.handle);
             }
             AtCommands::Logout => {
                 logout(&db_conn.common)?;

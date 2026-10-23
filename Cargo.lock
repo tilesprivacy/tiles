@@ -7962,6 +7962,7 @@ dependencies = [
  "hf-hub",
  "hickory-resolver",
  "http-body-util",
+ "indicatif",
  "iroh",
  "iroh-blobs",
  "iroh-gossip",
