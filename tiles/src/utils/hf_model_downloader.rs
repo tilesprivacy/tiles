@@ -29,7 +29,8 @@ pub const DEFAULT_QUANT: &str = "Q4_K_M";
 /// Downloads the model `model_name` at `quant` (`Q4_K_M` when not given) with a
 /// progress bar, continuing an earlier partial download
 pub async fn pull_model(model_name: &str, quant: Option<&str>) -> Result<()> {
-    let plan = plan(model_name, quant).await?;
+    let hub = Hub::from_env()?;
+    let plan = plan(&hub, model_name, quant).await?;
     let root = get_or_create_model_download_path()?;
     let (total, done) = (plan.total(), on_disk(&plan, &root).await);
     // nothing to download, only the snapshot links to check
@@ -41,6 +42,7 @@ pub async fn pull_model(model_name: &str, quant: Option<&str>) -> Result<()> {
     bar.set_message(model_name.to_owned());
     let mut verifying = false;
     let downloaded = download(
+        &hub,
         &plan,
         &root,
         &CancellationToken::new(),
@@ -157,14 +159,14 @@ const RETRIES: u32 = 5;
 
 /// The Hugging Face Hub, at `HF_ENDPOINT` if set, sending `HF_TOKEN` for private
 /// and gated models
-struct Hub {
+pub struct Hub {
     client: Client,
     endpoint: String,
     token: Option<String>,
 }
 
 impl Hub {
-    fn from_env() -> Result<Self> {
+    pub fn from_env() -> Result<Self> {
         let endpoint = std::env::var("HF_ENDPOINT").unwrap_or_else(|_| HF_ENDPOINT.to_owned());
         let token = std::env::var("HF_TOKEN")
             .ok()
@@ -172,7 +174,7 @@ impl Hub {
         Self::new(&endpoint, token)
     }
 
-    fn new(endpoint: &str, token: Option<String>) -> Result<Self> {
+    pub fn new(endpoint: &str, token: Option<String>) -> Result<Self> {
         let client = Client::builder()
             .user_agent(USER_AGENT)
             .connect_timeout(STALL_TIMEOUT)
@@ -253,11 +255,7 @@ impl From<Sibling> for ModelFile {
 }
 
 /// Lists the files of a model in huggingface API
-pub async fn plan(repo: &str, quant: Option<&str>) -> Result<DownloadPlan> {
-    plan_from(&Hub::from_env()?, repo, quant).await
-}
-
-async fn plan_from(hub: &Hub, repo: &str, quant: Option<&str>) -> Result<DownloadPlan> {
+pub async fn plan(hub: &Hub, repo: &str, quant: Option<&str>) -> Result<DownloadPlan> {
     let quant = quant.unwrap_or(DEFAULT_QUANT);
     let res = hub
         .get(&format!("api/models/{repo}/revision/main?blobs=true"))
@@ -315,15 +313,6 @@ pub fn repo_dir(root: &Path, repo: &str) -> PathBuf {
 /// Downloads what `plan` lists into the model cache at `root`, continuing any
 /// partial files. Cancelling pauses it and keeps the partial files
 pub async fn download(
-    plan: &DownloadPlan,
-    root: &Path,
-    cancel: &CancellationToken,
-    on_event: impl FnMut(DownloadEvent),
-) -> Result<DownloadOutcome> {
-    download_from(&Hub::from_env()?, plan, root, cancel, on_event).await
-}
-
-async fn download_from(
     hub: &Hub,
     plan: &DownloadPlan,
     root: &Path,
@@ -692,7 +681,7 @@ mod tests {
     }
 
     async fn run(hub: &Hub, plan: &DownloadPlan, root: &Path) -> Result<DownloadOutcome> {
-        download_from(hub, plan, root, &CancellationToken::new(), |_| {}).await
+        download(hub, plan, root, &CancellationToken::new(), |_| {}).await
     }
 
     fn snapshot_file(root: &Path, name: &str) -> Vec<u8> {
@@ -742,14 +731,14 @@ mod tests {
             .await;
 
         let hub = hub_for(&server);
-        let plan = plan_from(&hub, REPO, Some("Q4_K_M")).await.unwrap();
-        assert_eq!(plan.commit, COMMIT);
+        let found = plan(&hub, REPO, Some("Q4_K_M")).await.unwrap();
+        assert_eq!(found.commit, COMMIT);
         assert_eq!(
-            plan.files,
+            found.files,
             [&files[0], &files[1], &files[2], &files[4]].map(Clone::clone)
         );
 
-        let missing = plan_from(&hub, REPO, Some("Q2_K")).await.unwrap_err();
+        let missing = plan(&hub, REPO, Some("Q2_K")).await.unwrap_err();
         assert!(
             missing
                 .to_string()
@@ -770,7 +759,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let err = plan_from(&hub_for(&server), REPO, None).await.unwrap_err();
+        let err = plan(&hub_for(&server), REPO, None).await.unwrap_err();
         assert!(err.to_string().contains("No model org/model-GGUF"));
         assert!(err.to_string().contains("HF_TOKEN"));
     }
@@ -782,7 +771,7 @@ mod tests {
         let root = tempdir().unwrap();
         let mut events = vec![];
 
-        let outcome = download_from(
+        let outcome = download(
             &hub_for(&server),
             &test_plan(),
             root.path(),
@@ -837,7 +826,7 @@ mod tests {
         write_part(root.path(), &MODEL[..5]);
         let mut events = vec![];
 
-        let outcome = download_from(
+        let outcome = download(
             &hub_for(&server),
             &test_plan(),
             root.path(),
@@ -999,7 +988,7 @@ mod tests {
 
         let outcome = tokio::time::timeout(
             Duration::from_secs(5),
-            download_from(
+            download(
                 &hub_for(&server),
                 &test_plan(),
                 root.path(),
@@ -1089,7 +1078,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn the_default_model_plans_against_hugging_face() {
-        let plan = plan("unsloth/gemma-4-12b-it-GGUF", Some("Q4_K_M"))
+        let hub = Hub::from_env().unwrap();
+        let plan = plan(&hub, "unsloth/gemma-4-12b-it-GGUF", Some("Q4_K_M"))
             .await
             .unwrap();
         let names: Vec<&str> = plan.files.iter().map(|file| file.name.as_str()).collect();
@@ -1113,7 +1103,8 @@ mod tests {
     #[tokio::test]
     #[ignore]
     async fn a_real_download_pauses_and_resumes() {
-        let mut plan = plan("unsloth/gemma-4-12b-it-GGUF", Some("Q4_K_M"))
+        let hub = Hub::from_env().unwrap();
+        let mut plan = plan(&hub, "unsloth/gemma-4-12b-it-GGUF", Some("Q4_K_M"))
             .await
             .unwrap();
         plan.files
@@ -1131,7 +1122,9 @@ mod tests {
             stop.cancel();
         });
         let started = std::time::Instant::now();
-        let outcome = download(&plan, root.path(), &cancel, |_| {}).await.unwrap();
+        let outcome = download(&hub, &plan, root.path(), &cancel, |_| {})
+            .await
+            .unwrap();
         let paused_at = std::fs::metadata(&part).unwrap().len();
         let secs = started.elapsed().as_secs_f64();
         println!(
@@ -1164,11 +1157,17 @@ mod tests {
 
         let resumed = std::time::Instant::now();
         let mut verified = false;
-        let outcome = download(&plan, root.path(), &CancellationToken::new(), |event| {
-            if matches!(event, DownloadEvent::Verifying { .. }) {
-                verified = true;
-            }
-        })
+        let outcome = download(
+            &hub,
+            &plan,
+            root.path(),
+            &CancellationToken::new(),
+            |event| {
+                if matches!(event, DownloadEvent::Verifying { .. }) {
+                    verified = true;
+                }
+            },
+        )
         .await
         .unwrap();
         println!(

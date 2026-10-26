@@ -11,7 +11,7 @@ use std::{
 use crate::{
     core::agent::pi::PiAgent,
     daemon::{
-        account::account_router, agent::agent_router, atproto::atproto_router,
+        account::account_router, agent::agent_router, atproto::atproto_router, model::model_router,
         server::server_router, session::session_router,
     },
 };
@@ -48,6 +48,7 @@ use tower_http::cors::CorsLayer;
 pub mod account;
 pub mod agent;
 pub mod atproto;
+pub mod model;
 pub mod server;
 pub mod session;
 pub mod web;
@@ -81,6 +82,8 @@ pub struct AppState {
     pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
     pub web_ui: web::WebUiState,
+    /// The default model's download, or none when the default Modelfile can't be read
+    pub model: Option<Arc<model::ModelDownload>>,
 }
 
 #[cfg(test)]
@@ -100,6 +103,7 @@ impl AppState {
             web_ui: web::WebUiState::Serving {
                 url: format!("http://127.0.0.1:{}", web::UI_PORT),
             },
+            model: None,
         }
     }
 }
@@ -116,6 +120,7 @@ pub enum AppError {
     MethodNotAllowed(String),
     UnsupportedMediaType(String),
     ServiceUnavailable(String),
+    InsufficientStorage(String),
 }
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -130,6 +135,7 @@ impl IntoResponse for AppError {
             Self::MethodNotAllowed(e) => (StatusCode::METHOD_NOT_ALLOWED, e),
             Self::UnsupportedMediaType(e) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e),
             Self::ServiceUnavailable(e) => (StatusCode::SERVICE_UNAVAILABLE, e),
+            Self::InsufficientStorage(e) => (StatusCode::INSUFFICIENT_STORAGE, e),
         };
 
         let body = Json(json!({
@@ -270,6 +276,7 @@ fn tilekit_router() -> Router<Arc<AppState>> {
         .merge(account_router())
         .merge(session_router())
         .merge(atproto_router())
+        .merge(model_router())
         .route("/v1/tilekit/ui", get(web::ui_state))
 }
 
@@ -435,6 +442,10 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let ui = Ui::new();
     let (web_ui_state, web_ui_listener) = web::bind().await;
+    let model = model::ModelDownload::for_default_model()
+        .inspect_err(|err| log::warn!("Model downloads are off: {err:#}"))
+        .ok()
+        .map(Arc::new);
 
     let state = AppState {
         shutdown_sender: shutdown_tx,
@@ -447,6 +458,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         login: None.into(),
         ui: ui.clone(),
         web_ui: web_ui_state,
+        model,
     };
 
     let shared_state = Arc::new(state);
@@ -538,6 +550,10 @@ fn listen_for_signals(state: Arc<AppState>) {
 pub async fn shutdown_all(state: Arc<AppState>) {
     info!("Daemon server shutting down");
     ui::begin_stop(&state.ui);
+    // keeps what a running download got, so it shows as paused next time
+    if let Some(model) = &state.model {
+        let _ = model.pause().await;
+    }
     // its ping has no timeout of its own, and a stuck server must not hold the
     // shutdown open forever
     match tokio::time::timeout(
