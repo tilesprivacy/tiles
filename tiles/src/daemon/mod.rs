@@ -108,6 +108,7 @@ impl AppState {
                 crate::utils::hf_model_downloader::Hub::new("http://127.0.0.1:9", None)
                     .expect("a test hub"),
                 std::env::temp_dir(),
+                std::env::temp_dir(),
                 None,
             ),
         }
@@ -128,9 +129,9 @@ pub enum AppError {
     ServiceUnavailable(String),
     InsufficientStorage(String),
 }
-impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, reason) = match self {
+impl AppError {
+    fn parts(self) -> (StatusCode, String) {
+        match self {
             Self::NotFound(e) => (StatusCode::NOT_FOUND, e),
             Self::InternalServerError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             Self::RequestTimeout => (StatusCode::REQUEST_TIMEOUT, "request timedout".to_string()),
@@ -142,8 +143,18 @@ impl IntoResponse for AppError {
             Self::UnsupportedMediaType(e) => (StatusCode::UNSUPPORTED_MEDIA_TYPE, e),
             Self::ServiceUnavailable(e) => (StatusCode::SERVICE_UNAVAILABLE, e),
             Self::InsufficientStorage(e) => (StatusCode::INSUFFICIENT_STORAGE, e),
-        };
+        }
+    }
 
+    /// The message a client would get as `reason`
+    pub fn reason(self) -> String {
+        self.parts().1
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> axum::response::Response {
+        let (status, reason) = self.parts();
         let body = Json(json!({
             "status": "failed",
             "reason": reason

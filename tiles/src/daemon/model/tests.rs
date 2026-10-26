@@ -17,7 +17,9 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use super::{DownloadState, ModelDownload, Models, Spec, model_router};
+use super::{
+    DownloadState, ModelDownload, Models, Spec, lineup::LINEUP, model_router, modelfile_spec,
+};
 use crate::{
     daemon::AppState,
     utils::hf_model_downloader::{Hub, repo_dir},
@@ -88,6 +90,7 @@ impl Daemon {
         let mut models = Models::new(
             Hub::new(&server.uri(), None).unwrap(),
             root.path().to_path_buf(),
+            root.path().join("modelfiles"),
             Some(Spec::parse(REPO).unwrap()),
         );
         change(&mut models);
@@ -342,4 +345,87 @@ async fn no_model_named_and_no_default_is_a_404() {
         .unwrap();
     let res = model_router().with_state(state).oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_lineup_lists_each_modelfile_with_its_download() {
+    let server = hub_with_model(Duration::ZERO).await;
+    serve_model(&server, "org/e2b-GGUF", Duration::ZERO).await;
+    serve_model(&server, "org/e4b-GGUF", Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    let modelfiles = daemon.root.path().join("modelfiles");
+    std::fs::create_dir_all(&modelfiles).unwrap();
+    // the 31B's Modelfile is left out, and the 26B names a model the Hub doesn't have
+    for (id, from) in [
+        ("gemma-4-e2b-gguf", "org/e2b-GGUF:Q4_K_M"),
+        ("gemma-4-e4b-gguf", "org/e4b-GGUF:Q4_K_M"),
+        ("gemma-4-12b-gguf", "org/model-GGUF:Q4_K_M"),
+        ("gemma-4-26b-a4b-gguf", "org/missing-GGUF:UD-Q4_K_M"),
+    ] {
+        std::fs::write(modelfiles.join(id), format!("FROM {from}\n")).unwrap();
+    }
+    let blobs = repo_dir(daemon.root.path(), REPO).join("blobs");
+    std::fs::create_dir_all(&blobs).unwrap();
+    std::fs::write(blobs.join(format!("{}.part", model_sha256())), &MODEL[..5]).unwrap();
+
+    let lineup = daemon
+        .state
+        .models
+        .lineup(Some("org/e4b-GGUF:q4_k_m"))
+        .await;
+    let lineup = serde_json::to_value(lineup).unwrap();
+
+    let ids: Vec<&str> = lineup
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|model| model["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, LINEUP.map(|(id, _)| id));
+    let total = CONFIG.len() + MODEL.len();
+    let [e2b, e4b, b12, b26, b31] = [0, 1, 2, 3, 4].map(|i| &lineup[i]);
+    assert_eq!(e2b["label"], "Gemma 4 E2B");
+    assert_eq!(e2b["model"], "org/e2b-GGUF:Q4_K_M");
+    assert_eq!(e2b["total"], total);
+    assert_eq!(e2b["download"], json!({ "state": "idle" }));
+    assert_eq!(e4b["current"], true);
+    assert_eq!(e2b["current"], false);
+    assert_eq!(b12["on_disk"], 5);
+    assert_eq!(
+        b12["download"],
+        json!({ "state": "paused", "done": 5, "total": total })
+    );
+    assert_eq!(b26["model"], "org/missing-GGUF:UD-Q4_K_M");
+    assert!(b26["error"].as_str().unwrap().contains("org/missing-GGUF"));
+    assert_eq!(b31["model"], Value::Null);
+    assert!(b31["error"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn a_lineup_download_shows_in_the_lineup() {
+    let server = hub_with_model(Duration::from_millis(300)).await;
+    let daemon = Daemon::new(&server);
+    let modelfiles = daemon.root.path().join("modelfiles");
+    std::fs::create_dir_all(&modelfiles).unwrap();
+    std::fs::write(
+        modelfiles.join("gemma-4-12b-gguf"),
+        "FROM org/model-GGUF:Q4_K_M\n",
+    )
+    .unwrap();
+
+    daemon
+        .start(json!({ "model": "org/model-GGUF:Q4_K_M" }))
+        .await;
+    let lineup = serde_json::to_value(daemon.state.models.lineup(None).await).unwrap();
+
+    assert_eq!(lineup[2]["download"]["state"], "downloading");
+}
+
+#[test]
+fn every_lineup_model_has_a_bundled_modelfile() {
+    let modelfiles = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../modelfiles");
+    for (id, _) in LINEUP {
+        let spec = modelfile_spec(&modelfiles.join(id)).unwrap();
+        assert!(spec.repo.starts_with("unsloth/gemma-4-"), "{id}: {spec}");
+    }
 }

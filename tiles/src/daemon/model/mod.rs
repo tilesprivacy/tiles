@@ -1,9 +1,11 @@
 //! Downloads models with progress, pause and resume, for the UI and the CLI alike
 //!
 //! - `download`: one model's download, its state and its progress stream
+//! - `lineup`: the models Tiles offers, from their Modelfiles
 //! - `pull`: the CLI's download, as a client of these routes
 
 mod download;
+mod lineup;
 mod pull;
 #[cfg(test)]
 mod tests;
@@ -11,7 +13,7 @@ mod tests;
 use std::{
     collections::HashMap,
     fmt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
@@ -23,6 +25,7 @@ use axum::{
     routing::get,
 };
 use serde::Deserialize;
+use serde_json::json;
 use tilekit::modelfile::split_model_spec;
 
 pub use download::{DownloadState, ModelDownload};
@@ -32,7 +35,9 @@ use crate::{
     daemon::{ApiJson, ApiResponse, AppError, AppState},
     repl::get_default_modelfile,
     utils::{
-        config::{DefaultProvider, get_or_create_model_download_path},
+        config::{
+            ConfigProvider, DefaultProvider, get_config_json, get_or_create_model_download_path,
+        },
         hf_model_downloader::{DEFAULT_QUANT, Hub},
     },
 };
@@ -42,6 +47,7 @@ const SPARE_ROOM: u64 = 1_000_000_000;
 
 pub fn model_router() -> Router<Arc<AppState>> {
     Router::new()
+        .route("/v1/tilekit/models", get(lineup))
         .route("/v1/tilekit/model/status", get(status))
         .route(
             "/v1/tilekit/model/download",
@@ -87,6 +93,8 @@ pub struct Models {
     hub: Arc<Hub>,
     /// The models folder
     root: PathBuf,
+    /// The Modelfiles folder, which has one for each model in the lineup
+    modelfiles: PathBuf,
     spare_room: u64,
     /// The default Modelfile's model, for requests that name none
     default: Option<Spec>,
@@ -94,24 +102,27 @@ pub struct Models {
 }
 
 impl Models {
-    pub fn new(hub: Hub, root: PathBuf, default: Option<Spec>) -> Self {
+    pub fn new(hub: Hub, root: PathBuf, modelfiles: PathBuf, default: Option<Spec>) -> Self {
         Self {
             hub: Arc::new(hub),
             root,
+            modelfiles,
             spare_room: SPARE_ROOM,
             default,
             downloads: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Hugging Face, the models folder and the default Modelfile's model
+    /// Hugging Face, the models folder and the Modelfiles in the lib dir
     pub fn for_daemon() -> anyhow::Result<Self> {
-        let default = default_model()
+        let default = get_default_modelfile(DefaultProvider)
+            .and_then(|path| modelfile_spec(&path))
             .inspect_err(|err| log::warn!("No default model to download: {err:#}"))
             .ok();
         Ok(Self::new(
             Hub::from_env()?,
             get_or_create_model_download_path()?,
+            DefaultProvider.get_lib_dir()?.join("modelfiles"),
             default,
         ))
     }
@@ -126,6 +137,10 @@ impl Models {
                 AppError::NotFound("No model was named, and there's no default model".to_owned())
             })?,
         };
+        Ok(self.download(spec))
+    }
+
+    fn download(&self, spec: Spec) -> Arc<ModelDownload> {
         let mut downloads = self.downloads.lock().expect("model downloads lock");
         let download = downloads.entry(spec).or_insert_with_key(|spec| {
             Arc::new(ModelDownload::new(
@@ -135,7 +150,7 @@ impl Models {
                 self.spare_room,
             ))
         });
-        Ok(download.clone())
+        download.clone()
     }
 
     /// Pauses every running download, keeping what each got
@@ -153,13 +168,13 @@ impl Models {
     }
 }
 
-fn default_model() -> anyhow::Result<Spec> {
-    let path = get_default_modelfile(DefaultProvider)?;
+/// The model a Modelfile's `FROM` names
+fn modelfile_spec(path: &Path) -> anyhow::Result<Spec> {
     let modelfile =
         tilekit::modelfile::parse_from_file(&path.to_string_lossy()).map_err(anyhow::Error::msg)?;
     let repo = modelfile
         .from
-        .context("The default Modelfile has no FROM")?;
+        .with_context(|| format!("{} has no FROM", path.display()))?;
     Spec::new(&repo, modelfile.quant.as_deref())
 }
 
@@ -173,6 +188,16 @@ struct Follow {
     model: Option<String>,
     #[serde(default)]
     pause_on_close: bool,
+}
+
+/// `GET /v1/tilekit/models`: the lineup, each with its download
+async fn lineup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // the model `tiles run` last ran
+    let current = get_config_json()
+        .ok()
+        .and_then(|config| config["model"]["current"].as_str().map(str::to_owned));
+    let models = state.models.lineup(current.as_deref()).await;
+    ApiResponse::success(json!({ "models": models }))
 }
 
 /// `GET /v1/tilekit/model/status?model=org/name:quant`
