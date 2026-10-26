@@ -10,7 +10,6 @@ use super::{
     hub::{Hub, check},
 };
 
-/// Default quantization pulled when a modelfile doesn't specify one
 pub const DEFAULT_QUANT: &str = "Q4_K_M";
 
 const METADATA_SUFFIXES: [&str; 5] = [".json", ".txt", ".md", ".gitattributes", "LICENSE"];
@@ -48,7 +47,7 @@ impl From<Sibling> for ModelFile {
     }
 }
 
-/// Lists the files of a model in huggingface API
+/// The files of `repo` to download for `quant`
 pub async fn plan(hub: &Hub, repo: &str, quant: Option<&str>) -> Result<DownloadPlan> {
     let quant = quant.unwrap_or(DEFAULT_QUANT);
     let res = hub
@@ -84,7 +83,7 @@ pub async fn plan(hub: &Hub, repo: &str, quant: Option<&str>) -> Result<Download
         .filter(|sibling| wanted(&sibling.rfilename, &quant_gguf))
         .map(ModelFile::from)
         .collect();
-    // these become paths in the cache, and HF_ENDPOINT can point at any mirror
+    // these become paths on disk, and HF_ENDPOINT can be any server
     if !is_hex(&info.sha) {
         bail!(
             "Hugging Face sent {repo}'s commit as {:?}, which isn't a commit id",
@@ -107,7 +106,6 @@ pub async fn plan(hub: &Hub, repo: &str, quant: Option<&str>) -> Result<Download
     })
 }
 
-// a relative path that stays inside the folder it's joined to
 fn is_plain_path(name: &str) -> bool {
     !name.is_empty()
         && Path::new(name)
@@ -128,8 +126,7 @@ fn wanted(name: &str, quant_gguf: &str) -> bool {
         || (top_level && lower.ends_with(".gguf") && lower.contains("mtp"))
 }
 
-/// True for gguf files that can serve as the main model (excludes the
-/// mmproj vision encoder and MTP draft heads, which are never main models).
+// not the mmproj vision encoder or an MTP draft head
 fn is_main_gguf(filename: &str) -> bool {
     let name = filename.to_lowercase();
     name.ends_with(".gguf") && !name.contains("mmproj") && !name.contains("mtp")

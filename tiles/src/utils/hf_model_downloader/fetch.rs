@@ -1,4 +1,4 @@
-//! Downloads one file, continuing a partial one and retrying a dropped connection
+//! Downloads one file, with resume and retries
 
 use std::{fmt, path::Path, time::Duration};
 
@@ -17,10 +17,9 @@ use super::{
     hub::{Hub, check},
 };
 
-// a failed download is retried after 1, 2, 4, 8 and 16 seconds
+// retried after 1, 2, 4, 8 and 16 seconds
 const RETRIES: u32 = 5;
 
-/// The connection closed before the whole file came
 #[derive(Debug)]
 struct Interrupted {
     done: u64,
@@ -39,7 +38,6 @@ impl fmt::Display for Interrupted {
 
 impl std::error::Error for Interrupted {}
 
-/// A dropped connection, a timeout or a busy server, which a retry can get past
 fn is_transient(err: &anyhow::Error) -> bool {
     err.is::<Interrupted>()
         || err.downcast_ref::<reqwest::Error>().is_some_and(|err| {
@@ -49,8 +47,7 @@ fn is_transient(err: &anyhow::Error) -> bool {
         })
 }
 
-/// Downloads the rest of `file` into `part`, retrying when the connection fails.
-/// Returns the file's SHA-256, or `None` when cancelled
+// the file's SHA-256, or `None` when cancelled
 pub(super) async fn fetch(
     hub: &Hub,
     plan: &DownloadPlan,
@@ -66,7 +63,7 @@ pub(super) async fn fetch(
             Ok(fetched) => return Ok(fetched),
             Err(err) => err,
         };
-        // any progress earns a fresh set of retries
+        // any progress resets the retries
         if file_len(part).await > before {
             retries = 0;
         }
@@ -100,7 +97,7 @@ async fn fetch_once(
         done: offset,
         total: size,
     });
-    // the hash carries on from the bytes already on disk, so the end needs no second pass
+    // hash what's on disk first, so the end needs no second pass
     let mut hasher = if offset > 0 {
         on_event(DownloadEvent::Verifying {
             file: file.name.clone(),
@@ -124,7 +121,7 @@ async fn fetch_once(
         () = cancel.cancelled() => return Ok(None),
         res = request.send() => check(res?, &plan.repo)?,
     };
-    // a server that ignores the range sends everything again
+    // the server ignored the range
     if offset > 0 && res.status() != StatusCode::PARTIAL_CONTENT {
         offset = 0;
         hasher = Sha256::new();
@@ -139,7 +136,7 @@ async fn fetch_once(
         .await?;
     let mut writer = BufWriter::new(handle);
     let mut done = offset;
-    // in a block so the writer is flushed however it ends
+    // so the writer is flushed however it ends
     let copied: Result<bool> = async {
         loop {
             let chunk = tokio::select! {
@@ -167,7 +164,6 @@ async fn fetch_once(
     Ok(Some(hex(hasher)))
 }
 
-/// The sha of what's in `path` so far, ready to hash more onto
 async fn hash_file(path: &Path) -> Result<Sha256> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {

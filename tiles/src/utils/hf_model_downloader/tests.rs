@@ -1,4 +1,4 @@
-//! Downloads against a mock Hub, and two against the real one, run by hand
+//! Downloads against a mock Hub, and two against the real one
 
 use std::{path::Path, time::Duration};
 
@@ -70,7 +70,6 @@ async fn serve_file(server: &MockServer, name: &str, bytes: &[u8]) {
         .await;
 }
 
-// everything but the model, which each test serves its own way
 async fn serve_the_rest(server: &MockServer) {
     serve_file(server, "config.json", CONFIG).await;
     serve_file(server, "MTP/mtp-head.gguf", MTP).await;
@@ -101,7 +100,6 @@ fn snapshot_file(root: &Path, name: &str) -> Vec<u8> {
     .unwrap()
 }
 
-// a file as the Hub's api lists it
 fn sibling(file: &ModelFile) -> Value {
     json!({
         "rfilename": file.name,
@@ -315,7 +313,7 @@ async fn an_old_hf_hub_partial_file_is_continued() {
     let root = tempdir().unwrap();
     let blobs = repo_dir(root.path(), REPO).join("blobs");
     std::fs::create_dir_all(&blobs).unwrap();
-    // hf-hub's layout: the full size, the first 7 bytes real, then the byte count
+    // full size, 7 real bytes, then the byte count
     let mut sync_part = MODEL[..7].to_vec();
     sync_part.resize(MODEL.len(), 0);
     sync_part.extend_from_slice(&7u64.to_le_bytes());
@@ -553,7 +551,7 @@ async fn finished_files_are_not_downloaded_again() {
     assert_eq!(snapshot_file(root.path(), "model-Q4_K_M.gguf"), MODEL);
 }
 
-// talks to the real Hugging Face, so only run by hand: cargo test -- --ignored
+// real Hugging Face: cargo test -- --ignored
 #[tokio::test]
 #[ignore]
 async fn the_default_model_plans_against_hugging_face() {
@@ -578,7 +576,7 @@ async fn the_default_model_plans_against_hugging_face() {
     assert!(plan.files.iter().all(|file| file.size > 0));
 }
 
-// downloads the 465 MB mtp head from the real Hugging Face, so only run by hand
+// downloads 465 MB from the real Hugging Face
 #[tokio::test]
 #[ignore]
 async fn a_real_download_pauses_and_resumes() {

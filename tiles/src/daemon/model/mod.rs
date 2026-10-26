@@ -1,8 +1,4 @@
-//! Downloads models with progress, pause and resume, for the UI and the CLI alike
-//!
-//! - `download`: one model's download, its state and its progress stream
-//! - `bundled`: the models Tiles ships a Modelfile for
-//! - `pull`: the CLI's download, as a client of these routes
+//! Model downloads with pause and resume, for the UI and the CLI
 
 mod bundled;
 mod download;
@@ -48,13 +44,12 @@ use crate::{
     },
 };
 
-// left free after a download, so it never fills the disk to the last byte
+// kept free after a download
 const SPARE_ROOM: u64 = 1_000_000_000;
-// changes a slow events client can fall behind by before it's sent everything again
+// how far a slow events client can fall behind
 const CHANGES_KEPT: usize = 64;
 
-/// Sent by the CLI with `pause_on_close`. Other websites can't send a custom header
-/// without a CORS preflight, which the daemon refuses, so a page can't pause downloads
+// needed for `pause_on_close`, a web page can't send it without a CORS preflight
 pub(super) const CLIENT_HEADER: &str = "x-tiles-client";
 
 pub fn model_router() -> Router<Arc<AppState>> {
@@ -68,7 +63,7 @@ pub fn model_router() -> Router<Arc<AppState>> {
         )
 }
 
-/// A model as `org/name:quant`, the quant `Q4_K_M` when not given
+/// A model as `org/name:quant`
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Spec {
     repo: String,
@@ -84,7 +79,7 @@ impl Spec {
         }
         Ok(Self {
             repo: repo.to_owned(),
-            // file names are matched ignoring case, so one model has one entry
+            // uppercased so one model has one entry
             quant: quant.unwrap_or(DEFAULT_QUANT).to_uppercase(),
         })
     }
@@ -101,20 +96,15 @@ impl fmt::Display for Spec {
     }
 }
 
-/// Every model the daemon has been asked about, each with its own download
 pub struct Models {
     hub: Arc<Hub>,
-    /// The models folder
     root: PathBuf,
-    /// The Modelfiles folder, with one for each bundled model
     modelfiles: PathBuf,
     spare_room: u64,
-    /// The default Modelfile's model, for requests that name none
     default: Option<Spec>,
     downloads: Mutex<HashMap<Spec, Arc<ModelDownload>>>,
-    /// Every download's changes, for the events stream
     changes: broadcast::Sender<ModelChange>,
-    /// The model `tiles run` last ran. The daemon reads it from config.toml
+    // the model `tiles run` last ran
     current_model: fn() -> Option<String>,
 }
 
@@ -132,7 +122,6 @@ impl Models {
         }
     }
 
-    /// Hugging Face, the models folder and the Modelfiles in the lib dir
     pub fn for_daemon() -> anyhow::Result<Self> {
         let default = get_default_modelfile(DefaultProvider)
             .and_then(|path| modelfile_spec(&path))
@@ -152,7 +141,7 @@ impl Models {
         })
     }
 
-    /// The download of `model`, or of the default model when none is named
+    // the default model when none is named
     fn get(&self, model: Option<&str>) -> Result<Arc<ModelDownload>, AppError> {
         let spec = match model {
             Some(model) => {
@@ -179,7 +168,7 @@ impl Models {
         download.clone()
     }
 
-    /// Every download that's running, or stopped before the end
+    /// Downloads that are running, paused or failed
     pub fn unfinished(&self) -> Vec<ModelChange> {
         self.downloads
             .lock()
@@ -190,7 +179,6 @@ impl Models {
             .collect()
     }
 
-    /// Pauses every running download, keeping what each got
     pub async fn pause_all(&self) {
         let downloads: Vec<_> = self
             .downloads
@@ -205,7 +193,6 @@ impl Models {
     }
 }
 
-/// The model a Modelfile's `FROM` names
 fn modelfile_spec(path: &Path) -> anyhow::Result<Spec> {
     let modelfile =
         tilekit::modelfile::parse_from_file(&path.to_string_lossy()).map_err(anyhow::Error::msg)?;
@@ -227,29 +214,24 @@ struct Follow {
     pause_on_close: bool,
 }
 
-/// `GET /v1/tilekit/model/downloads`: every download that's running, paused or
-/// failed, wherever it was started
 async fn downloads(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ApiResponse::success(json!({ "downloads": state.models.unfinished() }))
 }
 
-/// `GET /v1/tilekit/model/events`, as server-sent events that stay open: the unfinished
-/// downloads, then every change to any model's download, from any client
+// the unfinished downloads, then every change from any client
 async fn events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // subscribed before the first list, so no change falls between the two
+    // subscribe first so no change is missed, and list now, as the stream waits to be read
     let mut changes = state.models.changes.subscribe();
+    let mut pending = state.models.unfinished();
     let stream = async_stream::stream! {
-        let mut send_all = true;
         loop {
-            if std::mem::take(&mut send_all) {
-                for change in state.models.unfinished() {
-                    yield Ok::<_, Infallible>(model_event(&change));
-                }
+            for change in std::mem::take(&mut pending) {
+                yield Ok::<_, Infallible>(model_event(&change));
             }
             match changes.recv().await {
                 Ok(change) => yield Ok(model_event(&change)),
-                // the newest changes are still there, but older ones were dropped
-                Err(RecvError::Lagged(_)) => send_all = true,
+                // some changes were dropped, so send everything again
+                Err(RecvError::Lagged(_)) => pending = state.models.unfinished(),
                 Err(RecvError::Closed) => break,
             }
         }
@@ -263,8 +245,7 @@ fn model_event(change: &ModelChange) -> Event {
         .data(json!(change).to_string())
 }
 
-/// `GET /v1/tilekit/model/status?model=org/name:quant` for one model. With no model,
-/// every bundled model, the default one marked
+// with no model, every bundled model
 async fn status(
     State(state): State<Arc<AppState>>,
     Query(which): Query<Which>,
@@ -280,8 +261,6 @@ async fn status(
     })
 }
 
-/// `POST /v1/tilekit/model/download` with `{"model": "org/name:quant"}`, or `{}`
-/// for the default model
 async fn start(
     State(state): State<Arc<AppState>>,
     ApiJson(which): ApiJson<Which>,
@@ -290,7 +269,6 @@ async fn start(
     Ok(ApiResponse::success(download.start().await?))
 }
 
-/// `DELETE /v1/tilekit/model/download?model=org/name:quant`
 async fn pause(
     State(state): State<Arc<AppState>>,
     Query(which): Query<Which>,
@@ -299,9 +277,7 @@ async fn pause(
     Ok(ApiResponse::success(download.pause().await?))
 }
 
-/// `GET /v1/tilekit/model/download?model=org/name:quant`, as server-sent events.
-/// Closing it doesn't stop the download, unless it asked with `pause_on_close=true`
-/// and the `x-tiles-client` header
+// closing it only pauses the download with `pause_on_close`
 async fn progress(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

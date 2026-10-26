@@ -1,9 +1,8 @@
-//! Reads the server-sent events the daemon streams, for its CLI clients
+//! Reads the daemon's server-sent events, for the CLI
 
 use serde_json::Value;
 
-/// Takes the finished event blocks off the buffer as their name and json data. A block
-/// cut off mid chunk waits for the next one
+// a block cut off mid chunk waits for the next one
 pub(crate) fn take_events(pending: &mut String) -> Vec<(String, Value)> {
     let mut events = vec![];
     while let Some(end) = pending.find("\n\n") {
@@ -13,7 +12,7 @@ pub(crate) fn take_events(pending: &mut String) -> Vec<(String, Value)> {
     events
 }
 
-// one event block as its name and json data, keep-alive comments come back as none
+// keep-alives come back as none
 fn sse_event(block: &str) -> Option<(String, Value)> {
     let mut name = None;
     let mut data = None;

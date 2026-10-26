@@ -1,5 +1,4 @@
-//! `tiles run`'s download, through the daemon like any other client. Ctrl-C ends the
-//! CLI, which closes its progress stream, and the daemon pauses the download
+//! The CLI's download, through the daemon. Ctrl-C pauses it
 
 use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
@@ -9,8 +8,6 @@ use serde_json::{Value, json};
 use super::{CLIENT_HEADER, DownloadState};
 use crate::daemon::{daemon_client, daemon_url, sse::take_events};
 
-/// Downloads the model `repo` at `quant` (`Q4_K_M` when not given) with a progress
-/// bar, continuing an earlier partial download
 pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
     let model = match quant {
         Some(quant) => format!("{repo}:{quant}"),
@@ -66,7 +63,6 @@ pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
     bail!("The daemon closed the download before it finished")
 }
 
-// the `data` of a success, or the daemon's `reason` as the error
 async fn answer<T: DeserializeOwned>(res: reqwest::Response) -> Result<T> {
     let ok = res.status().is_success();
     let mut body: Value = res
@@ -90,15 +86,14 @@ fn download_bar(total: u64, done: u64) -> ProgressBar {
         .with_style(bar_style(
             "{decimal_bytes:.dim}/{decimal_total_bytes:.dim}  {decimal_bytes_per_sec:.cyan}  ETA {eta}",
         ));
-    // the speed starts from what's already on disk, so a resume doesn't count it. The
-    // tick that records it is hidden, as it would show that jump as the speed
+    // a hidden first tick, so a resume doesn't count what's on disk as speed
     bar.tick();
     bar.reset_eta();
     bar.set_draw_target(ProgressDrawTarget::stderr());
     bar
 }
 
-// the last jump to 100% isn't a real speed, so the finished bar shows only the size
+// the last jump isn't a real speed, so only the size is shown
 fn finish(bar: &ProgressBar) {
     bar.set_style(bar_style("{decimal_total_bytes:.dim}"));
     bar.finish();

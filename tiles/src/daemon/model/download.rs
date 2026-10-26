@@ -1,4 +1,4 @@
-//! One model's download: its state, the task running it, pause, and the progress stream
+//! One model's download and its progress
 
 use std::{
     convert::Infallible,
@@ -29,7 +29,6 @@ use crate::{
     },
 };
 
-// how often progress goes out, and how far back the speed looks
 const UPDATE_EVERY: Duration = Duration::from_millis(250);
 const SPEED_WINDOW: Duration = Duration::from_secs(1);
 
@@ -42,7 +41,6 @@ pub enum DownloadState {
         total: u64,
         bytes_per_sec: u64,
     },
-    /// Hashing the part already downloaded, before continuing it
     Verifying {
         done: u64,
         total: u64,
@@ -62,12 +60,10 @@ impl DownloadState {
         matches!(self, Self::Downloading { .. } | Self::Verifying { .. })
     }
 
-    /// Running, or stopped before the end
     pub(super) fn is_unfinished(&self) -> bool {
         !matches!(self, Self::Idle | Self::Done)
     }
 
-    // what the files on disk say, when nothing is running
     fn from_disk(done: u64, total: u64) -> Self {
         match done {
             0 => Self::Idle,
@@ -77,8 +73,6 @@ impl DownloadState {
     }
 }
 
-/// A model and its download's state, as the downloads list and the events stream
-/// send them
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelChange {
     model: String,
@@ -88,9 +82,8 @@ pub struct ModelChange {
 
 #[derive(Debug, Serialize)]
 pub struct ModelStatus {
-    /// Like `unsloth/gemma-4-12b-it-GGUF:Q4_K_M`
     model: String,
-    /// The sizes are left out when the model is already there, as Hugging Face isn't asked
+    // left out when the model is already there
     total: Option<u64>,
     on_disk: Option<u64>,
     free_disk: Option<u64>,
@@ -99,17 +92,13 @@ pub struct ModelStatus {
 
 type Running = Option<(CancellationToken, JoinHandle<()>)>;
 
-/// One model's download, shared by every client that asks for that model
 pub struct ModelDownload {
     hub: Arc<Hub>,
     spec: Spec,
-    /// The models folder
     root: PathBuf,
     spare_room: u64,
     pub(super) state: watch::Sender<DownloadState>,
-    /// Shared by every model, so one stream can follow all of them
     changes: broadcast::Sender<ModelChange>,
-    /// The files to download, asked from Hugging Face once
     plan: AsyncMutex<Option<DownloadPlan>>,
     running: AsyncMutex<Running>,
 }
@@ -141,8 +130,7 @@ impl ModelDownload {
         }
     }
 
-    // only a state that differs goes out, as status re-reads the same one from disk
-    // on every call
+    // only sends real changes, as status re-reads the same state on every call
     fn set(&self, state: DownloadState) {
         let changed = self.state.send_if_modified(|current| {
             let changed = *current != state;
@@ -150,13 +138,11 @@ impl ModelDownload {
             changed
         });
         if changed {
-            // nobody listening is fine
             let _ = self.changes.send(self.change());
         }
     }
 
-    // the check `tiles run` makes before loading, which also finds a model bundled in
-    // the lib dir or left in the old huggingface cache
+    // the same check `tiles run` makes before loading
     fn is_ready(&self) -> bool {
         get_model_cache(&self.spec.repo)
             .and_then(|dir| resolve_gguf_path(&dir, Some(&self.spec.quant)))
@@ -171,7 +157,7 @@ impl ModelDownload {
         let plan = hf::plan(&self.hub, &self.spec.repo, Some(&self.spec.quant))
             .await
             .map_err(|err| {
-                // not reaching the Hub is worth a retry, a missing model or quant isn't
+                // not reaching the Hub is worth a retry
                 let reason = format!("{err:#}");
                 if err.downcast_ref::<reqwest::Error>().is_some() {
                     AppError::ServiceUnavailable(reason)
@@ -183,7 +169,7 @@ impl ModelDownload {
     }
 
     pub async fn status(&self) -> Result<ModelStatus, AppError> {
-        // held so a download starting meanwhile can't be overwritten with what's on disk
+        // held so a starting download isn't overwritten
         let running = self.running.lock().await;
         let free_disk = free_space(&self.root).ok();
         if !is_live(&running) && self.is_ready() {
@@ -199,7 +185,7 @@ impl ModelDownload {
 
         let plan = self.plan().await?;
         let (total, on_disk) = (plan.total(), hf::on_disk(&plan, &self.root).await);
-        // a failure stays until the next start, so the UI can show why
+        // a failure stays until the next start
         let failed = matches!(*self.state.borrow(), DownloadState::Failed { .. });
         if !is_live(&running) && !failed {
             self.set(DownloadState::from_disk(on_disk, total));
@@ -213,7 +199,6 @@ impl ModelDownload {
         })
     }
 
-    /// Starts or resumes the download. One already running is left as it is
     pub async fn start(self: &Arc<Self>) -> Result<DownloadState, AppError> {
         let mut running = self.running.lock().await;
         if is_live(&running) {
@@ -270,7 +255,6 @@ impl ModelDownload {
         self.set(state);
     }
 
-    /// Stops the download and keeps what it got. Answers once it has stopped
     pub async fn pause(&self) -> Result<DownloadState, AppError> {
         let mut running = self.running.lock().await;
         let Some((cancel, task)) = running.take().filter(|(_, task)| !task.is_finished()) else {
@@ -280,20 +264,17 @@ impl ModelDownload {
             )));
         };
         cancel.cancel();
-        // the task writes the paused state, or done if it finished first
         let _ = task.await;
         Ok(self.state.borrow().clone())
     }
 
-    /// The current state, then each change, until the download stops. With
-    /// `pause_on_close`, a client that goes away early pauses the download, which is
-    /// how Ctrl-C in the CLI pauses it
+    // with `pause_on_close`, closing the stream early pauses the download
     pub fn events(
         self: &Arc<Self>,
         pause_on_close: bool,
     ) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
         let mut changes = self.state.subscribe();
-        // made here, not in the stream, which runs nothing until it is polled
+        // made here, as the stream runs nothing until polled
         let mut guard = PauseOnClose(pause_on_close.then(|| Arc::clone(self)));
         async_stream::stream! {
             loop {
@@ -304,13 +285,11 @@ impl ModelDownload {
                     break;
                 }
             }
-            // it ran to the end, so there's nothing to pause
             guard.disarm();
         }
     }
 }
 
-/// Pauses the download when dropped, unless disarmed first
 struct PauseOnClose(Option<Arc<ModelDownload>>);
 
 impl PauseOnClose {
@@ -339,7 +318,7 @@ fn is_live(running: &Running) -> bool {
 
 fn free_space(path: &Path) -> nix::Result<u64> {
     let stat = statvfs(path)?;
-    // the field types differ between Linux and macOS
+    // the types differ between Linux and macOS
     #[allow(clippy::unnecessary_cast)]
     Ok(stat.blocks_available() as u64 * stat.fragment_size() as u64)
 }
@@ -348,8 +327,7 @@ fn gb(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / 1e9)
 }
 
-/// Turns the downloader's events into states, at most a few a second, with the
-/// speed over about the last second
+// turns the downloader's events into states, a few a second
 struct Progress {
     done: u64,
     total: u64,

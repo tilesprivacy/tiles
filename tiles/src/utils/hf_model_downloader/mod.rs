@@ -1,10 +1,4 @@
-//! Manages model snapshot downloading from HuggingFace, into the same cache layout
-//! hf-hub uses, with resume, pause, retries and a SHA-256 check
-//!
-//! - `plan`: which files of a repo to download
-//! - `fetch`: one file over the network
-//! - `cache`: where the files live on disk
-//! - `hub`: talking to Hugging Face
+//! Downloads models from Hugging Face, with resume, retries and a SHA-256 check
 
 mod cache;
 mod fetch;
@@ -27,12 +21,10 @@ pub use plan::{DEFAULT_QUANT, plan};
 pub struct ModelFile {
     pub name: String,
     pub size: u64,
-    /// The name under `blobs/`, the same one hf-hub uses
     pub blob: String,
     pub sha256: Option<String>,
 }
 
-/// When downloading a model, we take its repo, the commit and the files
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DownloadPlan {
     pub repo: String,
@@ -48,14 +40,8 @@ impl DownloadPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DownloadEvent {
-    Progress {
-        done: u64,
-        total: u64,
-    },
-    /// Hashing the part of `file` already on disk, before continuing it
-    Verifying {
-        file: String,
-    },
+    Progress { done: u64, total: u64 },
+    Verifying { file: String },
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -64,8 +50,7 @@ pub enum DownloadOutcome {
     Paused,
 }
 
-/// Downloads what `plan` lists into the model cache at `root`, continuing any
-/// partial files. Cancelling pauses it and keeps the partial files
+/// Downloads `plan` into the cache at `root`. Cancelling keeps the partial files
 pub async fn download(
     hub: &Hub,
     plan: &DownloadPlan,
@@ -80,7 +65,7 @@ pub async fn download(
     let total = plan.total();
     let mut finished = 0;
     for file in &plan.files {
-        // fetch counts this file's bytes, the plan's progress adds the files before it
+        // adds the files before this one to its progress
         let mut report = |event: DownloadEvent| {
             on_event(match event {
                 DownloadEvent::Progress { done, .. } => DownloadEvent::Progress {
@@ -100,8 +85,7 @@ pub async fn download(
         });
     }
 
-    // the snapshot only appears once every file is there, as `tiles run` loads the
-    // newest one and a half done update would hide the model already downloaded
+    // linked last, so `tiles run` never loads a half done snapshot
     let snapshot = repo.join("snapshots").join(&plan.commit);
     for file in &plan.files {
         cache::link(&snapshot, &file.name, &file.blob).await?;
@@ -111,7 +95,7 @@ pub async fn download(
     Ok(DownloadOutcome::Done)
 }
 
-/// Puts `file` in `blobs`, unless it's already there. False when cancelled
+// false when cancelled
 async fn fetch_blob(
     hub: &Hub,
     plan: &DownloadPlan,
@@ -127,8 +111,7 @@ async fn fetch_blob(
     let Some(_lock) = cache::lock(&blobs.join(format!("{}.lock", file.blob)), cancel).await? else {
         return Ok(false);
     };
-    // another download, like another quant of the same repo, may have finished it while
-    // this one waited for the lock
+    // another download may have finished it while this one waited
     if cache::is_complete(&blob, file.size).await {
         return Ok(true);
     }

@@ -7,11 +7,9 @@ use reqwest::{Client, RequestBuilder, Response, StatusCode};
 
 const HF_ENDPOINT: &str = "https://huggingface.co";
 const USER_AGENT: &str = concat!("tiles/", env!("CARGO_PKG_VERSION"));
-// a connection that sends nothing for this long fails instead of hanging
+// fail instead of hanging on a stalled connection
 const STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The Hugging Face Hub, at `HF_ENDPOINT` if set, sending `HF_TOKEN` for private
-/// and gated models
 pub struct Hub {
     client: Client,
     endpoint: String,
@@ -40,7 +38,7 @@ impl Hub {
         })
     }
 
-    // reqwest drops the token when the Hub redirects a download to its CDN
+    // reqwest drops the token on the redirect to the CDN
     pub(super) fn get(&self, path: &str) -> RequestBuilder {
         let request = self.client.get(format!("{}/{path}", self.endpoint));
         match &self.token {
@@ -50,7 +48,6 @@ impl Hub {
     }
 }
 
-/// Turns the Hub's refusals into messages a user can act on
 pub(super) fn check(res: Response, repo: &str) -> Result<Response> {
     match res.status() {
         // the Hub also answers 401 for a repo that doesn't exist

@@ -36,7 +36,7 @@ fn model_sha256() -> String {
     format!("{:x}", Sha256::digest(MODEL))
 }
 
-/// Serves `repo` as a small model on the mock Hub, its GGUF answered after `delay`
+// the GGUF is answered after `delay`
 async fn serve_model(server: &MockServer, repo: &str, delay: Duration) {
     Mock::given(method("GET"))
         .and(path(format!("/api/models/{repo}/revision/main")))
@@ -86,7 +86,6 @@ impl Daemon {
         Self::with(server, tempdir().unwrap(), |_| {})
     }
 
-    /// A daemon whose default model is `REPO`, with `change` made to its models first
     fn with(server: &MockServer, root: TempDir, change: impl FnOnce(&mut Models)) -> Self {
         let mut models = Models::new(
             Hub::new(&server.uri(), None).unwrap(),
@@ -228,7 +227,7 @@ async fn closing_a_stream_that_asked_to_pause_pauses_the_download() {
     let daemon = Daemon::new(&server);
     daemon.start(json!({})).await;
 
-    // a plain stream, as the UI opens, leaves the download running when it closes
+    // a plain stream leaves the download running when it closes
     drop(daemon.send("GET", "/v1/tilekit/model/download", None).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(matches!(
@@ -236,7 +235,7 @@ async fn closing_a_stream_that_asked_to_pause_pauses_the_download() {
         DownloadState::Downloading { .. }
     ));
 
-    // asking for it without the CLI's header is refused, so a website can't use it
+    // refused without the CLI's header
     let (status, _) = daemon
         .call(
             "GET",
@@ -250,7 +249,7 @@ async fn closing_a_stream_that_asked_to_pause_pauses_the_download() {
         DownloadState::Downloading { .. }
     ));
 
-    // the CLI's stream pauses it, which is what Ctrl-C does
+    // the CLI's stream pauses it
     let req = Request::builder()
         .uri("/v1/tilekit/model/download?pause_on_close=true")
         .header(CLIENT_HEADER, "cli")
@@ -312,7 +311,7 @@ async fn the_progress_stream_follows_the_download_to_the_end() {
     assert_eq!(states.first().unwrap()["state"], "downloading");
     assert_eq!(states.last().unwrap(), &json!({ "state": "done" }));
 
-    // a client that comes later gets where it ended, and the stream closes
+    // a later client gets the end state, and the stream closes
     let (_, late) = daemon.call("GET", "/v1/tilekit/model/download", None).await;
     assert_eq!(late.matches("data: ").count(), 1);
     assert!(late.contains(r#"{"state":"done"}"#));
@@ -383,7 +382,7 @@ async fn status_with_no_model_lists_every_bundled_model() {
     });
     let modelfiles = daemon.root.path().join("modelfiles");
     std::fs::create_dir_all(&modelfiles).unwrap();
-    // the 31B's Modelfile is left out, and the 26B names a model the Hub doesn't have
+    // no 31B Modelfile, and the 26B's model isn't on the Hub
     for (id, from) in [
         ("gemma-4-e2b-gguf", "org/e2b-GGUF:Q4_K_M"),
         ("gemma-4-e4b-gguf", "org/e4b-GGUF:Q4_K_M"),
@@ -479,7 +478,7 @@ async fn the_downloads_list_has_only_unfinished_downloads() {
     serve_model(&server, OTHER, Duration::ZERO).await;
     let daemon = Daemon::new(&server);
     daemon.start(json!({})).await;
-    // asked about but never started, so not a download
+    // never started
     daemon
         .json(
             "GET",

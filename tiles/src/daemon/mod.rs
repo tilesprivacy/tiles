@@ -83,7 +83,6 @@ pub struct AppState {
     pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
     pub web_ui: web::WebUiState,
-    /// Model downloads, one per model
     pub models: model::Models,
 }
 
@@ -146,7 +145,6 @@ impl AppError {
         }
     }
 
-    /// The message a client would get as `reason`
     pub fn reason(self) -> String {
         self.parts().1
     }
@@ -564,7 +562,7 @@ fn listen_for_signals(state: Arc<AppState>) {
 pub async fn shutdown_all(state: Arc<AppState>) {
     info!("Daemon server shutting down");
     ui::begin_stop(&state.ui);
-    // keeps what running downloads got, so they show as paused next time
+    // so they show as paused next time
     state.models.pause_all().await;
     // its ping has no timeout of its own, and a stuck server must not hold the
     // shutdown open forever

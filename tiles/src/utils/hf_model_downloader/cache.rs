@@ -19,15 +19,13 @@ use tokio_util::sync::CancellationToken;
 
 use super::{DownloadPlan, ModelFile};
 
-// how often a download waiting on another one's lock tries again
 const LOCK_RETRY: Duration = Duration::from_millis(500);
 
-/// The repo's folder in the cache is laid out the same way as in hf
 pub fn repo_dir(root: &Path, repo: &str) -> PathBuf {
     root.join(format!("models--{}", repo.replace('/', "--")))
 }
 
-/// Bytes of `plan` already in the cache at `root`, finished and partial files both
+/// Bytes of `plan` on disk, partial files included
 pub async fn on_disk(plan: &DownloadPlan, root: &Path) -> u64 {
     let blobs = repo_dir(root, &plan.repo).join("blobs");
     let mut bytes = 0;
@@ -52,8 +50,7 @@ pub(super) async fn file_len(path: &Path) -> u64 {
     fs::metadata(path).await.map_or(0, |meta| meta.len())
 }
 
-/// Holds an exclusive lock on `path` until dropped, waiting while another download
-/// holds it. `None` when cancelled while waiting
+// waits while another download holds it, `None` when cancelled
 pub(super) async fn lock(
     path: &Path,
     cancel: &CancellationToken,
@@ -69,8 +66,7 @@ pub(super) async fn lock(
     }
 }
 
-// `flock` locks belong to the open file, so even another download in this process
-// that holds it shows up here as taken
+// flock is per open file, so it works within this process too
 async fn try_lock(path: &Path) -> Result<Option<Flock<std::fs::File>>> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -88,8 +84,7 @@ async fn try_lock(path: &Path) -> Result<Option<Flock<std::fs::File>>> {
     .await?
 }
 
-/// An interrupted hf download leaves the `<blob>.sync.part`  file at full size
-/// plus an 8 byte count of the bytes written without gaps. Keep those bytes
+// hf-hub's `.sync.part` is full size plus an 8 byte count of the bytes written
 pub(super) async fn reuse_sync_part(blobs: &Path, file: &ModelFile, part: &Path) -> Result<()> {
     let old = blobs.join(format!("{}.sync.part", file.blob));
     let Ok(meta) = fs::metadata(&old).await else {
@@ -114,7 +109,6 @@ pub(super) async fn reuse_sync_part(blobs: &Path, file: &ModelFile, part: &Path)
     Ok(())
 }
 
-/// Points `snapshots/<commit>/<name>` at its blob with a relative symlink
 pub(super) async fn link(snapshot: &Path, name: &str, blob: &str) -> Result<()> {
     let path = snapshot.join(name);
     if let Some(parent) = path.parent() {
