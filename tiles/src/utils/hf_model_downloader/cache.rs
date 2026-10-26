@@ -1,6 +1,4 @@
-//! The model cache on disk, laid out the same way as hf-hub's:
-//! `models--{org}--{name}/` with `refs/main`, `blobs/<blob>` and
-//! `snapshots/<commit>/<name>` linking to the blobs
+//! The model cache on disk, in the same layout hf-hub uses
 
 use std::{
     fmt,
