@@ -1,0 +1,16 @@
+info:
+  name: model
+  type: folder
+  seq: 6
+
+request:
+  auth: inherit
+
+docs:
+  content: |-
+    Model apis list the models Tiles offers and download them, with progress, pause and resume.
+
+    - A model is named `org/name:quant`, like `unsloth/gemma-4-12b-it-GGUF:Q4_K_M`. Leave it out to use the default Modelfile's model
+    - Downloads run in the daemon, so the UI and the CLI see the same ones. Several models can download at once
+    - A paused or interrupted download continues from where it stopped
+  type: text/markdown

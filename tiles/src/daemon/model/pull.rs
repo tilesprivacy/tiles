@@ -6,7 +6,7 @@ use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
-use super::DownloadState;
+use super::{CLIENT_HEADER, DownloadState};
 use crate::daemon::{daemon_client, daemon_url, sse::take_events};
 
 /// Downloads the model `repo` at `quant` (`Q4_K_M` when not given) with a progress
@@ -29,6 +29,7 @@ pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
 
     let mut res = client
         .get(daemon_url("/v1/tilekit/model/download"))
+        .header(CLIENT_HEADER, "cli")
         .query(&[("model", model.as_str()), ("pause_on_close", "true")])
         .send()
         .await

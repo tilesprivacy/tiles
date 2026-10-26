@@ -18,7 +18,8 @@ use wiremock::{
 };
 
 use super::{
-    DownloadState, ModelDownload, Models, Spec, lineup::LINEUP, model_router, modelfile_spec,
+    CLIENT_HEADER, DownloadState, ModelDownload, Models, Spec, lineup::LINEUP, model_router,
+    modelfile_spec,
 };
 use crate::{
     daemon::AppState,
@@ -42,11 +43,11 @@ async fn serve_model(server: &MockServer, repo: &str, delay: Duration) {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "sha": COMMIT,
             "siblings": [
-                { "rfilename": "config.json", "size": CONFIG.len(), "blobId": "a-git-id" },
+                { "rfilename": "config.json", "size": CONFIG.len(), "blobId": "0123456789abcdef0123456789abcdef01234567" },
                 {
                     "rfilename": "model-Q4_K_M.gguf",
                     "size": MODEL.len(),
-                    "blobId": "another-git-id",
+                    "blobId": "89abcdef0123456789abcdef0123456789abcdef",
                     "lfs": { "sha256": model_sha256(), "size": MODEL.len() },
                 },
             ],
@@ -235,14 +236,31 @@ async fn closing_a_stream_that_asked_to_pause_pauses_the_download() {
         DownloadState::Downloading { .. }
     ));
 
-    // the CLI's stream pauses it, which is what Ctrl-C does
-    let cli = daemon
-        .send(
+    // asking for it without the CLI's header is refused, so a website can't use it
+    let (status, _) = daemon
+        .call(
             "GET",
             "/v1/tilekit/model/download?pause_on_close=true",
             None,
         )
         .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(matches!(
+        *daemon.download(None).state.borrow(),
+        DownloadState::Downloading { .. }
+    ));
+
+    // the CLI's stream pauses it, which is what Ctrl-C does
+    let req = Request::builder()
+        .uri("/v1/tilekit/model/download?pause_on_close=true")
+        .header(CLIENT_HEADER, "cli")
+        .body(Body::empty())
+        .unwrap();
+    let cli = model_router()
+        .with_state(daemon.state.clone())
+        .oneshot(req)
+        .await
+        .unwrap();
     drop(cli);
     daemon
         .until(None, |state| matches!(state, DownloadState::Paused { .. }))

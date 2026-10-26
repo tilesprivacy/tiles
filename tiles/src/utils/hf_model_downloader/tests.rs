@@ -13,8 +13,8 @@ use wiremock::{
 };
 
 use super::{
-    AlreadyDownloading, DownloadEvent, DownloadOutcome, DownloadPlan, Hub, ModelFile, cache,
-    download, on_disk, plan, repo_dir,
+    DownloadEvent, DownloadOutcome, DownloadPlan, Hub, ModelFile, cache, download, on_disk, plan,
+    repo_dir,
 };
 
 const REPO: &str = "org/model-GGUF";
@@ -35,7 +35,8 @@ fn model_file(name: &str, bytes: &[u8], lfs: bool) -> ModelFile {
         blob: if lfs {
             hash.clone()
         } else {
-            format!("git-{name}")
+            // a git id, 40 hex digits
+            hash[..40].to_owned()
         },
         sha256: lfs.then_some(hash),
     }
@@ -105,7 +106,7 @@ fn sibling(file: &ModelFile) -> Value {
     json!({
         "rfilename": file.name,
         "size": file.size,
-        "blobId": if file.sha256.is_some() { "a-git-id" } else { file.blob.as_str() },
+        "blobId": if file.sha256.is_some() { "0123456789abcdef0123456789abcdef01234567" } else { file.blob.as_str() },
         "lfs": file.sha256.as_ref().map(|sha256| json!({ "sha256": sha256, "size": file.size })),
     })
 }
@@ -407,10 +408,33 @@ async fn cancelling_pauses_the_download() {
     .unwrap();
 
     assert_eq!(outcome, DownloadOutcome::Paused);
-    let blob = repo_dir(root.path(), REPO)
-        .join("blobs")
-        .join(sha256_hex(MODEL));
-    assert!(!blob.exists());
+    let repo = repo_dir(root.path(), REPO);
+    assert!(!repo.join("blobs").join(sha256_hex(MODEL)).exists());
+    // the config finished, but the snapshot waits for every file
+    assert!(repo.join("blobs").join(&test_plan().files[0].blob).exists());
+    assert!(!repo.join("snapshots").exists());
+    assert!(!repo.join("refs/main").exists());
+}
+
+#[tokio::test]
+async fn a_plan_with_an_unsafe_file_name_is_refused() {
+    let server = MockServer::start().await;
+    let mut escaping = model_file("model-Q4_K_M.gguf", MODEL, true);
+    escaping.name = "../../escape-Q4_K_M.gguf".to_owned();
+    Mock::given(method("GET"))
+        .and(path(format!("/api/models/{REPO}/revision/main")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "sha": COMMIT,
+            "siblings": [sibling(&model_file("model-Q8_0.gguf", MODEL, true)), sibling(&escaping)],
+        })))
+        .mount(&server)
+        .await;
+
+    let err = plan(&hub_for(&server), REPO, Some("Q4_K_M"))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("isn't safe to save"));
 }
 
 #[tokio::test]
@@ -432,21 +456,70 @@ async fn a_wrong_hash_deletes_the_file() {
 }
 
 #[tokio::test]
-async fn a_file_another_process_is_downloading_is_refused() {
+async fn a_file_another_download_holds_is_waited_for() {
     let server = MockServer::start().await;
     serve_all(&server).await;
     let root = tempdir().unwrap();
     let blobs = repo_dir(root.path(), REPO).join("blobs");
     std::fs::create_dir_all(&blobs).unwrap();
-    let _held = cache::lock(&blobs.join(format!("{}.lock", sha256_hex(MODEL))))
+    let lock_path = blobs.join(format!("{}.lock", sha256_hex(MODEL)));
+    let held = cache::lock(&lock_path, &CancellationToken::new())
         .await
+        .unwrap()
         .unwrap();
 
-    let err = run(&hub_for(&server), &test_plan(), root.path())
-        .await
-        .unwrap_err();
+    let hub = hub_for(&server);
+    let plan = test_plan();
+    let downloading = run(&hub, &plan, root.path());
+    tokio::pin!(downloading);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), &mut downloading)
+            .await
+            .is_err(),
+        "didn't wait for the lock"
+    );
+    drop(held);
 
-    assert!(err.downcast_ref::<AlreadyDownloading>().is_some());
+    let outcome = tokio::time::timeout(Duration::from_secs(5), downloading)
+        .await
+        .expect("never got the lock")
+        .unwrap();
+    assert_eq!(outcome, DownloadOutcome::Done);
+    assert_eq!(snapshot_file(root.path(), "model-Q4_K_M.gguf"), MODEL);
+}
+
+#[tokio::test]
+async fn cancelling_while_waiting_for_a_lock_pauses() {
+    let server = MockServer::start().await;
+    serve_all(&server).await;
+    let root = tempdir().unwrap();
+    let blobs = repo_dir(root.path(), REPO).join("blobs");
+    std::fs::create_dir_all(&blobs).unwrap();
+    let _held = cache::lock(
+        &blobs.join(format!("{}.lock", sha256_hex(MODEL))),
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        stop.cancel();
+    });
+
+    let outcome = download(
+        &hub_for(&server),
+        &test_plan(),
+        root.path(),
+        &cancel,
+        |_| {},
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(outcome, DownloadOutcome::Paused);
 }
 
 #[tokio::test]

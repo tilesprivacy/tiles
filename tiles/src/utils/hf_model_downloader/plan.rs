@@ -1,5 +1,7 @@
 //! Which files of a model repo to download
 
+use std::path::{Component, Path};
+
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
@@ -76,16 +78,45 @@ pub async fn plan(hub: &Hub, repo: &str, quant: Option<&str>) -> Result<Download
         );
     }
 
+    let files: Vec<ModelFile> = info
+        .siblings
+        .into_iter()
+        .filter(|sibling| wanted(&sibling.rfilename, &quant_gguf))
+        .map(ModelFile::from)
+        .collect();
+    // these become paths in the cache, and HF_ENDPOINT can point at any mirror
+    if !is_hex(&info.sha) {
+        bail!(
+            "Hugging Face sent {repo}'s commit as {:?}, which isn't a commit id",
+            info.sha
+        );
+    }
+    if let Some(file) = files
+        .iter()
+        .find(|file| !is_plain_path(&file.name) || !is_hex(&file.blob))
+    {
+        bail!(
+            "Hugging Face listed a file in {repo} that isn't safe to save: {:?}",
+            file.name
+        );
+    }
     Ok(DownloadPlan {
         repo: repo.to_owned(),
         commit: info.sha,
-        files: info
-            .siblings
-            .into_iter()
-            .filter(|sibling| wanted(&sibling.rfilename, &quant_gguf))
-            .map(ModelFile::from)
-            .collect(),
+        files,
     })
+}
+
+// a relative path that stays inside the folder it's joined to
+fn is_plain_path(name: &str) -> bool {
+    !name.is_empty()
+        && Path::new(name)
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+}
+
+fn is_hex(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn wanted(name: &str, quant_gguf: &str) -> bool {
@@ -107,6 +138,16 @@ fn is_main_gguf(filename: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_plain_paths_and_hex_ids_are_safe() {
+        assert!(is_plain_path("MTP/README.md"));
+        for name in ["", "../escape.json", "/etc/passwd", "MTP/../../x.gguf"] {
+            assert!(!is_plain_path(name), "{name}");
+        }
+        assert!(is_hex("3b275b7a6957ac97aa4f5146652ab850ed212e5f"));
+        assert!(!is_hex("../blob") && !is_hex(""));
+    }
 
     #[test]
     fn test_is_main_gguf() {

@@ -21,6 +21,7 @@ use anyhow::{Context, bail};
 use axum::{
     Router,
     extract::{Query, State},
+    http::HeaderMap,
     response::{IntoResponse, Sse, sse::KeepAlive},
     routing::get,
 };
@@ -44,6 +45,10 @@ use crate::{
 
 // left free after a download, so it never fills the disk to the last byte
 const SPARE_ROOM: u64 = 1_000_000_000;
+
+/// Sent by the CLI with `pause_on_close`. Other websites can't send a custom header
+/// without a CORS preflight, which the daemon refuses, so a page can't pause downloads
+pub(super) const CLIENT_HEADER: &str = "x-tiles-client";
 
 pub fn model_router() -> Router<Arc<AppState>> {
     Router::new()
@@ -230,10 +235,17 @@ async fn pause(
 
 /// `GET /v1/tilekit/model/download?model=org/name:quant`, as server-sent events.
 /// Closing it doesn't stop the download, unless it asked with `pause_on_close=true`
+/// and the `x-tiles-client` header
 async fn progress(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(follow): Query<Follow>,
 ) -> Result<impl IntoResponse, AppError> {
+    if follow.pause_on_close && !headers.contains_key(CLIENT_HEADER) {
+        return Err(AppError::BadRequest(format!(
+            "pause_on_close needs the {CLIENT_HEADER} header"
+        )));
+    }
     let download = state.models.get(follow.model.as_deref())?;
     Ok(Sse::new(download.events(follow.pause_on_close)).keep_alive(KeepAlive::default()))
 }

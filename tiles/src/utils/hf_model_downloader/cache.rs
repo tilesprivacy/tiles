@@ -1,9 +1,9 @@
 //! The model cache on disk, in the same layout hf-hub uses
 
 use std::{
-    fmt,
     io::SeekFrom,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Result, anyhow};
@@ -15,20 +15,12 @@ use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt},
 };
+use tokio_util::sync::CancellationToken;
 
 use super::{DownloadPlan, ModelFile};
 
-/// Another process holds the lock on a file this download needs
-#[derive(Debug)]
-pub struct AlreadyDownloading;
-
-impl fmt::Display for AlreadyDownloading {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("The model is already downloading in another Tiles process")
-    }
-}
-
-impl std::error::Error for AlreadyDownloading {}
+// how often a download waiting on another one's lock tries again
+const LOCK_RETRY: Duration = Duration::from_millis(500);
 
 /// The repo's folder in the cache is laid out the same way as in hf
 pub fn repo_dir(root: &Path, repo: &str) -> PathBuf {
@@ -60,9 +52,26 @@ pub(super) async fn file_len(path: &Path) -> u64 {
     fs::metadata(path).await.map_or(0, |meta| meta.len())
 }
 
-/// Holds an exclusive lock on `path` until dropped. Fails if another
-/// process holds it
-pub(super) async fn lock(path: &Path) -> Result<Flock<std::fs::File>> {
+/// Holds an exclusive lock on `path` until dropped, waiting while another download
+/// holds it. `None` when cancelled while waiting
+pub(super) async fn lock(
+    path: &Path,
+    cancel: &CancellationToken,
+) -> Result<Option<Flock<std::fs::File>>> {
+    loop {
+        if let Some(lock) = try_lock(path).await? {
+            return Ok(Some(lock));
+        }
+        tokio::select! {
+            () = cancel.cancelled() => return Ok(None),
+            () = tokio::time::sleep(LOCK_RETRY) => {}
+        }
+    }
+}
+
+// `flock` locks belong to the open file, so even another download in this process
+// that holds it shows up here as taken
+async fn try_lock(path: &Path) -> Result<Option<Flock<std::fs::File>>> {
     let path = path.to_owned();
     tokio::task::spawn_blocking(move || {
         let file = std::fs::OpenOptions::new()
@@ -70,13 +79,11 @@ pub(super) async fn lock(path: &Path) -> Result<Flock<std::fs::File>> {
             .write(true)
             .truncate(false)
             .open(&path)?;
-        Flock::lock(file, FlockArg::LockExclusiveNonblock).map_err(|(_, errno)| {
-            if errno == Errno::EWOULDBLOCK {
-                anyhow::Error::new(AlreadyDownloading)
-            } else {
-                anyhow!("Failed to lock {}: {errno}", path.display())
-            }
-        })
+        match Flock::lock(file, FlockArg::LockExclusiveNonblock) {
+            Ok(lock) => Ok(Some(lock)),
+            Err((_, Errno::EWOULDBLOCK)) => Ok(None),
+            Err((_, errno)) => Err(anyhow!("Failed to lock {}: {errno}", path.display())),
+        }
     })
     .await?
 }
