@@ -1,17 +1,18 @@
 //! Downloads models with progress, pause and resume, for the UI and the CLI alike
 //!
 //! - `download`: one model's download, its state and its progress stream
-//! - `lineup`: the models Tiles offers, from their Modelfiles
+//! - `bundled`: the models Tiles ships a Modelfile for
 //! - `pull`: the CLI's download, as a client of these routes
 
+mod bundled;
 mod download;
-mod lineup;
 mod pull;
 #[cfg(test)]
 mod tests;
 
 use std::{
     collections::HashMap,
+    convert::Infallible,
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -22,14 +23,18 @@ use axum::{
     Router,
     extract::{Query, State},
     http::HeaderMap,
-    response::{IntoResponse, Sse, sse::KeepAlive},
+    response::{
+        IntoResponse, Response, Sse,
+        sse::{Event, KeepAlive},
+    },
     routing::get,
 };
 use serde::Deserialize;
 use serde_json::json;
 use tilekit::modelfile::split_model_spec;
+use tokio::sync::broadcast::{self, error::RecvError};
 
-pub use download::{DownloadState, ModelDownload};
+pub use download::{DownloadState, ModelChange, ModelDownload};
 pub use pull::pull;
 
 use crate::{
@@ -45,6 +50,8 @@ use crate::{
 
 // left free after a download, so it never fills the disk to the last byte
 const SPARE_ROOM: u64 = 1_000_000_000;
+// changes a slow events client can fall behind by before it's sent everything again
+const CHANGES_KEPT: usize = 64;
 
 /// Sent by the CLI with `pause_on_close`. Other websites can't send a custom header
 /// without a CORS preflight, which the daemon refuses, so a page can't pause downloads
@@ -52,8 +59,9 @@ pub(super) const CLIENT_HEADER: &str = "x-tiles-client";
 
 pub fn model_router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/tilekit/models", get(lineup))
         .route("/v1/tilekit/model/status", get(status))
+        .route("/v1/tilekit/model/downloads", get(downloads))
+        .route("/v1/tilekit/model/events", get(events))
         .route(
             "/v1/tilekit/model/download",
             get(progress).post(start).delete(pause),
@@ -98,12 +106,16 @@ pub struct Models {
     hub: Arc<Hub>,
     /// The models folder
     root: PathBuf,
-    /// The Modelfiles folder, which has one for each model in the lineup
+    /// The Modelfiles folder, with one for each bundled model
     modelfiles: PathBuf,
     spare_room: u64,
     /// The default Modelfile's model, for requests that name none
     default: Option<Spec>,
     downloads: Mutex<HashMap<Spec, Arc<ModelDownload>>>,
+    /// Every download's changes, for the events stream
+    changes: broadcast::Sender<ModelChange>,
+    /// The model `tiles run` last ran. The daemon reads it from config.toml
+    current_model: fn() -> Option<String>,
 }
 
 impl Models {
@@ -115,6 +127,8 @@ impl Models {
             spare_room: SPARE_ROOM,
             default,
             downloads: Mutex::new(HashMap::new()),
+            changes: broadcast::Sender::new(CHANGES_KEPT),
+            current_model: || None,
         }
     }
 
@@ -124,12 +138,18 @@ impl Models {
             .and_then(|path| modelfile_spec(&path))
             .inspect_err(|err| log::warn!("No default model to download: {err:#}"))
             .ok();
-        Ok(Self::new(
-            Hub::from_env()?,
-            get_or_create_model_download_path()?,
-            DefaultProvider.get_lib_dir()?.join("modelfiles"),
-            default,
-        ))
+        Ok(Self {
+            current_model: || {
+                let config = get_config_json().ok()?;
+                config["model"]["current"].as_str().map(str::to_owned)
+            },
+            ..Self::new(
+                Hub::from_env()?,
+                get_or_create_model_download_path()?,
+                DefaultProvider.get_lib_dir()?.join("modelfiles"),
+                default,
+            )
+        })
     }
 
     /// The download of `model`, or of the default model when none is named
@@ -153,9 +173,21 @@ impl Models {
                 spec.clone(),
                 self.root.clone(),
                 self.spare_room,
+                self.changes.clone(),
             ))
         });
         download.clone()
+    }
+
+    /// Every download that's running, or stopped before the end
+    pub fn unfinished(&self) -> Vec<ModelChange> {
+        self.downloads
+            .lock()
+            .expect("model downloads lock")
+            .values()
+            .map(|download| download.change())
+            .filter(|change| change.state.is_unfinished())
+            .collect()
     }
 
     /// Pauses every running download, keeping what each got
@@ -195,23 +227,57 @@ struct Follow {
     pause_on_close: bool,
 }
 
-/// `GET /v1/tilekit/models`: the lineup, each with its download
-async fn lineup(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    // the model `tiles run` last ran
-    let current = get_config_json()
-        .ok()
-        .and_then(|config| config["model"]["current"].as_str().map(str::to_owned));
-    let models = state.models.lineup(current.as_deref()).await;
-    ApiResponse::success(json!({ "models": models }))
+/// `GET /v1/tilekit/model/downloads`: every download that's running, paused or
+/// failed, wherever it was started
+async fn downloads(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    ApiResponse::success(json!({ "downloads": state.models.unfinished() }))
 }
 
-/// `GET /v1/tilekit/model/status?model=org/name:quant`
+/// `GET /v1/tilekit/model/events`, as server-sent events that stay open: the unfinished
+/// downloads, then every change to any model's download, from any client
+async fn events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    // subscribed before the first list, so no change falls between the two
+    let mut changes = state.models.changes.subscribe();
+    let stream = async_stream::stream! {
+        let mut send_all = true;
+        loop {
+            if std::mem::take(&mut send_all) {
+                for change in state.models.unfinished() {
+                    yield Ok::<_, Infallible>(model_event(&change));
+                }
+            }
+            match changes.recv().await {
+                Ok(change) => yield Ok(model_event(&change)),
+                // the newest changes are still there, but older ones were dropped
+                Err(RecvError::Lagged(_)) => send_all = true,
+                Err(RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn model_event(change: &ModelChange) -> Event {
+    Event::default()
+        .event("model")
+        .data(json!(change).to_string())
+}
+
+/// `GET /v1/tilekit/model/status?model=org/name:quant` for one model. With no model,
+/// every bundled model, the default one marked
 async fn status(
     State(state): State<Arc<AppState>>,
     Query(which): Query<Which>,
-) -> Result<impl IntoResponse, AppError> {
-    let download = state.models.get(which.model.as_deref())?;
-    Ok(ApiResponse::success(download.status().await?))
+) -> Result<Response, AppError> {
+    Ok(match which.model {
+        Some(model) => {
+            let download = state.models.get(Some(&model))?;
+            ApiResponse::success(download.status().await?).into_response()
+        }
+        None => {
+            ApiResponse::success(json!({ "models": state.models.bundled().await })).into_response()
+        }
+    })
 }
 
 /// `POST /v1/tilekit/model/download` with `{"model": "org/name:quant"}`, or `{}`

@@ -18,7 +18,7 @@ use wiremock::{
 };
 
 use super::{
-    CLIENT_HEADER, DownloadState, ModelDownload, Models, Spec, lineup::LINEUP, model_router,
+    CLIENT_HEADER, DownloadState, ModelDownload, Models, Spec, bundled::BUNDLED, model_router,
     modelfile_spec,
 };
 use crate::{
@@ -276,7 +276,13 @@ async fn status_after_a_restart_shows_a_part_download_as_paused() {
     std::fs::write(blobs.join(format!("{}.part", model_sha256())), &MODEL[..5]).unwrap();
     let daemon = Daemon::with(&server, root, |_| {});
 
-    let (status, body) = daemon.json("GET", "/v1/tilekit/model/status", None).await;
+    let (status, body) = daemon
+        .json(
+            "GET",
+            &format!("/v1/tilekit/model/status?model={REPO}"),
+            None,
+        )
+        .await;
 
     assert_eq!(status, StatusCode::OK);
     let data = &body["data"];
@@ -355,22 +361,26 @@ async fn a_badly_named_model_is_a_bad_request() {
 }
 
 #[tokio::test]
-async fn no_model_named_and_no_default_is_a_404() {
+async fn starting_with_no_model_and_no_default_is_a_404() {
     let state = Arc::new(AppState::for_tests());
     let req = Request::builder()
-        .uri("/v1/tilekit/model/status")
-        .body(Body::empty())
+        .method("POST")
+        .uri("/v1/tilekit/model/download")
+        .header(CONTENT_TYPE, "application/json")
+        .body(Body::from("{}"))
         .unwrap();
     let res = model_router().with_state(state).oneshot(req).await.unwrap();
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
-async fn the_lineup_lists_each_modelfile_with_its_download() {
+async fn status_with_no_model_lists_every_bundled_model() {
     let server = hub_with_model(Duration::ZERO).await;
     serve_model(&server, "org/e2b-GGUF", Duration::ZERO).await;
     serve_model(&server, "org/e4b-GGUF", Duration::ZERO).await;
-    let daemon = Daemon::new(&server);
+    let daemon = Daemon::with(&server, tempdir().unwrap(), |models| {
+        models.current_model = || Some("org/e4b-GGUF:q4_k_m".to_owned());
+    });
     let modelfiles = daemon.root.path().join("modelfiles");
     std::fs::create_dir_all(&modelfiles).unwrap();
     // the 31B's Modelfile is left out, and the 26B names a model the Hub doesn't have
@@ -386,28 +396,32 @@ async fn the_lineup_lists_each_modelfile_with_its_download() {
     std::fs::create_dir_all(&blobs).unwrap();
     std::fs::write(blobs.join(format!("{}.part", model_sha256())), &MODEL[..5]).unwrap();
 
-    let lineup = daemon
-        .state
-        .models
-        .lineup(Some("org/e4b-GGUF:q4_k_m"))
-        .await;
-    let lineup = serde_json::to_value(lineup).unwrap();
+    let (status, body) = daemon.json("GET", "/v1/tilekit/model/status", None).await;
 
-    let ids: Vec<&str> = lineup
+    assert_eq!(status, StatusCode::OK);
+    let models = &body["data"]["models"];
+    let ids: Vec<&str> = models
         .as_array()
         .unwrap()
         .iter()
         .map(|model| model["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, LINEUP.map(|(id, _)| id));
+    assert_eq!(ids, BUNDLED.map(|(id, _)| id));
     let total = CONFIG.len() + MODEL.len();
-    let [e2b, e4b, b12, b26, b31] = [0, 1, 2, 3, 4].map(|i| &lineup[i]);
+    let [e2b, e4b, b12, b26, b31] = [0, 1, 2, 3, 4].map(|i| &models[i]);
     assert_eq!(e2b["label"], "Gemma 4 E2B");
     assert_eq!(e2b["model"], "org/e2b-GGUF:Q4_K_M");
     assert_eq!(e2b["total"], total);
     assert_eq!(e2b["download"], json!({ "state": "idle" }));
-    assert_eq!(e4b["current"], true);
-    assert_eq!(e2b["current"], false);
+    assert_eq!(
+        (e4b["current"].clone(), e2b["current"].clone()),
+        (json!(true), json!(false))
+    );
+    // the test daemon's default is the 12B's model
+    assert_eq!(
+        (b12["default"].clone(), e2b["default"].clone()),
+        (json!(true), json!(false))
+    );
     assert_eq!(b12["on_disk"], 5);
     assert_eq!(
         b12["download"],
@@ -420,7 +434,7 @@ async fn the_lineup_lists_each_modelfile_with_its_download() {
 }
 
 #[tokio::test]
-async fn a_lineup_download_shows_in_the_lineup() {
+async fn a_bundled_model_downloading_shows_in_the_list() {
     let server = hub_with_model(Duration::from_millis(300)).await;
     let daemon = Daemon::new(&server);
     let modelfiles = daemon.root.path().join("modelfiles");
@@ -434,16 +448,90 @@ async fn a_lineup_download_shows_in_the_lineup() {
     daemon
         .start(json!({ "model": "org/model-GGUF:Q4_K_M" }))
         .await;
-    let lineup = serde_json::to_value(daemon.state.models.lineup(None).await).unwrap();
+    let (_, body) = daemon.json("GET", "/v1/tilekit/model/status", None).await;
 
-    assert_eq!(lineup[2]["download"]["state"], "downloading");
+    assert_eq!(
+        body["data"]["models"][2]["download"]["state"],
+        "downloading"
+    );
 }
 
 #[test]
-fn every_lineup_model_has_a_bundled_modelfile() {
+fn the_modelfiles_folder_has_exactly_the_bundled_models() {
     let modelfiles = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../modelfiles");
-    for (id, _) in LINEUP {
+    let mut names: Vec<String> = std::fs::read_dir(&modelfiles)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let mut bundled = BUNDLED.map(|(id, _)| id.to_owned()).to_vec();
+    bundled.sort();
+    assert_eq!(names, bundled);
+    for (id, _) in BUNDLED {
         let spec = modelfile_spec(&modelfiles.join(id)).unwrap();
         assert!(spec.repo.starts_with("unsloth/gemma-4-"), "{id}: {spec}");
     }
+}
+
+#[tokio::test]
+async fn the_downloads_list_has_only_unfinished_downloads() {
+    let server = hub_with_model(Duration::from_secs(10)).await;
+    serve_model(&server, OTHER, Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    daemon.start(json!({})).await;
+    // asked about but never started, so not a download
+    daemon
+        .json(
+            "GET",
+            &format!("/v1/tilekit/model/status?model={OTHER}"),
+            None,
+        )
+        .await;
+
+    let (status, body) = daemon
+        .json("GET", "/v1/tilekit/model/downloads", None)
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let downloads = body["data"]["downloads"].as_array().unwrap();
+    assert_eq!(downloads.len(), 1);
+    assert_eq!(downloads[0]["model"], "org/model-GGUF:Q4_K_M");
+    assert_eq!(downloads[0]["state"], "downloading");
+}
+
+#[tokio::test]
+async fn the_events_stream_follows_downloads_started_by_any_client() {
+    let server = hub_with_model(Duration::from_secs(10)).await;
+    serve_model(&server, OTHER, Duration::from_millis(300)).await;
+    let daemon = Daemon::new(&server);
+    daemon.start(json!({})).await;
+
+    // the UI opens the stream, then another client starts a download
+    let mut stream = daemon
+        .send("GET", "/v1/tilekit/model/events", None)
+        .await
+        .into_body();
+    daemon.start(json!({ "model": OTHER })).await;
+
+    let mut seen = String::new();
+    let done = r#"data: {"model":"org/other-GGUF:Q4_K_M","state":"done"}"#;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !seen.contains(done) {
+            let frame = stream.frame().await.unwrap().unwrap();
+            if let Ok(data) = frame.into_data() {
+                seen.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    })
+    .await
+    .expect("the other download never showed as done");
+
+    // what was already running comes first
+    let first = seen
+        .lines()
+        .find(|line| line.starts_with("data: "))
+        .unwrap();
+    assert!(first.contains(r#""model":"org/model-GGUF:Q4_K_M","state":"downloading""#));
+    assert!(seen.contains(r#""model":"org/other-GGUF:Q4_K_M","state":"downloading""#));
+    assert!(seen.contains("event: model"));
 }

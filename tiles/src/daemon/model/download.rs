@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::{
     runtime::Handle,
-    sync::{Mutex as AsyncMutex, watch},
+    sync::{Mutex as AsyncMutex, broadcast, watch},
     task::JoinHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -62,6 +62,11 @@ impl DownloadState {
         matches!(self, Self::Downloading { .. } | Self::Verifying { .. })
     }
 
+    /// Running, or stopped before the end
+    pub(super) fn is_unfinished(&self) -> bool {
+        !matches!(self, Self::Idle | Self::Done)
+    }
+
     // what the files on disk say, when nothing is running
     fn from_disk(done: u64, total: u64) -> Self {
         match done {
@@ -70,6 +75,15 @@ impl DownloadState {
             done => Self::Paused { done, total },
         }
     }
+}
+
+/// A model and its download's state, as the downloads list and the events stream
+/// send them
+#[derive(Debug, Clone, Serialize)]
+pub struct ModelChange {
+    model: String,
+    #[serde(flatten)]
+    pub(super) state: DownloadState,
 }
 
 #[derive(Debug, Serialize)]
@@ -93,21 +107,51 @@ pub struct ModelDownload {
     root: PathBuf,
     spare_room: u64,
     pub(super) state: watch::Sender<DownloadState>,
+    /// Shared by every model, so one stream can follow all of them
+    changes: broadcast::Sender<ModelChange>,
     /// The files to download, asked from Hugging Face once
     plan: AsyncMutex<Option<DownloadPlan>>,
     running: AsyncMutex<Running>,
 }
 
 impl ModelDownload {
-    pub(super) fn new(hub: Arc<Hub>, spec: Spec, root: PathBuf, spare_room: u64) -> Self {
+    pub(super) fn new(
+        hub: Arc<Hub>,
+        spec: Spec,
+        root: PathBuf,
+        spare_room: u64,
+        changes: broadcast::Sender<ModelChange>,
+    ) -> Self {
         Self {
             hub,
             spec,
             root,
             spare_room,
             state: watch::Sender::new(DownloadState::Idle),
+            changes,
             plan: AsyncMutex::new(None),
             running: AsyncMutex::new(None),
+        }
+    }
+
+    pub(super) fn change(&self) -> ModelChange {
+        ModelChange {
+            model: self.spec.to_string(),
+            state: self.state.borrow().clone(),
+        }
+    }
+
+    // only a state that differs goes out, as status re-reads the same one from disk
+    // on every call
+    fn set(&self, state: DownloadState) {
+        let changed = self.state.send_if_modified(|current| {
+            let changed = *current != state;
+            *current = state;
+            changed
+        });
+        if changed {
+            // nobody listening is fine
+            let _ = self.changes.send(self.change());
         }
     }
 
@@ -143,7 +187,7 @@ impl ModelDownload {
         let running = self.running.lock().await;
         let free_disk = free_space(&self.root).ok();
         if !is_live(&running) && self.is_ready() {
-            self.state.send_replace(DownloadState::Done);
+            self.set(DownloadState::Done);
             return Ok(ModelStatus {
                 model: self.spec.to_string(),
                 total: None,
@@ -158,8 +202,7 @@ impl ModelDownload {
         // a failure stays until the next start, so the UI can show why
         let failed = matches!(*self.state.borrow(), DownloadState::Failed { .. });
         if !is_live(&running) && !failed {
-            self.state
-                .send_replace(DownloadState::from_disk(on_disk, total));
+            self.set(DownloadState::from_disk(on_disk, total));
         }
         Ok(ModelStatus {
             model: self.spec.to_string(),
@@ -193,7 +236,7 @@ impl ModelDownload {
 
         log::info!("Downloading {}", self.spec);
         let cancel = CancellationToken::new();
-        self.state.send_replace(DownloadState::Downloading {
+        self.set(DownloadState::Downloading {
             done,
             total,
             bytes_per_sec: 0,
@@ -208,7 +251,7 @@ impl ModelDownload {
         let mut progress = Progress::new(done, total);
         let outcome = hf::download(&self.hub, &plan, &self.root, &cancel, |event| {
             if let Some(state) = progress.update(event) {
-                self.state.send_replace(state);
+                self.set(state);
             }
         })
         .await;
@@ -224,7 +267,7 @@ impl ModelDownload {
             },
         };
         log::info!("Model download for {}: {state:?}", self.spec);
-        self.state.send_replace(state);
+        self.set(state);
     }
 
     /// Stops the download and keeps what it got. Answers once it has stopped
