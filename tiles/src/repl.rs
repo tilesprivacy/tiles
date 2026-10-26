@@ -18,7 +18,6 @@ use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_inference_config,
     get_memory_path, get_model_cache, update_current_model, update_llama_config,
 };
-use crate::utils::hf_model_downloader::*;
 use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
@@ -671,7 +670,7 @@ fn model_load_warnings(payload: &serde_json::Value) -> Vec<String> {
 }
 
 async fn download_model(model_name: &str, quant: Option<&str>) -> Result<()> {
-    match pull_model(model_name, quant).await {
+    match crate::daemon::model::pull(model_name, quant).await {
         Ok(_) => {
             println!("\nDownloading completed \n");
             Ok(())

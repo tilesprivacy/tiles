@@ -51,6 +51,7 @@ pub mod atproto;
 pub mod model;
 pub mod server;
 pub mod session;
+mod sse;
 pub mod web;
 use crate::{
     core::{
@@ -82,8 +83,8 @@ pub struct AppState {
     pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
     pub web_ui: web::WebUiState,
-    /// The default model's download, or none when the default Modelfile can't be read
-    pub model: Option<Arc<model::ModelDownload>>,
+    /// Model downloads, one per model
+    pub models: model::Models,
 }
 
 #[cfg(test)]
@@ -103,7 +104,12 @@ impl AppState {
             web_ui: web::WebUiState::Serving {
                 url: format!("http://127.0.0.1:{}", web::UI_PORT),
             },
-            model: None,
+            models: model::Models::new(
+                crate::utils::hf_model_downloader::Hub::new("http://127.0.0.1:9", None)
+                    .expect("a test hub"),
+                std::env::temp_dir(),
+                None,
+            ),
         }
     }
 }
@@ -442,10 +448,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let ui = Ui::new();
     let (web_ui_state, web_ui_listener) = web::bind().await;
-    let model = model::ModelDownload::for_default_model()
-        .inspect_err(|err| log::warn!("Model downloads are off: {err:#}"))
-        .ok()
-        .map(Arc::new);
+    let models = model::Models::for_daemon()?;
 
     let state = AppState {
         shutdown_sender: shutdown_tx,
@@ -458,7 +461,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         login: None.into(),
         ui: ui.clone(),
         web_ui: web_ui_state,
-        model,
+        models,
     };
 
     let shared_state = Arc::new(state);
@@ -550,10 +553,8 @@ fn listen_for_signals(state: Arc<AppState>) {
 pub async fn shutdown_all(state: Arc<AppState>) {
     info!("Daemon server shutting down");
     ui::begin_stop(&state.ui);
-    // keeps what a running download got, so it shows as paused next time
-    if let Some(model) = &state.model {
-        let _ = model.pause().await;
-    }
+    // keeps what running downloads got, so they show as paused next time
+    state.models.pause_all().await;
     // its ping has no timeout of its own, and a stuck server must not hold the
     // shutdown open forever
     match tokio::time::timeout(

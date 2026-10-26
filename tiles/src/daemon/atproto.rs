@@ -23,7 +23,9 @@ use crate::{
         account::atproto::{self, AtprotoAccount, HandleNotFound, LOGIN_TIMEOUT},
         storage::db::get_db_conn,
     },
-    daemon::{ApiJson, ApiResponse, AppError, AppState, daemon_client, daemon_url},
+    daemon::{
+        ApiJson, ApiResponse, AppError, AppState, daemon_client, daemon_url, sse::take_events,
+    },
     utils::open_in_browser,
 };
 
@@ -160,30 +162,6 @@ pub async fn sign_in(handle: &str) -> Result<AtprotoAccount> {
     Err(anyhow!("The daemon closed the sign in before it finished"))
 }
 
-// takes the finished event blocks off the buffer, a block cut off mid chunk waits for the next one
-fn take_events(pending: &mut String) -> Vec<(String, Value)> {
-    let mut events = vec![];
-    while let Some(end) = pending.find("\n\n") {
-        let block: String = pending.drain(..end + 2).collect();
-        events.extend(sse_event(&block));
-    }
-    events
-}
-
-// one event block as its name and json data, keep-alive comments come back as none
-fn sse_event(block: &str) -> Option<(String, Value)> {
-    let mut name = None;
-    let mut data = None;
-    for line in block.lines() {
-        if let Some(value) = line.strip_prefix("event:") {
-            name = Some(value.trim().to_owned());
-        } else if let Some(value) = line.strip_prefix("data:") {
-            data = serde_json::from_str(value.trim()).ok();
-        }
-    }
-    Some((name?, data?))
-}
-
 pub async fn logout() -> Result<impl IntoResponse, AppError> {
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
@@ -281,16 +259,5 @@ mod tests {
         let events = take_events(&mut pending);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1["url"], "https://bsky.social/oauth");
-    }
-
-    #[test]
-    fn keep_alives_and_broken_events_are_skipped() {
-        let mut pending =
-            ":\n\nevent: error\ndata: not json\n\nevent: authorize\ndata: {\"url\":\"u\"}\n\n"
-                .to_owned();
-
-        let events = take_events(&mut pending);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, "authorize");
     }
 }
