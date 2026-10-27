@@ -174,10 +174,10 @@ def _llama_server_log_hint() -> str:
     return str(_resolve_log_dir() / "llama-server.err.log")
 
 
-def is_server_ready() -> bool:
+def is_server_ready(timeout: float = 2.0) -> bool:
     """True when llama-server /health reports the model is loaded."""
     try:
-        response = httpx.get(_health_url(), timeout=2.0)
+        response = httpx.get(_health_url(), timeout=timeout)
     except httpx.HTTPError:
         return False
     if response.status_code != 200:
@@ -190,6 +190,18 @@ def is_server_ready() -> bool:
     if status is None:
         return True
     return status == "ok"
+
+
+def model_state() -> tuple[str, str | None]:
+    """Model state for /ping: ("none" | "loading" | "loaded", gguf path or None).
+
+    "loading" means llama-server is running but the model isn't ready yet. The
+    check uses a short timeout, so a stuck llama-server can't slow down /ping.
+    """
+    proc, gguf = _process, _loaded_gguf
+    if proc is None or proc.poll() is not None or gguf is None:
+        return "none", None
+    return ("loaded" if is_server_ready(timeout=0.5) else "loading"), str(gguf)
 
 
 def _tail_llama_server_log(max_lines: int = 8) -> str:

@@ -4,7 +4,6 @@
 ///
 /// - ~/.config/tiles (config dir) - Ofcourse the App configs
 ///     - config.toml
-///     - server.pid - current server daemon pid
 /// - ~/.local/share/tiles (data dir) - The User generated data should go here + app logs
 ///     - /logs
 ///     - /data (default, user can change this location tho)
@@ -432,13 +431,34 @@ fn save_root_config(config: &RootConfig) -> Result<()> {
 /// Get the apt path where the model in the system.
 /// `model_name` may carry a `:quant` tag (e.g. `unsloth/gemma-4-12b-it-GGUF:Q8_0`),
 /// which is stripped before resolving the HF cache dir.
+/// Why a model lookup failed when it's not a disk error, so the API can answer 400 or
+/// 404 instead of 500
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCacheError {
+    /// The name is not in `owner/repo` form
+    InvalidSpec,
+    /// The model is not downloaded
+    NotCached,
+}
+
+impl std::fmt::Display for ModelCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidSpec => "Model spec should look like owner/repo",
+            Self::NotCached => "Model is not downloaded",
+        })
+    }
+}
+
+impl std::error::Error for ModelCacheError {}
+
 pub fn get_model_cache(model_name: &str) -> Result<PathBuf> {
     let (repo, _quant) = tilekit::modelfile::split_model_spec(model_name);
     let hf_model_dir = if repo.contains("/") {
         let model_spec_parts = repo.split("/").collect::<Vec<&str>>();
         format!("models--{}--{}", model_spec_parts[0], model_spec_parts[1])
     } else {
-        return Err(anyhow!("Modelfile not found"));
+        return Err(ModelCacheError::InvalidSpec.into());
         // TODO: Check for a better Modilefile search instead of relying on checking "/"
     };
 
@@ -460,7 +480,7 @@ pub fn get_model_cache(model_name: &str) -> Result<PathBuf> {
     } else if legacy_model_path.exists() {
         get_commit_path(legacy_model_path)
     } else {
-        Err(anyhow!("Model doesnt exist"))
+        Err(ModelCacheError::NotCached.into())
     }
 }
 

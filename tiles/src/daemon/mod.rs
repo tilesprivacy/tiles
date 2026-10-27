@@ -63,7 +63,9 @@ use crate::{
         storage::db::get_db_conn,
         ui::{self, Ui},
     },
-    utils::config::{ConfigProvider, DefaultProvider, get_config_json, get_model_cache},
+    utils::config::{
+        ConfigProvider, DefaultProvider, ModelCacheError, get_config_json, get_model_cache,
+    },
 };
 
 #[derive(Debug)]
@@ -77,6 +79,9 @@ pub struct AppState {
     pub remote_running: Mutex<bool>,
     pub remote_shutdown_sender: Mutex<Option<oneshot::Sender<bool>>>,
     pub agent: AsyncMutex<Option<PiAgent>>,
+    /// The model the running agent was started with. Kept outside the agent lock, so
+    /// saving a chat never waits behind a streaming reply
+    pub agent_model: Mutex<Option<String>>,
     pub ui: Arc<Ui>,
     // TODO: Instead of Mutex, might be better to use a RwLock, so for
     // simple read it shldnt need to wait just cuz of another read
@@ -98,6 +103,7 @@ impl AppState {
             remote_shutdown_sender: Mutex::new(None),
             remote_running: Mutex::new(false),
             agent: None.into(),
+            agent_model: Mutex::new(None),
             ui: Ui::new(),
             network_state: None.into(),
         }
@@ -113,6 +119,7 @@ pub enum AppError {
     AlreadyExists(String),
     CannotProcess(String),
     MethodNotAllowed(String),
+    ServiceUnavailable(String),
 }
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
@@ -124,6 +131,7 @@ impl IntoResponse for AppError {
             Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
             Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
             Self::MethodNotAllowed(e) => (StatusCode::METHOD_NOT_ALLOWED, e),
+            Self::ServiceUnavailable(e) => (StatusCode::SERVICE_UNAVAILABLE, e),
         };
 
         let body = Json(json!({
@@ -335,6 +343,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         remote_shutdown_sender: Mutex::new(None),
         remote_running: Mutex::new(false),
         agent: None.into(),
+        agent_model: Mutex::new(None),
         ui: ui.clone(),
         network_state: None.into(),
     };
@@ -411,7 +420,7 @@ fn listen_for_signals(state: Arc<AppState>) {
 }
 
 /// The one teardown every stop goes through. The inference server is first
-/// because it is setsid'd and outlives the rest otherwise
+/// because it runs in its own process group and outlives the rest otherwise
 pub async fn shutdown_all(state: Arc<AppState>) {
     info!("Daemon server shutting down");
     ui::begin_stop(&state.ui);
@@ -502,20 +511,29 @@ async fn callback(
 async fn get_model_cache_path(
     State(_state): State<Arc<AppState>>,
     Query(params): Query<SendParams>,
-) -> Result<String, StatusCode> {
+) -> Result<String, AppError> {
     log::info!("getting model cache path");
-    let model_path = get_model_cache(&params.model_name).map_err(|_| StatusCode::NOT_FOUND)?;
-    model_path
-        .to_str()
-        .map(str::to_owned)
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    let model_path = get_model_cache(&params.model_name).map_err(|e| {
+        let reason = format!("{}: {e}", params.model_name);
+        match e.downcast_ref::<ModelCacheError>() {
+            Some(ModelCacheError::InvalidSpec) => AppError::BadRequest(reason),
+            Some(ModelCacheError::NotCached) => AppError::NotFound(reason),
+            None => AppError::InternalServerError(reason),
+        }
+    })?;
+    model_path.to_str().map(str::to_owned).ok_or_else(|| {
+        AppError::InternalServerError(format!(
+            "The cache path for {} is not valid UTF-8",
+            params.model_name
+        ))
+    })
 }
 
 /// Gets the contents of config.toml in json
-async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, StatusCode> {
+async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, AppError> {
     get_config_json()
         .and_then(|config| serde_json::to_string(&config).map_err(Into::into))
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        .map_err(|e| AppError::InternalServerError(format!("Failed to read config.toml: {e}")))
 }
 
 async fn stop_server(port: Option<u32>) -> Result<()> {
@@ -589,7 +607,7 @@ fn get_port(port: Option<u32>) -> u32 {
 
 //TODO: handle the api responses correctly with correct msgs later..
 #[debug_handler]
-async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<String, StatusCode> {
+async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<String, AppError> {
     //TODO: Handle these network stuff in network module pleje
 
     if *state
@@ -597,15 +615,18 @@ async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<St
         .lock()
         .expect("Failed to get lock on remote_running")
     {
-        return Err(StatusCode::CONFLICT);
+        return Err(AppError::AlreadyExists(
+            "Remote inference is already being shared".to_owned(),
+        ));
     }
 
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
-        .map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let user = get_current_user(&user_db_conn).map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let endpoint = create_endpoint(&user)
-        .await
-        .map_err(|_e| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    let user = get_current_user(&user_db_conn)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    let endpoint = create_endpoint(&user).await.map_err(|e| {
+        AppError::InternalServerError(format!("Failed to create the endpoint: {e}"))
+    })?;
     endpoint.set_alpns(vec![ALPN.to_vec()]);
     endpoint.online().await;
     let addr = endpoint.addr();

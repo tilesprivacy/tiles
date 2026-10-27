@@ -66,6 +66,10 @@ async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
         let pi_agent = pi::new(&modelname, &system_prompt, PY_PORT)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         *agent = Some(pi_agent);
+        *state
+            .agent_model
+            .lock()
+            .expect("Failed to get agent_model lock") = Some(modelname);
         Ok(ApiResponse::success(json!({"message": "started agent"})))
     }
 }

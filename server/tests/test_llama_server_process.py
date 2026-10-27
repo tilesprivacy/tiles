@@ -368,3 +368,22 @@ def test_ensure_running_restarts_on_config_change(tmp_path: Path):
     # every spawn; the first call is a no-op since no prior process exists).
     assert popen.call_count == 2
     assert stop.call_count == 2
+
+
+def test_model_state_reports_none_loading_and_loaded(tmp_path: Path):
+    _reset_process_state()
+    assert process.model_state() == ("none", None)
+
+    gguf = tmp_path / "model.gguf"
+    process._process = Mock(poll=Mock(return_value=None))
+    process._loaded_gguf = gguf
+
+    with patch("server.backend.llama_server.process.is_server_ready", return_value=False):
+        assert process.model_state() == ("loading", str(gguf))
+    with patch("server.backend.llama_server.process.is_server_ready", return_value=True):
+        assert process.model_state() == ("loaded", str(gguf))
+
+    # an exited llama-server holds nothing
+    process._process = Mock(poll=Mock(return_value=1))
+    assert process.model_state() == ("none", None)
+    _reset_process_state()
