@@ -131,17 +131,15 @@ async fn do_start_network(
                 }))
             }
             //TODO: These shld be AppError type
-            _ => Ok(ApiResponse::success(SimpleResponse {
-                message: "Failed to start network due to received wrong event on creating network"
+            _ => Err(AppError::CannotProcess(
+                "Failed to start network due to received wrong event on creating network"
                     .to_string(),
-            })),
+            )),
         }
     } else {
-        //TODO: These shld be AppError type
-        Ok(ApiResponse::success(SimpleResponse {
-            message: "Failed to start network due to received wrong event on creating network"
-                .to_string(),
-        }))
+        Err(AppError::InternalServerError(
+            "Failed to start network due to received wrong event on creating network".to_string(),
+        ))
     }
 }
 

@@ -334,7 +334,7 @@ struct DaemonArgs {
 #[derive(Debug, Subcommand)]
 enum DaemonCommands {
     /// Start the daemon
-    Start { port: Option<u32> },
+    Start,
 
     /// Stops the daemon
     Stop,
@@ -382,7 +382,7 @@ enum NetworkCommands {
     /// Get Tiles network status
     Status,
 
-    /// Start Tiles network
+    /// Stop Tiles network
     Stop,
 }
 
@@ -433,9 +433,9 @@ enum LinkCommands {
     /// List the linked peers
     LinkedDevices,
 
-    // Revokes the given linked peer
+    /// Revokes the given linked peer
     Revoke {
-        // DID of the peer token
+        /// DID of the peer token
         did: String,
     },
 }
@@ -570,7 +570,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", res);
         }
         Some(Commands::System(SystemCommands::Daemon(daemon_args))) => match daemon_args.command {
-            Some(DaemonCommands::Start { port }) => start_cmd(port)
+            Some(DaemonCommands::Start) => start_cmd(None)
                 .await
                 .inspect_err(|e| eprintln!("Daemon starting failed, reason: {:?}", e))?,
             Some(DaemonCommands::Stop) => stop_cmd()
