@@ -6,11 +6,12 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use tiles::{
     core::{
         self,
-        account::atproto::{login, logout},
+        account::atproto::logout,
         plugin::{self, install, uninstall},
         service,
     },
     daemon::{
+        atproto::sign_in,
         authz::{create_link_cli, join_request_cli, list_linked_devices_cli, revoke_peers_cli},
         get_or_set_daemon_port,
         net::{fetch_network_status_cli, start_network_cli, stop_network_cli, sync_with_peer_cli},
@@ -645,7 +646,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
-                login(&handle).await?;
+                let account = sign_in(&handle).await?;
+                println!("Logged in successfully as @{}", account.handle);
             }
             AtCommands::Logout => {
                 logout(&db_conn.common)?;

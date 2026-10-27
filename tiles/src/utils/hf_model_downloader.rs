@@ -1,9 +1,13 @@
 /// Manages model snapshot downloading from HuggingFace
 use anyhow::{Result, anyhow};
-use hf_hub::api::{
-    Siblings,
-    tokio::{ApiBuilder, ApiError},
+use hf_hub::{
+    Cache, Repo,
+    api::{
+        Siblings,
+        tokio::{ApiBuilder, ApiError, Progress},
+    },
 };
+use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::utils::config::get_or_create_model_download_path;
 
@@ -14,6 +18,34 @@ pub const DEFAULT_QUANT: &str = "Q4_K_M";
 /// `quant` selects the gguf variant (e.g. `Q8_0`); falls back to `Q4_K_M`.
 pub async fn pull_model(model_name: &str, quant: Option<&str>) -> Result<()> {
     snapshot_download(model_name, quant).await
+}
+
+#[derive(Clone)]
+struct DownloadBar(ProgressBar);
+
+impl Progress for DownloadBar {
+    async fn init(&mut self, size: usize, filename: &str) {
+        self.0.set_length(size as u64);
+        self.0.set_message(filename.to_owned());
+    }
+
+    async fn update(&mut self, size: usize) {
+        self.0.inc(size as u64);
+    }
+
+    async fn finish(&mut self) {
+        self.0.finish();
+    }
+}
+
+fn download_bar() -> DownloadBar {
+    let style = ProgressStyle::with_template(
+        "{msg:.bold}  {bar:32.226/238} {percent:>3}%  \
+         {decimal_bytes:.dim}/{decimal_total_bytes:.dim}  {decimal_bytes_per_sec:.cyan}  ETA {eta}",
+    )
+    .expect("download bar template is invalid")
+    .progress_chars("▰▰▱");
+    DownloadBar(ProgressBar::new(0).with_style(style))
 }
 
 pub async fn snapshot_download(modelname: &str, quant: Option<&str>) -> Result<()> {
@@ -29,9 +61,11 @@ pub async fn snapshot_download(modelname: &str, quant: Option<&str>) -> Result<(
             "mtp-gemma-4-12b-it.gguf".to_owned(),
         ])
         .collect();
+    let download_path = get_or_create_model_download_path()?;
+    let cache = Cache::new(download_path.clone()).repo(Repo::model(modelname.to_owned()));
     let api_build_result = ApiBuilder::new()
         .with_progress(true)
-        .with_cache_dir(get_or_create_model_download_path()?)
+        .with_cache_dir(download_path)
         .build();
 
     match api_build_result {
@@ -80,7 +114,15 @@ pub async fn snapshot_download(modelname: &str, quant: Option<&str>) -> Result<(
                     }
 
                     for sibling in filtered_siblings {
-                        if repo.get(&sibling.rfilename).await.is_err() {
+                        // download_with_progress skips the cache check that get does
+                        if cache.get(&sibling.rfilename).is_some() {
+                            continue;
+                        }
+                        if repo
+                            .download_with_progress(&sibling.rfilename, download_bar())
+                            .await
+                            .is_err()
+                        {
                             return Err(anyhow!(
                                 "{:?} failed to download, retry again",
                                 &sibling.rfilename,

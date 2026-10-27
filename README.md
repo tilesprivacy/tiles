@@ -17,8 +17,13 @@
   <a href="#getting-started">Getting Started</a> ·
   <a href="https://tiles.run/book">Documentation</a> ·
   <a href="#about">About</a> ·
-  <a href="#contributing">Contributing</a> ·
-  <a href="#license">License</a>
+  <a href="#contributing">Contributing</a>
+</p>
+
+<p align="center">
+  <a href="https://discord.gg/PPSjcpZzvt"><img src="https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white" alt="Discord"></a>
+  <a href="https://github.com/tilesprivacy/tiles/releases"><img src="https://img.shields.io/github/v/release/tilesprivacy/tiles?label=Release" alt="Release"></a>
+  <a href="#license"><img src="https://img.shields.io/badge/License-MIT%20%2F%20Apache_2.0-blue.svg" alt="License"></a>
 </p>
 
 ---
@@ -56,6 +61,8 @@ Ideas, issues, and pull requests are welcome.
 Start here:
 - [Contributing to Tiles](CONTRIBUTING.md)
 - [Developing Tiles](HACKING.md)
+
+Have a question? Feel free to join the [Tiles discord server](https://discord.gg/PPSjcpZzvt).
 
 ## License
 

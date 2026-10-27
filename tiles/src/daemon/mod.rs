@@ -39,6 +39,7 @@ use serde_json::json;
 use std::fs::OpenOptions;
 use std::sync::Mutex;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::OnceCell;
 use tokio::sync::oneshot::{self, Receiver, Sender};
 use tokio::sync::watch;
 use tokio::{
@@ -82,6 +83,8 @@ pub struct AppState {
     /// The model the running agent was started with. Kept outside the agent lock, so
     /// saving a chat never waits behind a streaming reply
     pub agent_model: Mutex<Option<String>>,
+    /// The ATmosphere sign in waiting for the browser, if any
+    pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
     // TODO: Instead of Mutex, might be better to use a RwLock, so for
     // simple read it shldnt need to wait just cuz of another read
@@ -104,6 +107,7 @@ impl AppState {
             remote_running: Mutex::new(false),
             agent: None.into(),
             agent_model: Mutex::new(None),
+            login: None.into(),
             ui: Ui::new(),
             network_state: None.into(),
         }
@@ -231,6 +235,23 @@ pub async fn start_cmd(port: Option<u32>) -> Result<()> {
 pub async fn stop_cmd() -> Result<()> {
     stop_server(None).await
 }
+
+/// The client every CLI call to the daemon goes through. Each call makes sure the
+/// daemon is up and on this version, so commands never check it themselves, and a
+/// REPL that outlives a daemon restart still finds it. Starting and stopping the
+/// daemon don't use it
+pub async fn daemon_client() -> Result<&'static Client> {
+    static CLIENT: OnceCell<Client> = OnceCell::const_new();
+    // a running daemon on this version costs one ping
+    start_cmd(None).await?;
+    Ok(CLIENT.get_or_init(|| async { Client::new() }).await)
+}
+
+/// The daemon's address for `path`, to call through `daemon_client`
+pub fn daemon_url(path: &str) -> String {
+    let port = get_or_set_daemon_port();
+    format!("http://127.0.0.1:{port}{path}")
+}
 async fn root(State(state): State<Arc<AppState>>) -> String {
     state.vsn.clone()
 }
@@ -344,6 +365,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         remote_running: Mutex::new(false),
         agent: None.into(),
         agent_model: Mutex::new(None),
+        login: None.into(),
         ui: ui.clone(),
         network_state: None.into(),
     };
@@ -469,7 +491,8 @@ pub async fn start_internal_server(
 }
 
 async fn shutdown_signal(rx: Receiver<bool>) {
-    rx.await.expect("shutdown receiver paniced");
+    // a dropped sender means the sign in was cancelled or timed out, which is a stop too
+    let _ = rx.await;
 }
 
 async fn watch_shutdown(mut rx: watch::Receiver<bool>) {
@@ -702,10 +725,11 @@ async fn show_remote_status(State(state): State<Arc<AppState>>) -> Result<String
 }
 
 pub async fn share_remote_link() -> Result<String> {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/remote-share", port);
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/remote-share"))
+        .send()
+        .await;
     match res {
         Err(err) => Err(anyhow!("Daemon remote share failed due to {:?}", err)),
         Ok(response) => {
@@ -721,10 +745,11 @@ pub async fn share_remote_link() -> Result<String> {
 }
 
 pub async fn unshare_remote_link() -> Result<()> {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/remote-unshare", port);
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/remote-unshare"))
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!("Daemon remote unshare failed due to {:?}", err)),
@@ -733,10 +758,11 @@ pub async fn unshare_remote_link() -> Result<()> {
 }
 
 pub async fn remote_status() -> Result<String> {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/remote-status", port);
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/remote-status"))
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!(
@@ -764,10 +790,12 @@ async fn connect_remote_inference(
 }
 
 pub async fn connect_remote(ticket: &str) -> Result<()> {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/connect-remote?ticket={}", port, ticket);
-    let res = client.get(addr).send().await;
+    let res = daemon_client()
+        .await?
+        .get(daemon_url("/connect-remote"))
+        .query(&[("ticket", ticket)])
+        .send()
+        .await;
 
     match res {
         Err(err) => Err(anyhow!("Daemon remote connect failed due to {:?}", err)),
