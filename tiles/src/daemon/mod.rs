@@ -86,8 +86,6 @@ pub struct AppState {
     /// The ATmosphere sign in waiting for the browser, if any
     pub login: AsyncMutex<Option<atproto::LoginTask>>,
     pub ui: Arc<Ui>,
-    // TODO: Instead of Mutex, might be better to use a RwLock, so for
-    // simple read it shldnt need to wait just cuz of another read
     pub network_state: AsyncRwLock<Option<NetworkState>>,
 }
 
@@ -404,7 +402,8 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     info!("Daemon server started at {}", dyn_port);
 
     tokio::spawn(async move {
-        start_network_cli().await;
+        start_network_cli().await?;
+        anyhow::Result::<()>::Ok(())
     });
 
     if with_ui {

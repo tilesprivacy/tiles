@@ -657,13 +657,13 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::System(SystemCommands::Network(network_args))) => {
             match network_args.command {
                 NetworkCommands::Start => {
-                    start_network_cli().await;
+                    start_network_cli().await?;
                 }
                 NetworkCommands::Stop => {
-                    stop_network_cli().await;
+                    stop_network_cli().await?;
                 }
                 NetworkCommands::Status => {
-                    fetch_network_status_cli().await;
+                    fetch_network_status_cli().await?;
                 }
             }
         }

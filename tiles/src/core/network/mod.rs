@@ -28,7 +28,6 @@ use tokio::{
         mpsc::{self, Sender},
         oneshot::{self, Receiver as oneshotReceiver},
     },
-    time::sleep,
 };
 
 use crate::{
@@ -307,7 +306,7 @@ async fn handle_device_link_events(
 
             msg_sender.broadcast(link_resp.to_bytes().into()).await?;
             // Adding a delay to prevent the risk of closing the endpoint before we send the msg via the above broadcast
-            sleep(Duration::from_secs(5)).await;
+            // sleep(Duration::from_secs(5)).await;
         }
         MessageBody::LinkAccepted => {
             log::info!("On link accepted");
@@ -564,7 +563,7 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
             let (gossip_network_sender, gossip_network_receiver) = gossip_topic.split();
             let (caller_sender, mut caller_recv) = mpsc::channel::<NetworkApiEvent>(10);
 
-            tokio::spawn(process_gossip_network_events(
+            let handle = tokio::spawn(process_gossip_network_events(
                 gossip_network_receiver,
                 gossip_network_sender.clone(),
                 user.clone(),
@@ -585,17 +584,25 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
             );
             gossip_network_sender
                 .broadcast(link_req_msg.to_bytes().into())
-                .await?;
-
-            match tokio::time::timeout(Duration::from_secs(API_TIMEOUT as u64), caller_recv.recv())
                 .await
+                .inspect_err(|_e| {
+                    handle.abort();
+                })?;
+
+            let resp = match tokio::time::timeout(
+                Duration::from_secs(API_TIMEOUT as u64),
+                caller_recv.recv(),
+            )
+            .await
             {
                 Ok(Some(NetworkApiEvent::DeviceLinkFailed(reason))) => Err(anyhow!(reason)),
                 Ok(Some(NetworkApiEvent::DeviceLinkSuccess)) => Ok(()),
                 Ok(Some(_)) => Err(anyhow!("Invalid event")),
                 Ok(None) => Err(anyhow!("Network process closed unexpectedly")),
                 Err(_err) => Err(anyhow!("Timed out waiting for linking response")),
-            }
+            };
+            handle.abort();
+            resp
         }
     }
 }
@@ -649,7 +656,7 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
                 endpoint,
                 db_channel_sender,
             };
-            tokio::spawn(process_gossip_network_events(
+            let handle = tokio::spawn(process_gossip_network_events(
                 gossip_network_receiver,
                 gossip_network_sender.clone(),
                 user.clone(),
@@ -669,17 +676,25 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
             );
             gossip_network_sender
                 .broadcast(sync_start_msg.to_bytes().into())
-                .await?;
-
-            match tokio::time::timeout(Duration::from_secs(API_TIMEOUT as u64), caller_recv.recv())
                 .await
+                .inspect_err(|_e| {
+                    handle.abort();
+                })?;
+
+            let resp = match tokio::time::timeout(
+                Duration::from_secs(API_TIMEOUT as u64),
+                caller_recv.recv(),
+            )
+            .await
             {
                 Ok(Some(NetworkApiEvent::SyncFailed(reason))) => Err(anyhow!(reason)),
                 Ok(Some(NetworkApiEvent::SyncSuccess)) => Ok(()),
                 Ok(Some(_)) => Err(anyhow!("Invalid event")),
                 Ok(None) => Err(anyhow!("Network process closed unexpectedly")),
-                Err(_err) => Err(anyhow!("Timed out waiting for linking response")),
-            }
+                Err(_err) => Err(anyhow!("Timed out waiting for syncing response")),
+            };
+            handle.abort();
+            resp
         }
     }
 }
@@ -882,7 +897,7 @@ async fn handle_device_link_rejection_by_listener(
         .broadcast(link_reject_resp.to_bytes().into())
         .await?;
 
-    sleep(Duration::from_secs(5)).await;
+    // sleep(Duration::from_secs(5)).await;
 
     Ok(GossipLoopCode::Continue)
 }
@@ -908,7 +923,7 @@ async fn handle_sync_rejection_by_listener(
         .broadcast(sync_reject_request.to_bytes().into())
         .await?;
 
-    sleep(Duration::from_secs(5)).await;
+    // sleep(Duration::from_secs(5)).await;
 
     Ok(loop_code)
 }

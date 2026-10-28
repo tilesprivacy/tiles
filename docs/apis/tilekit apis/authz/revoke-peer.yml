@@ -8,7 +8,10 @@ http:
   url: "{{tilekit_base_url}}/peers/revoke"
   body:
     type: json
-    data: ""
+    data: |-
+      {
+        "peer_did": "did:key:asdasd"
+      }
   auth: inherit
 
 settings:

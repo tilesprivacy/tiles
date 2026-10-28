@@ -420,6 +420,7 @@ mod tests {
         };
 
         let err = do_save_chat(state.into(), save_req, &db_conn.chat, &db_conn.common).unwrap_err();
+        println!("{:?}", err);
         assert!(matches!(err, AppError::NotFound(_)));
         assert!(
             sessionChats::fetch_session(&db_conn.chat, "id_non")

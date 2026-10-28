@@ -6,20 +6,14 @@ use crate::core::account::local::get_current_user;
 use crate::core::network::{self as core_network, create_endpoint};
 use crate::core::storage::db::get_db_conn;
 use crate::daemon::{
-    ApiJson, ApiResponse, AppError, AppState, SimpleResponse, get_or_set_daemon_port,
+    ApiJson, ApiResponse, AppError, AppState, SimpleResponse, daemon_client, daemon_url,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 // use axum::extract::Path;
-use axum::{
-    Router,
-    extract::State,
-    response::IntoResponse,
-    routing::{get, post},
-};
+use axum::{Router, extract::State, response::IntoResponse, routing::post};
 use axum_macros::debug_handler;
 use iroh::Endpoint;
 use iroh_gossip::Gossip;
-use reqwest::Client;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -70,7 +64,7 @@ pub fn network_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/net/start-network", post(start_network))
         .route("/v1/tilekit/net/stop-network", post(stop_network))
-        .route("/v1/tilekit/net/status", get(get_network_status))
+        .route("/v1/tilekit/net/status", post(get_network_status))
         .route("/v1/tilekit/net/link-device", post(link_device))
         .route("/v1/tilekit/net/sync-with-device", post(sync_with_device))
 }
@@ -87,16 +81,14 @@ async fn do_start_network(
     state: Arc<AppState>,
     db_conn: Connection,
 ) -> Result<impl IntoResponse, AppError> {
+    let mut network_state = state.network_state.write().await;
+    if let Some(net_state) = network_state.as_ref()
+        && net_state.is_endpoint_running
     {
-        let network_state = state.network_state.read().await;
-        if let Some(net_state) = network_state.as_ref()
-            && net_state.is_endpoint_running
-        {
-            log::info!("network already running");
-            return Ok(ApiResponse::success(SimpleResponse {
-                message: "Tiles Network already running".to_string(),
-            }));
-        }
+        log::info!("network already running");
+        return Ok(ApiResponse::success(SimpleResponse {
+            message: "Tiles Network already running".to_string(),
+        }));
     }
 
     let user = get_current_user(&db_conn).map_err(|e| AppError::NotFound(e.to_string()))?;
@@ -118,7 +110,6 @@ async fn do_start_network(
     if let Some(net_event) = api_resp_recvx.recv().await {
         match net_event {
             NetworkApiEvent::NetworkStarted((gossip, main_network_sender)) => {
-                let mut network_state = state.network_state.write().await;
                 *network_state = Some(NetworkState {
                     is_endpoint_running: true,
                     main_network_sender,
@@ -157,14 +148,13 @@ async fn stop_network(State(state): State<Arc<AppState>>) -> Result<impl IntoRes
             .await;
         net_state.is_endpoint_running = false;
         log::info!("Stopped the network ");
-        return Ok(ApiResponse::success(json!({
-            "message": "Stopped Tiles network successfully"
-        })));
+
+        return Ok(ApiResponse::success(SimpleResponse {
+            message: "Stopped Tiles network successfully".to_string(),
+        }));
     }
 
-    Ok(ApiResponse::success(json!({
-        "message": "Tiles Network not running"
-    })))
+    Err(AppError::NotFound("Tiles Network not running".to_string()))
 }
 
 pub async fn get_network_status(
@@ -252,68 +242,85 @@ pub async fn sync_with_device(
 
 /////////////  CLI command functions
 
-pub async fn start_network_cli() {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/v1/tilekit/net/start-network", port);
-    let res = client.post(addr).send().await;
-    match res {
-        Err(err) => println!("Starting Tiles network failed due to {:?}", err),
-        Ok(response) => {
-            if let Ok(resp_struct) = response.json::<ApiResponse<SimpleResponse>>().await {
-                println!("{}", resp_struct.data.message)
-            } else {
-                eprintln!("Failed to process the result")
-            }
-        }
+pub async fn start_network_cli() -> Result<()> {
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/v1/tilekit/net/start-network"))
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .context("Could not reach the Tiles daemon")?;
+    if res.status().is_success() {
+        let resp_struct = res.json::<ApiResponse<SimpleResponse>>().await?;
+        println!("{}", resp_struct.data.message);
+    } else {
+        eprintln!(
+            "Failed to start the tiles network  {}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        )
     }
+
+    Ok(())
 }
 
-pub async fn stop_network_cli() {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/v1/tilekit/net/stop-network", port);
-    let res = client.post(addr).send().await;
-    match res {
-        Err(err) => println!("Stopping Tiles network failed due to {:?}", err),
-        Ok(response) => {
-            if let Ok(resp_struct) = response.json::<ApiResponse<SimpleResponse>>().await {
-                println!("{}", resp_struct.data.message)
-            } else {
-                eprintln!("Failed to process the result")
-            }
-        }
+pub async fn stop_network_cli() -> Result<()> {
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/v1/tilekit/net/stop-network"))
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .context("Could not reach the Tiles daemon")?;
+
+    if res.status().is_success() {
+        let resp_struct = res.json::<ApiResponse<SimpleResponse>>().await?;
+        println!("{}", resp_struct.data.message);
+    } else {
+        eprintln!(
+            "Stopping Tiles network failed due to {:?}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        )
     }
+
+    Ok(())
 }
 
-pub async fn fetch_network_status_cli() {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/v1/tilekit/net/status", port);
-    let res = client.get(addr).send().await;
-    match res {
-        Err(err) => println!("Failed to get the network status due to {:?}", err),
-        Ok(response) => {
-            if let Ok(resp_struct) = response.json::<ApiResponse<NetworkStatusResponse>>().await {
-                println!("Network Running: {}", resp_struct.data.is_network_running)
-            } else {
-                eprintln!("Failed to process the result")
-            }
-        }
+pub async fn fetch_network_status_cli() -> Result<()> {
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/v1/tilekit/net/status"))
+        .header("content-type", "application/json")
+        .send()
+        .await
+        .context("Could not reach the Tiles daemon")?;
+
+    if res.status().is_success() {
+        let resp_struct = res.json::<ApiResponse<NetworkStatusResponse>>().await?;
+        println!("Network Running: {}", resp_struct.data.is_network_running)
+    } else {
+        eprintln!(
+            "Failed to get the network status due to {:?}",
+            res.text()
+                .await
+                .unwrap_or_else(|_| "Couldn't read the body".to_string())
+        )
     }
+    Ok(())
 }
 
 pub async fn sync_with_peer_cli(did: String) -> Result<()> {
-    let client = Client::new();
-    let port = *get_or_set_daemon_port();
-    let addr = format!("http://127.0.0.1:{}/v1/tilekit/net/sync-with-device", port);
-    let res = client
-        .post(addr)
-        .header("content-type", "application/json")
+    let res = daemon_client()
+        .await?
+        .post(daemon_url("/v1/tilekit/net/sync-with-device"))
         .body(json!(SyncParams { did }).to_string())
+        .header("content-type", "application/json")
         .send()
-        .await?;
-
+        .await
+        .context("Could not reach the Tiles daemon")?;
     if res.status().is_success() {
         let resp_struct = res.json::<ApiResponse<SimpleResponse>>().await?;
         println!("{}", resp_struct.data.message);
@@ -433,7 +440,7 @@ mod tests {
             .await
             .unwrap();
         let res_into = response.into_response();
-        assert_eq!(res_into.status(), StatusCode::OK);
+        assert_eq!(res_into.status(), StatusCode::NOT_FOUND);
         let body_bytes = res_into.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body.contains("Network not running"));
@@ -456,7 +463,7 @@ mod tests {
             .with_state(shared_state.clone())
             .oneshot(
                 Request::builder()
-                    .method("GET")
+                    .method("POST")
                     .header("content-type", "application/json")
                     .uri("/v1/tilekit/net/status")
                     .body(Body::new(body))
