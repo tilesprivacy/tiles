@@ -36,6 +36,7 @@ const GRACE: Duration = Duration::from_secs(3);
 /// A shutdown must not wait on a wedged app
 const STOP_DEADLINE: Duration = Duration::from_secs(5);
 
+#[derive(Debug)]
 pub struct Ui {
     /// False whenever there is no supervisor, so a headless shutdown does not
     /// sit out the stop deadline waiting for a task that was never spawned

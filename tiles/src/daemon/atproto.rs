@@ -28,6 +28,7 @@ use crate::{
 };
 
 /// A sign in waiting for the browser. Cancelling it frees the callback port
+#[derive(Debug)]
 pub struct LoginTask {
     cancel: CancellationToken,
     task: JoinHandle<()>,
