@@ -250,7 +250,7 @@ async fn request(app: &AppHandle, client: &reqwest::Client, on: bool) -> Result<
         set_power(app, Power::Starting);
     }
 
-    // the daemon refuses a POST that doesn't say it's JSON, even without a body
+    // the daemon needs the JSON content type on every POST
     let request = client
         .post(daemon::url(path))
         .header("content-type", "application/json")
