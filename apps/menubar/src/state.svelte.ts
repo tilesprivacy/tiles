@@ -49,8 +49,14 @@ export type Awake = {
   since: number | null;
   until: number | null;
   frozen: number | null;
-  ac: boolean;
+  power: DevicePower;
+  available: boolean;
+  lid: "held" | "refused" | "cleared" | null;
+  lidOffered: boolean;
+  lidWanted: boolean;
 };
+
+export type DevicePower = { pluggedIn: boolean; batteryPercent: number | null };
 
 export type Remote =
   | { state: "unknown" }
@@ -66,7 +72,18 @@ export const atproto = $state<{ value: Atproto }>({ value: { state: "unknown" } 
 export const sessions = $state<{ value: Sessions }>({ value: { state: "unknown" } });
 export const remote = $state<{ value: Remote }>({ value: { state: "unknown" } });
 export const awake = $state<{ value: Awake }>({
-  value: { active: false, paused: false, since: null, until: null, frozen: null, ac: false },
+  value: {
+    active: false,
+    paused: false,
+    since: null,
+    until: null,
+    frozen: null,
+    power: { pluggedIn: false, batteryPercent: null },
+    available: false,
+    lid: null,
+    lidOffered: false,
+    lidWanted: false,
+  },
 });
 
 /**

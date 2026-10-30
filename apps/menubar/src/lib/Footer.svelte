@@ -39,6 +39,25 @@
   const session: "none" | "running" | "paused" = $derived(
     awake.value.paused ? "paused" : awake.value.active ? "running" : "none",
   );
+  const powerCopy = $derived.by(() => {
+    const percent = awake.value.power.batteryPercent;
+    if (!awake.value.available && percent !== null) {
+      return `${percent}% battery · Connect a charger to enable`;
+    }
+    return "Available when plugged in or battery is above 10%";
+  });
+  const lidNote = $derived.by(() => {
+    if (session !== "running") return null;
+    // the grant comes with the pkg, so a Mac without it sleeps on a closed lid
+    if (awake.value.lid === "refused") {
+      return "Closing the lid will still sleep this Mac · Reinstall Tiles to fix";
+    }
+    if (awake.value.lid === "cleared") {
+      return "Closing the lid will sleep this Mac · sleep was turned back on";
+    }
+    return null;
+  });
+  const menuNote = $derived(lidNote ?? powerCopy);
 
   const reading = $derived.by(() => {
     const { paused, since, until, frozen } = awake.value;
@@ -82,6 +101,11 @@
       ></button>
       <AwakeMenu
         {session}
+        available={awake.value.available}
+        note={menuNote}
+        alert={!awake.value.available || lidNote !== null}
+        lid={awake.value.lidOffered ? awake.value.lidWanted : null}
+        onlid={() => void invoke("awake_lid", { on: !awake.value.lidWanted }).catch(() => {})}
         onpick={pick}
         onpause={() => run("awake_pause")}
         onresume={() => run("awake_resume")}
@@ -92,8 +116,8 @@
     <button
       class="footer__cup"
       data-state={session}
-      disabled={!awake.value.ac}
-      aria-label={awake.value.ac ? "Keep this Mac awake" : "Keeping awake needs mains power"}
+      aria-label="Keep this Mac awake"
+      title={awake.value.available ? "Keep this Mac awake" : powerCopy}
       aria-haspopup="menu"
       aria-expanded={menu}
       onclick={() => (menu = !menu)}
@@ -101,10 +125,8 @@
       <CupMark active={session === "running"} />
       {#if session !== "none"}
         <span class="footer__count">{reading}</span>
-      {:else if awake.value.ac}
-        <span>Keep awake</span>
       {:else}
-        <span>Needs mains</span>
+        <span>Keep awake</span>
       {/if}
 
       <Chevron dir="up" />
@@ -204,7 +226,7 @@
     z-index: 2;
   }
 
-  .footer__cup[data-state="none"]:hover:not(:disabled) {
+  .footer__cup[data-state="none"]:hover {
     color: var(--bone);
   }
 
@@ -213,18 +235,12 @@
     color: var(--void);
   }
 
-  .footer__cup[data-state="running"]:hover:not(:disabled) {
+  .footer__cup[data-state="running"]:hover {
     background: rgba(247, 255, 97, 0.8);
   }
 
   .footer__cup[data-state="paused"] {
     color: var(--signal);
-  }
-
-  .footer__cup:disabled {
-    background: var(--steel);
-    color: var(--slate);
-    opacity: 0.5;
   }
 
   .footer__quit:hover {

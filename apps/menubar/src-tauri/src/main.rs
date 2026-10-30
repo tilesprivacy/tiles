@@ -4,14 +4,16 @@ mod awake;
 mod clipboard;
 mod daemon;
 mod inference;
+mod lid;
 mod lifeline;
 mod panel;
 mod paths;
+mod quit;
 mod remote;
 mod sessions;
 mod tray;
 
-use tauri::{ActivationPolicy, Manager, WindowEvent};
+use tauri::{ActivationPolicy, Manager, RunEvent, WindowEvent};
 
 fn main() {
     tauri::Builder::default()
@@ -44,7 +46,8 @@ fn main() {
             awake::awake_start,
             awake::awake_stop,
             awake::awake_pause,
-            awake::awake_resume
+            awake::awake_resume,
+            awake::awake_lid
         ])
         .setup(|app| {
             // LSUIElement covers the launch window before this runs
@@ -80,6 +83,12 @@ fn main() {
                 panel::dismiss(app, mode);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("failed to start the Tiles menu bar app");
+        .build(tauri::generate_context!())
+        .expect("failed to start the Tiles menu bar app")
+        .run(|app, event| match event {
+            RunEvent::Ready => quit::init(app),
+            // the lifeline and a daemon quit both end here
+            RunEvent::Exit => awake::shutdown(app),
+            _ => {}
+        });
 }

@@ -4,7 +4,6 @@
   import Avatar from "../lib/Avatar.svelte";
   import CopyMark from "../lib/CopyMark.svelte";
   import Navbar from "../lib/Navbar.svelte";
-  import Note from "../lib/Note.svelte";
   import Row from "../lib/Row.svelte";
   import Zone from "../lib/Zone.svelte";
   import { Copier } from "../lib/copy.svelte";
@@ -34,7 +33,11 @@
   const host = $derived(session?.pds?.replace(/^https:\/\//, "") ?? null);
 </script>
 
-<Navbar title="Atmosphere Account" onback={() => nav.pop()} />
+<Navbar
+  title="Atmosphere Account"
+  info="Chats you share are published to your Personal Data Server (PDS), hosted wherever you choose."
+  onback={() => nav.pop()}
+/>
 
 <Zone>
   <Row
@@ -46,7 +49,6 @@
       <Avatar nickname={name ?? session?.handle ?? "?"} src={session?.avatar} size={26} />
     {/snippet}
   </Row>
-  <Note>This account lives on the server below, and Tiles reads it there directly</Note>
 </Zone>
 
 <Zone label="Handle">
