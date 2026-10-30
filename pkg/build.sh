@@ -42,12 +42,9 @@ codesign --force \
 
 
 echo "Embedding Pi"
-# Copying pi artifacts into extracted pi folder
-cp pi-darwin-arm64.tar.gz "${PKG_LIBS_PATH}"
-
-tar -xvf "${PKG_LIBS_PATH}/pi-darwin-arm64.tar.gz" -C "${PKG_LIBS_PATH}"
-
-rm "${PKG_LIBS_PATH}/pi-darwin-arm64.tar.gz"
+PI_VERSION=$(grep '^pi' toolchain.toml | head -1 | awk -F'"' '{print $2}')
+curl -fsSL --retry 3 "https://github.com/badlogic/pi-mono/releases/download/${PI_VERSION}/pi-darwin-arm64.tar.gz" \
+  | tar -xz -C "${PKG_LIBS_PATH}"
 
 # removing unnecessary files
 # rm -rf "${DIST_DIR}/tmp/pi/examples"

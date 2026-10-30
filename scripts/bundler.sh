@@ -83,17 +83,9 @@ mkdir -p "${DIST_DIR}/tmp"
 cp "${CLI_BIN_PATH}"  "${DIST_DIR}/tmp/"
 
 echo "Embedding Pi"
-if [[ ! -f "${PI_TARBALL}" ]]; then
-  echo "Missing Pi artifact: ${PI_TARBALL}" >&2
-  echo "Download or build it before bundling." >&2
-  exit 1
-fi
-
-cp "${PI_TARBALL}" "${DIST_DIR}/tmp/"
-
-tar -xvf "${DIST_DIR}/tmp/${PI_TARBALL}" -C "${DIST_DIR}/tmp"
-
-rm "${DIST_DIR}/tmp/${PI_TARBALL}"
+PI_VERSION=$(grep '^pi' toolchain.toml | head -1 | awk -F'"' '{print $2}')
+curl -fsSL --retry 3 "https://github.com/badlogic/pi-mono/releases/download/${PI_VERSION}/${PI_TARBALL}" \
+  | tar -xz -C "${DIST_DIR}/tmp"
 
 # removing unnecessary files
 # rm -rf "${DIST_DIR}/tmp/pi/examples"
