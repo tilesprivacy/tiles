@@ -260,7 +260,7 @@ pub fn get_or_set_daemon_port() -> &'static u32 {
 /// that can hang it
 const INFERENCE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(20);
-/// how long open connections, like an SSE stream, get to finish after a shutdown
+// how long an open connection, like an SSE stream, gets after a shutdown
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 const DAEMON_STOP_POLL: Duration = Duration::from_millis(250);
 pub async fn start_cmd(port: Option<u32>) -> Result<()> {
@@ -352,7 +352,7 @@ fn is_local_host(req: &Request) -> bool {
         })
 }
 
-/// Every POST needs a JSON content type, which other websites can't send without a CORS preflight
+/// Every POST must be JSON, which other websites can't send without a CORS preflight
 async fn require_json(req: Request, next: Next) -> Result<Response, AppError> {
     if req.method() == Method::POST && !is_json(req.headers()) {
         return Err(AppError::UnsupportedMediaType(
@@ -370,8 +370,7 @@ fn is_json(headers: &HeaderMap) -> bool {
         .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("application/json"))
 }
 
-/// The client for CLI calls to the daemon. Each call first makes sure the daemon is
-/// up and on this version
+/// The client for CLI calls, once the daemon is up and on this version
 pub async fn daemon_client() -> Result<&'static Client> {
     static CLIENT: OnceCell<Client> = OnceCell::const_new();
     // a running daemon on this version costs one ping
@@ -536,9 +535,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     Ok(served?)
 }
 
-/// Serves the daemon's port, and the web UI's when it has one, until a shutdown. A
-/// connection still open `grace` after it, like an SSE stream, is cut, so it can't
-/// keep the daemon running.
+/// Serves both ports until a shutdown, then cuts connections still open after `grace`
 async fn serve_ports(
     api: (tokio::net::TcpListener, Router),
     web_ui: Option<(tokio::net::TcpListener, Router)>,
@@ -602,8 +599,7 @@ pub async fn shutdown_all(state: Arc<AppState>) {
     ui::begin_stop(&state.ui);
     // so they show as paused next time
     state.models.pause_all().await;
-    // its ping has no timeout of its own, and a stuck server must not hold the
-    // shutdown open forever
+    // a stuck inference server must not hold the shutdown open
     match tokio::time::timeout(
         INFERENCE_STOP_TIMEOUT,
         crate::core::server::stop_server_daemon(),

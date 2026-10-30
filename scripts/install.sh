@@ -251,8 +251,7 @@ else
   cp "${LOCAL_TARBALL}" "${TMPDIR}/tiles.tar.gz"
 fi
 
-# a daemon left running keeps serving the old version after the update, and the new
-# CLI can't stop it if their routes differ, so stop it before replacing anything.
+# a daemon left running would keep serving the old version, so stop it first
 stop_running_daemon() {
   local url="http://127.0.0.1:1729"
   curl -fsS -m 2 -o /dev/null "${url}/" 2>/dev/null || return 0

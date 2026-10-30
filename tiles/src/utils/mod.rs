@@ -10,8 +10,7 @@ pub mod hf_model_downloader;
 pub mod installer;
 pub mod lexicons;
 pub mod uninstaller;
-/// Opens `url` in the default browser. Best effort: a missing opener just means the
-/// caller's printed url is what the user goes by. Needs a tokio runtime
+/// Opens `url` in the default browser, if there's one. Needs a tokio runtime
 pub fn open_in_browser(url: &str) {
     let opener = if cfg!(target_os = "macos") {
         "open"
@@ -19,7 +18,7 @@ pub fn open_in_browser(url: &str) {
         "xdg-open"
     };
     match tokio::process::Command::new(opener).arg(url).spawn() {
-        // wait on it, so a long running REPL doesn't collect finished openers as zombies
+        // waited on, so finished openers don't pile up as zombies
         Ok(mut child) => {
             tokio::spawn(async move {
                 let _ = child.wait().await;

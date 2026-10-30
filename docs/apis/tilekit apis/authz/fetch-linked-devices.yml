@@ -4,11 +4,11 @@ info:
   seq: 4
 
 http:
-  method: GET
+  method: POST
   url: "{{tilekit_base_url}}/peers/list-linked-devices"
   body:
     type: json
-    data: ""
+    data: "{}"
   auth: inherit
 
 settings:

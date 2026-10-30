@@ -39,12 +39,10 @@ pub const UI_PORT: u32 = 1730;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// for development, override where the UI is stored
+/// Overrides where the UI is stored, for development
 const UI_DIR_ENV: &str = "TILES_UI_DIR";
 
-// the page may only load and call what the daemon itself serves. no outside images, so
-// a model reply can't leak chat text through an image url. inline styles are for the
-// components' style attributes
+// only what the daemon serves, so a model reply can't leak chat text through an image url
 const CSP: &str = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; \
     img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; \
     object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
@@ -57,7 +55,7 @@ pub fn ui_dir() -> Result<PathBuf> {
     }
 }
 
-/// Whether the web UI's port came up, reported at `GET /v1/tilekit/ui`
+/// Whether the web UI's port came up
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub enum WebUiState {
@@ -85,7 +83,7 @@ async fn bind_on(port: u32) -> (WebUiState, Option<TcpListener>) {
     }
 }
 
-/// `GET /v1/tilekit/ui`
+/// Where the web UI is, or why it isn't running
 pub async fn ui_state(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     ApiResponse::success(state.web_ui.clone())
 }
@@ -104,7 +102,7 @@ pub async fn fetch_state(client: &Client) -> Option<WebUiState> {
     serde_json::from_value(body["data"].take()).ok()
 }
 
-/// `tiles ui`: makes sure the daemon is up and on this version, then opens the web UI
+/// Opens the web UI once the daemon is up and on this version
 pub async fn open_cli() -> Result<()> {
     let client = daemon_client().await?;
     match fetch_state(client).await {
@@ -129,7 +127,7 @@ pub fn router(state: Arc<AppState>, dir: PathBuf) -> Router {
         .route("/v1/{*rest}", any(no_route))
         .method_not_allowed_fallback(wrong_method)
         .fallback_service(files)
-        // files come off the local disk, so can revalidate easily.
+        // files are on local disk, so revalidating is cheap
         .layer(SetResponseHeaderLayer::overriding(
             CACHE_CONTROL,
             HeaderValue::from_static("no-cache"),
