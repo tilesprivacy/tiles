@@ -75,6 +75,10 @@ find "${PKG_LIBS_PATH}/pi" -name '*.node' -type f | while read -r node_bin; do
     "$node_bin"
 done
 
+echo "Embedding the web UI"
+./scripts/fetch_ui.sh
+cp -r ui "${PKG_LIBS_PATH}/"
+
   
 # Build venvstack and move to /usr/local/share/tiles
 # 

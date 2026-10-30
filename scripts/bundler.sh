@@ -155,6 +155,10 @@ rm -rf "${DIST_DIR}/tmp/server/stack"
 
 cp -r "${MODELFILE_DIR}" "${DIST_DIR}/tmp/"
 
+echo "🖥️ Embedding the web UI..."
+./scripts/fetch_ui.sh
+cp -r ui "${DIST_DIR}/tmp/"
+
 echo "📦 Creating ${OUT_NAME}.tar.gz..."
 tar --exclude-from=scripts/tar.exclude -czf "${DIST_DIR}/${OUT_NAME}.tar.gz" -C "${DIST_DIR}/tmp" .
 

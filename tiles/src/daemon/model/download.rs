@@ -90,6 +90,12 @@ pub struct ModelStatus {
     download: DownloadState,
 }
 
+impl ModelStatus {
+    pub(super) fn is_done(&self) -> bool {
+        matches!(self.download, DownloadState::Done)
+    }
+}
+
 type Running = Option<(CancellationToken, JoinHandle<()>)>;
 
 pub struct ModelDownload {
@@ -104,6 +110,10 @@ pub struct ModelDownload {
 }
 
 impl ModelDownload {
+    pub(super) fn spec(&self) -> &Spec {
+        &self.spec
+    }
+
     pub(super) fn new(
         hub: Arc<Hub>,
         spec: Spec,
@@ -255,6 +265,33 @@ impl ModelDownload {
         self.set(state);
     }
 
+    /// Deletes the model's folder and returns the bytes freed
+    pub async fn delete(&self) -> Result<u64, AppError> {
+        // blocks a new download while the files are removed
+        let running = self.running.lock().await;
+        if is_live(&running) {
+            return Err(AppError::Conflict(format!(
+                "{} is downloading, pause it before deleting it",
+                self.spec
+            )));
+        }
+        let dir = hf::repo_dir(&self.root, &self.spec.repo);
+        let freed = tokio::task::spawn_blocking(move || {
+            let freed = size_of(&dir);
+            std::fs::remove_dir_all(&dir).map(|()| freed)
+        })
+        .await
+        .map_err(|err| AppError::InternalServerError(err.to_string()))?
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => {
+                AppError::NotFound(format!("{} isn't on this computer", self.spec))
+            }
+            _ => AppError::InternalServerError(format!("Couldn't delete {}: {err}", self.spec)),
+        })?;
+        self.set(DownloadState::Idle);
+        Ok(freed)
+    }
+
     pub async fn pause(&self) -> Result<DownloadState, AppError> {
         let mut running = self.running.lock().await;
         let Some((cancel, task)) = running.take().filter(|(_, task)| !task.is_finished()) else {
@@ -308,6 +345,21 @@ impl Drop for PauseOnClose {
             });
         }
     }
+}
+
+// size of the files under `path`, skipping the snapshot links to blobs
+fn size_of(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => size_of(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn is_live(running: &Running) -> bool {

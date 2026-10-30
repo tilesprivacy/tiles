@@ -22,7 +22,7 @@ use crate::{
     repl::ChatResponse,
 };
 
-use crate::utils::config::{ConfigProvider, DefaultProvider};
+use crate::utils::config::{ConfigProvider, DefaultProvider, get_current_model};
 use crate::{
     daemon::{ApiJson, ApiResponse, AppError, AppState, agent::get_agent_start_params},
     utils::config::PY_PORT,
@@ -59,15 +59,35 @@ pub fn session_router() -> Router<Arc<AppState>> {
 
 // Creates a new session or starts the agent
 async fn create_session(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    do_create_session(state, pi::new, DefaultProvider).await
+    do_create_session(state, pi::new, DefaultProvider, get_current_model()).await
 }
 
 async fn do_create_session(
     state: Arc<AppState>,
     create_agent_fn: CreateNewAgentFn,
     provider: impl ConfigProvider,
+    picked: Option<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut agent = state.agent.lock().await;
+    let running = state
+        .agent_model
+        .lock()
+        .expect("Failed to get agent_model lock")
+        .clone();
+    // keep a running agent whose model isn't known
+    let params = if agent.is_none() || running.is_some() {
+        Some(get_agent_start_params(provider, picked)?)
+    } else {
+        None
+    };
+    // a model picked since Pi started takes over with the next chat
+    if let (Some(running), Some((wanted, _))) = (&running, &params)
+        && running != wanted
+        && let Some(mut old) = agent.take()
+    {
+        log::info!("Restarting Pi for {wanted}");
+        let _ = old.process.kill().await;
+    }
     if agent.is_some() {
         log::info!("Pi session already there, create a new session..");
         // agent already there, so lets create a new session
@@ -87,7 +107,9 @@ async fn do_create_session(
         Ok(ApiResponse::success(session_data))
     } else {
         log::info!("Pi agent not started, so starting..");
-        let (modelname, system_prompt) = get_agent_start_params(provider)?;
+        let (modelname, system_prompt) = params.ok_or_else(|| {
+            AppError::InternalServerError("No model to start the agent with".to_owned())
+        })?;
         let pi_agent = create_agent_fn(&modelname, &system_prompt, PY_PORT)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         *agent = Some(pi_agent);
@@ -189,7 +211,9 @@ fn agent_model(state: &AppState) -> Result<String, AppError> {
         .clone();
     match running {
         Some(model) => Ok(model),
-        None => get_agent_start_params(DefaultProvider).map(|(model, _)| model),
+        None => {
+            get_agent_start_params(DefaultProvider, get_current_model()).map(|(model, _)| model)
+        }
     }
 }
 
@@ -307,7 +331,7 @@ mod tests {
             File::create(mock_provider.tmp_path.join("modelfiles/gemma-4-12b-gguf")).unwrap();
         f.write_all("FROM llama3.2\nSYSTEM hello\n".as_bytes())
             .unwrap();
-        let res = do_create_session(Arc::new(state), create_test_agent, mock_provider).await;
+        let res = do_create_session(Arc::new(state), create_test_agent, mock_provider, None).await;
 
         assert!(res.is_ok());
         let response = res.into_response();
@@ -315,6 +339,56 @@ mod tests {
         let body_bytes = response.into_body().collect().await.unwrap().to_bytes();
         let body = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body.contains("session_id"))
+    }
+
+    #[tokio::test]
+    async fn a_newly_picked_model_restarts_the_agent() {
+        let tmp_dir = tempdir().unwrap();
+        let mock_provider = MockProvider {
+            tmp_path: tmp_dir.path().to_path_buf(),
+        };
+        fs::create_dir(mock_provider.tmp_path.join("modelfiles")).unwrap();
+        fs::write(
+            mock_provider.tmp_path.join("modelfiles/gemma-4-12b-gguf"),
+            "FROM llama3.2\nSYSTEM hello\n",
+        )
+        .unwrap();
+        // the old Pi answers a new session as "kept", the test fails if it's used
+        let old = from_test_command(
+            "sh",
+            &[
+                "-c",
+                r#"read request
+printf '%s\n' '{"type":"response","command":"new_session","success":true}'
+read request
+printf '%s\n' '{"type":"response","command":"get_state","success":true,"data":{"sessionId":"kept","model":{"id":"id","name":"old"},"thinkingLevel":"off","isStreaming":false}}'"#,
+            ],
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            agent: AsyncMutex::new(Some(old)),
+            agent_model: Mutex::new(Some("org/old-GGUF:Q4_K_M".to_owned())),
+            ..AppState::for_tests()
+        });
+
+        let res = do_create_session(state.clone(), create_test_agent, mock_provider, None).await;
+
+        let body = res
+            .into_response()
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes();
+        assert!(
+            String::from_utf8(body.to_vec())
+                .unwrap()
+                .contains("session_id")
+        );
+        assert_eq!(
+            state.agent_model.lock().unwrap().as_deref(),
+            Some("llama3.2")
+        );
     }
 
     fn create_test_agent(_: &str, _: &str, _: u32) -> Result<PiAgent, anyhow::Error> {

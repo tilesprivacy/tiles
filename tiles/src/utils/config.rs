@@ -62,6 +62,14 @@ pub struct LlamaConfig {
 }
 
 impl LlamaConfig {
+    /// Fills what's unset with Tiles' defaults. Without a context length llama.cpp uses
+    /// the model's maximum and runs out of memory on most machines
+    pub fn with_defaults(mut self) -> Self {
+        self.context_length = self.context_length.or(Some(65536));
+        self.flash_attn = self.flash_attn.or(Some(true));
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.context_length.is_none()
             && self.gpu_layers.is_none()
@@ -126,7 +134,7 @@ pub const PY_PORT: u32 = 6969;
 pub const REMOTE_BOUND_PORT: u32 = 9271;
 
 /// Bundled runtime directories under lib_dir removed on default uninstall.
-pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "models"];
+pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "ui", "models"];
 
 pub trait ConfigProvider {
     fn get_config_dir(&self) -> Result<PathBuf>;
@@ -640,13 +648,21 @@ pub fn get_ui_config() -> Result<UiConfig> {
     Ok(root_config.ui.unwrap_or_default())
 }
 
+/// With the defaults filled in, matching what the model server gets
 pub fn get_llama_config() -> Result<LlamaConfig> {
     let root_config = get_or_create_root_config()?;
-    Ok(root_config.llama.unwrap_or_default())
+    Ok(root_config.llama.unwrap_or_default().with_defaults())
 }
 
+/// The model chats use, last picked in the UI or run by `tiles run`
+pub fn get_current_model() -> Option<String> {
+    Some(get_or_create_root_config().ok()?.model?.current)
+}
+
+/// The config for the model server, with the llama defaults filled in
 pub fn get_config_json() -> Result<serde_json::Value> {
-    let root_config = get_or_create_root_config()?;
+    let mut root_config = get_or_create_root_config()?;
+    root_config.llama = Some(root_config.llama.unwrap_or_default().with_defaults());
     serde_json::to_value(root_config).map_err(Into::<anyhow::Error>::into)
 }
 
@@ -654,18 +670,15 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     let mut llama_config = root_config.llama.unwrap_or_default();
 
-    llama_config.context_length = config
-        .context_length
-        .or(llama_config.context_length)
-        .or(Some(32768));
+    llama_config.context_length = config.context_length.or(llama_config.context_length);
     llama_config.gpu_layers = config.gpu_layers.or(llama_config.gpu_layers);
     llama_config.offload_kqv = config.offload_kqv.or(llama_config.offload_kqv);
     llama_config.batch_size = config.batch_size.or(llama_config.batch_size);
     llama_config.mtp = config.mtp.or(llama_config.mtp);
-    llama_config.n_cpu_moe = config.n_cpu_moe.or(llama_config.n_cpu_moe).or(Some(12));
-    llama_config.flash_attn = config.flash_attn.or(llama_config.flash_attn).or(Some(true));
-    llama_config.no_mmap = config.no_mmap.or(llama_config.no_mmap).or(Some(true));
-    root_config.llama = Some(llama_config);
+    llama_config.n_cpu_moe = config.n_cpu_moe.or(llama_config.n_cpu_moe);
+    llama_config.flash_attn = config.flash_attn.or(llama_config.flash_attn);
+    llama_config.no_mmap = config.no_mmap.or(llama_config.no_mmap);
+    root_config.llama = Some(llama_config.with_defaults());
     save_root_config(&root_config)
 }
 
@@ -781,6 +794,26 @@ mod tests {
         );
 
         assert_eq!(expected_json, serde_json::to_value(&config).unwrap())
+    }
+
+    #[test]
+    fn unset_llama_settings_get_the_defaults_and_set_ones_stay() {
+        let filled = LlamaConfig::default().with_defaults();
+        assert_eq!(filled.context_length, Some(65536));
+        // --n-cpu-moe turns off llama.cpp's --fit for every model
+        assert_eq!(filled.n_cpu_moe, None);
+        assert_eq!(filled.flash_attn, Some(true));
+        // llama.cpp b11005 dropped --no-mmap, a default would break every load
+        assert_eq!(filled.no_mmap, None);
+
+        let mine = LlamaConfig {
+            context_length: Some(8192),
+            flash_attn: Some(false),
+            ..LlamaConfig::default()
+        }
+        .with_defaults();
+        assert_eq!(mine.context_length, Some(8192));
+        assert_eq!(mine.flash_attn, Some(false));
     }
 
     #[test]

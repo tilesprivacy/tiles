@@ -171,7 +171,7 @@ pub struct PiResponseMessage {
     pub success: bool,
     pub data: Option<Value>,
 }
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
 pub enum CommandType {
     #[serde(rename = "status")]
     Status,
@@ -191,6 +191,10 @@ pub enum CommandType {
     Skills,
     #[serde(rename = "get_commands")]
     GetCommands,
+    #[serde(rename = "get_state")]
+    GetState,
+    #[serde(rename = "new_session")]
+    NewSession,
     #[serde(other)]
     Unknown,
 }

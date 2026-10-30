@@ -1,14 +1,17 @@
 //! Module that deals with Pi
-use crate::core::agent::types::{GetStateData, PiResponse};
+use crate::core::agent::types::{CommandType, GetStateData, PiResponse, PiResponseMessage};
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, create_pi_provider_config, handle_pi_settings_config,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use nix::unistd::setsid;
 use serde_json::{Value, json};
-use std::{fs, process::Stdio};
+use std::{fs, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+
+// get_state and new_session answer at once, this only guards against a stuck Pi
+const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 pub struct PiAgent {
@@ -129,26 +132,13 @@ impl PiWriter {
 impl PiReader {
     /// Gets current Pi State
     pub async fn get_pi_state(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
-        let init_cmd_payload = json!({
-            "type": "get_state",
-        });
-
-        writer.send_to_pi(init_cmd_payload).await?;
-
-        if let Some(line) = self.lines.next_line().await? {
-            let response: PiResponse = serde_json::from_str(&line)?;
-            if let PiResponse::Response(msg) = response
-                && msg.success
-            {
-                let state: GetStateData =
-                    serde_json::from_value(msg.data.expect("get state parsing failed"))?;
-                Ok(state)
-            } else {
-                Err(anyhow!("Failed to fetch initial state from Pi"))
-            }
-        } else {
-            Err(anyhow!("Failed to fetch session_id from Pi"))
-        }
+        writer.send_to_pi(json!({"type": "get_state"})).await?;
+        let answer = self.answer(CommandType::GetState).await?;
+        let data = answer
+            .data
+            .filter(|_| answer.success)
+            .ok_or_else(|| anyhow!("Failed to fetch initial state from Pi"))?;
+        Ok(serde_json::from_value(data)?)
     }
 
     /// Reads the next line for Pi's stdout
@@ -158,25 +148,28 @@ impl PiReader {
 
     /// Creates a new Pi session
     pub async fn create_new_session(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
-        let cmd_payload = json!({
-            "type": "new_session",
-        });
-
-        writer.send_to_pi(cmd_payload).await?;
-
-        if let Some(line) = self.lines.next_line().await? {
-            let response: PiResponse = serde_json::from_str(&line)?;
-            if let PiResponse::Response(msg) = response
-                && msg.success
-            {
-                let state = self.get_pi_state(writer).await?;
-                Ok(state)
-            } else {
-                Err(anyhow!("Creating new session failed"))
-            }
-        } else {
-            Err(anyhow!("Failed to fetch session_id from Pi"))
+        writer.send_to_pi(json!({"type": "new_session"})).await?;
+        if !self.answer(CommandType::NewSession).await?.success {
+            bail!("Creating new session failed");
         }
+        self.get_pi_state(writer).await
+    }
+
+    // reads until Pi answers `command`, skipping leftovers like a stopped reply's events
+    async fn answer(&mut self, command: CommandType) -> Result<PiResponseMessage> {
+        let read = async {
+            while let Some(line) = self.lines.next_line().await? {
+                if let Ok(PiResponse::Response(answer)) = serde_json::from_str(&line)
+                    && answer.command == command
+                {
+                    return Ok(answer);
+                }
+            }
+            bail!("Pi stopped before answering {command:?}")
+        };
+        tokio::time::timeout(ANSWER_TIMEOUT, read)
+            .await
+            .map_err(|_| anyhow!("Pi didn't answer {command:?} in time"))?
     }
 }
 
@@ -198,4 +191,36 @@ pub fn from_test_command(program: &str, args: &[&str]) -> anyhow::Result<PiAgent
             lines: BufReader::new(stdout).lines(),
         },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::from_test_command;
+
+    const STATE: &str = r#"{"type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","model":{"id":"id","name":"model"},"thinkingLevel":"off","isStreaming":false}}"#;
+
+    #[tokio::test]
+    async fn the_state_is_found_past_what_a_stopped_reply_left() {
+        let script = format!(
+            r#"read request
+printf '%s\n' '{{"type":"agent_settled"}}' '{{"type":"response","command":"abort","success":true}}' '{STATE}'"#
+        );
+        let mut agent = from_test_command("sh", &["-c", &script]).unwrap();
+        let state = agent.reader.get_pi_state(&mut agent.writer).await.unwrap();
+        assert_eq!(state.session_id, "s1");
+    }
+
+    #[tokio::test]
+    async fn a_failed_answer_is_an_error_not_a_panic() {
+        let script = r#"read request
+printf '%s\n' '{"type":"response","command":"get_state","success":false}'"#;
+        let mut agent = from_test_command("sh", &["-c", script]).unwrap();
+        assert!(agent.reader.get_pi_state(&mut agent.writer).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn pi_closing_before_it_answers_is_an_error() {
+        let mut agent = from_test_command("sh", &["-c", "read request"]).unwrap();
+        assert!(agent.reader.get_pi_state(&mut agent.writer).await.is_err());
+    }
 }

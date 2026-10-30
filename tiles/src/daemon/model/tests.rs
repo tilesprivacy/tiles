@@ -1,6 +1,9 @@
 //! The model routes against a mock Hub, with a temp folder as the models folder
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use axum::{
     body::Body,
@@ -18,8 +21,8 @@ use wiremock::{
 };
 
 use super::{
-    CLIENT_HEADER, DownloadState, ModelDownload, Models, Spec, bundled::BUNDLED, model_router,
-    modelfile_spec,
+    CLIENT_HEADER, DownloadState, ModelDownload, Models, Picked, Spec, bundled::BUNDLED,
+    model_router, modelfile_spec,
 };
 use crate::{
     daemon::AppState,
@@ -385,7 +388,7 @@ async fn status_with_no_model_lists_every_bundled_model() {
     serve_model(&server, "org/e2b-GGUF", Duration::ZERO).await;
     serve_model(&server, "org/e4b-GGUF", Duration::ZERO).await;
     let daemon = Daemon::with(&server, tempdir().unwrap(), |models| {
-        models.current_model = || Some("org/e4b-GGUF:q4_k_m".to_owned());
+        models.picked = Picked::Memory(Mutex::new(Some("org/e4b-GGUF:q4_k_m".to_owned())));
     });
     let modelfiles = daemon.root.path().join("modelfiles");
     std::fs::create_dir_all(&modelfiles).unwrap();
@@ -540,4 +543,96 @@ async fn the_events_stream_follows_downloads_started_by_any_client() {
     assert!(first.contains(r#""model":"org/model-GGUF:Q4_K_M","state":"downloading""#));
     assert!(seen.contains(r#""model":"org/other-GGUF:Q4_K_M","state":"downloading""#));
     assert!(seen.contains("event: model"));
+}
+
+#[tokio::test]
+async fn only_a_downloaded_bundled_model_can_be_picked() {
+    let server = hub_with_model(Duration::ZERO).await;
+    serve_model(&server, OTHER, Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    let modelfiles = daemon.root.path().join("modelfiles");
+    std::fs::create_dir_all(&modelfiles).unwrap();
+    std::fs::write(
+        modelfiles.join("gemma-4-12b-gguf"),
+        format!("FROM {REPO}\n"),
+    )
+    .unwrap();
+    let pick = |model: &str| json!({ "model": model });
+    let select = "/v1/tilekit/model/select";
+
+    let (status, _) = daemon.json("POST", select, Some(pick(REPO))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "not downloaded yet");
+
+    daemon.start(json!({})).await;
+    daemon.call("GET", "/v1/tilekit/model/download", None).await;
+    let (status, body) = daemon.json("POST", select, Some(pick(REPO))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["data"]["model"], format!("{REPO}:Q4_K_M"));
+    assert_eq!(
+        daemon.state.models.current(),
+        Some(Spec::parse(REPO).unwrap())
+    );
+
+    let (status, _) = daemon.json("POST", select, Some(pick(OTHER))).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "Tiles has no Modelfile for it"
+    );
+}
+
+#[tokio::test]
+async fn deleting_a_model_frees_its_files_but_never_the_one_chats_use() {
+    let server = hub_with_model(Duration::ZERO).await;
+    serve_model(&server, OTHER, Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    let delete = "/v1/tilekit/model/delete";
+    let other = json!({ "model": OTHER });
+
+    // the default is what chats use until another is picked
+    let (status, _) = daemon
+        .json("POST", delete, Some(json!({ "model": REPO })))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let (status, _) = daemon.json("POST", delete, Some(other.clone())).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "nothing on disk yet");
+
+    daemon.start(other.clone()).await;
+    let progress = format!("/v1/tilekit/model/download?model={OTHER}");
+    daemon.call("GET", &progress, None).await;
+    let folder = repo_dir(daemon.root.path(), OTHER);
+    assert!(folder.exists());
+
+    let (status, body) = daemon.json("POST", delete, Some(other.clone())).await;
+    assert_eq!(status, StatusCode::OK);
+    // the blobs, and the ref naming the commit
+    assert_eq!(
+        body["data"]["freed"],
+        CONFIG.len() + MODEL.len() + COMMIT.len()
+    );
+    assert!(!folder.exists());
+    let (_, status_body) = daemon
+        .json(
+            "GET",
+            &format!("/v1/tilekit/model/status?model={OTHER}"),
+            None,
+        )
+        .await;
+    assert_eq!(status_body["data"]["download"], json!({ "state": "idle" }));
+}
+
+#[tokio::test]
+async fn a_model_downloading_cant_be_deleted() {
+    let server = hub_with_model(Duration::from_millis(500)).await;
+    serve_model(&server, OTHER, Duration::from_millis(500)).await;
+    let daemon = Daemon::new(&server);
+    let other = json!({ "model": OTHER });
+    daemon.start(other.clone()).await;
+
+    let (status, body) = daemon
+        .json("POST", "/v1/tilekit/model/delete", Some(other))
+        .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["reason"].as_str().unwrap().contains("pause it"));
 }
