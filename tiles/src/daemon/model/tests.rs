@@ -353,7 +353,14 @@ async fn a_badly_named_model_is_a_bad_request() {
     let server = hub_with_model(Duration::ZERO).await;
     let daemon = Daemon::new(&server);
 
-    for model in ["gemma", "org/name/extra:Q4_K_M", "/name"] {
+    for model in [
+        "gemma",
+        "org/name/extra:Q4_K_M",
+        "/name",
+        "org/name?x=1",
+        "org/..",
+        "org/name#top",
+    ] {
         let (status, _) = daemon.start(json!({ "model": model })).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{model}");
     }

@@ -25,6 +25,7 @@ use axum::{
     },
     routing::get,
 };
+use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::json;
 use tilekit::modelfile::split_model_spec;
@@ -72,8 +73,14 @@ pub struct Spec {
 
 impl Spec {
     fn new(repo: &str, quant: Option<&str>) -> anyhow::Result<Self> {
+        // the name goes into a Hub url and a folder name, so only what the Hub allows
+        let part = |p: &str| {
+            !matches!(p, "" | "." | "..")
+                && p.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c))
+        };
         let mut parts = repo.split('/');
-        if !matches!((parts.next(), parts.next(), parts.next()), (Some(org), Some(name), None) if !org.is_empty() && !name.is_empty())
+        if !matches!((parts.next(), parts.next(), parts.next()), (Some(org), Some(name), None) if part(org) && part(name))
         {
             bail!("Name a model as org/name:quant, like unsloth/gemma-4-12b-it-GGUF:Q4_K_M");
         }
@@ -187,9 +194,7 @@ impl Models {
             .values()
             .cloned()
             .collect();
-        for download in downloads {
-            let _ = download.pause().await;
-        }
+        join_all(downloads.iter().map(|download| download.pause())).await;
     }
 }
 

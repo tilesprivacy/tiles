@@ -262,6 +262,7 @@ const INFERENCE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const DAEMON_STOP_TIMEOUT: Duration = Duration::from_secs(20);
 // how long an open connection, like an SSE stream, gets after a shutdown
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+const MODEL_PAUSE_TIMEOUT: Duration = Duration::from_secs(5);
 const DAEMON_STOP_POLL: Duration = Duration::from_millis(250);
 pub async fn start_cmd(port: Option<u32>) -> Result<()> {
     start_daemon(port).await
@@ -597,8 +598,13 @@ fn listen_for_signals(state: Arc<AppState>) {
 pub async fn shutdown_all(state: Arc<AppState>) {
     info!("Daemon server shutting down");
     ui::begin_stop(&state.ui);
-    // so they show as paused next time
-    state.models.pause_all().await;
+    // so they show as paused next time. resuming hashes the part on disk, which can't be cut short
+    if tokio::time::timeout(MODEL_PAUSE_TIMEOUT, state.models.pause_all())
+        .await
+        .is_err()
+    {
+        log::warn!("Model downloads did not pause in time");
+    }
     // a stuck inference server must not hold the shutdown open
     match tokio::time::timeout(
         INFERENCE_STOP_TIMEOUT,
