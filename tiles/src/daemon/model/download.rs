@@ -265,15 +265,20 @@ impl ModelDownload {
         self.set(state);
     }
 
-    /// Deletes the model's folder and returns the bytes freed
-    pub async fn delete(&self) -> Result<u64, AppError> {
-        // blocks a new download while the files are removed
-        let running = self.running.lock().await;
-        if is_live(&running) {
-            return Err(AppError::Conflict(format!(
-                "{} is downloading, pause it before deleting it",
-                self.spec
-            )));
+    /// Deletes the repo's folder, shared by all its quants, and returns the bytes freed.
+    /// `quants` lists every quant, this one included
+    pub async fn delete(&self, quants: &[Arc<ModelDownload>]) -> Result<u64, AppError> {
+        // blocks their downloads while the files are removed
+        let mut held = Vec::with_capacity(quants.len());
+        for quant in quants {
+            let running = quant.running.lock().await;
+            if is_live(&running) {
+                return Err(AppError::Conflict(format!(
+                    "{} is downloading, pause it before deleting {}",
+                    quant.spec, self.spec
+                )));
+            }
+            held.push(running);
         }
         let dir = hf::repo_dir(&self.root, &self.spec.repo);
         let freed = tokio::task::spawn_blocking(move || {
@@ -288,7 +293,9 @@ impl ModelDownload {
             }
             _ => AppError::InternalServerError(format!("Couldn't delete {}: {err}", self.spec)),
         })?;
-        self.set(DownloadState::Idle);
+        for quant in quants {
+            quant.set(DownloadState::Idle);
+        }
         Ok(freed)
     }
 

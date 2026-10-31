@@ -182,6 +182,18 @@ impl Models {
         download.clone()
     }
 
+    // every quant of `repo` known so far, sorted for a fixed lock order
+    fn quants(&self, repo: &str) -> Vec<Arc<ModelDownload>> {
+        let downloads = self.downloads.lock().expect("model downloads lock");
+        let mut quants: Vec<_> = downloads
+            .iter()
+            .filter(|(spec, _)| spec.repo == repo)
+            .map(|(_, download)| download.clone())
+            .collect();
+        quants.sort_by(|a, b| a.spec().quant.cmp(&b.spec().quant));
+        quants
+    }
+
     fn current(&self) -> Option<Spec> {
         let picked = match &self.picked {
             Picked::Config => get_current_model(),
@@ -341,17 +353,18 @@ async fn delete(
 ) -> Result<impl IntoResponse, AppError> {
     let download = state.models.get(which.model.as_deref())?;
     let spec = download.spec().clone();
-    if state
+    // quants of one repo share its folder
+    if let Some(in_use) = state
         .models
         .current()
         .or_else(|| state.models.default.clone())
-        == Some(spec.clone())
+        && in_use.repo == spec.repo
     {
         return Err(AppError::Conflict(format!(
-            "Chats use {spec}, pick another model before deleting it"
+            "Chats use {in_use}, pick another model before deleting {spec}"
         )));
     }
-    let freed = download.delete().await?;
+    let freed = download.delete(&state.models.quants(&spec.repo)).await?;
     Ok(ApiResponse::success(
         json!({ "model": spec.to_string(), "freed": freed }),
     ))

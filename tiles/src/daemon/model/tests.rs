@@ -654,3 +654,32 @@ async fn a_model_downloading_cant_be_deleted() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert!(body["reason"].as_str().unwrap().contains("pause it"));
 }
+
+#[tokio::test]
+async fn quants_of_one_repo_share_a_folder() {
+    let server = hub_with_model(Duration::from_millis(500)).await;
+    serve_model(&server, OTHER, Duration::from_millis(500)).await;
+    let daemon = Daemon::new(&server);
+    let delete = "/v1/tilekit/model/delete";
+    daemon.start(json!({ "model": OTHER })).await;
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            delete,
+            Some(json!({ "model": format!("{REPO}:Q8_0") })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "chats use another quant");
+    assert!(body["reason"].as_str().unwrap().contains("Chats use"));
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            delete,
+            Some(json!({ "model": format!("{OTHER}:Q8_0") })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "another quant is downloading");
+    assert!(body["reason"].as_str().unwrap().contains("pause it"));
+}
