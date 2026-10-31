@@ -13,7 +13,7 @@ use crate::utils::get_unix_time_now;
 use anyhow::{Result, anyhow};
 use log::{info, warn};
 use rusqlite::types::FromSqlError;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use tilekit::modelfile::Role;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
@@ -109,6 +109,22 @@ pub fn save_chat(conn: &Connection, user: &User, chat_resp: ChatResponse) -> Res
     Ok(chat)
 }
 
+/// Saves the first message of a session together with the session itself, in one
+/// transaction, so a failed save never leaves an empty session behind
+pub fn save_first_chat(
+    conn: &Connection,
+    user: &User,
+    session_name: &str,
+    chat_resp: ChatResponse,
+) -> Result<Chats> {
+    let txn = conn.unchecked_transaction()?;
+    create_session(&txn, &chat_resp.session_id, session_name, &user.user_id)?;
+    let chat = save_chat(&txn, user, chat_resp)?;
+    txn.commit()?;
+
+    Ok(chat)
+}
+
 /// Returns the `id` of the last entry of the given user_id
 /// Used as the offset point for fetching the chat delta from the user_id
 pub fn get_last_entry_id(conn: &Connection, user_id: &str) -> Result<Option<Uuid>> {
@@ -164,7 +180,7 @@ fn fetch_delta_chats(
         let updated_at: f64 = row.get(7)?;
         let resp_id: Option<String> = row.get(3)?;
         let ctx_id = row.get(5)?;
-        let model_name_db: Option<String> = row.get(9)?;
+        let model_name_db: Option<String> = row.get(10)?;
 
         let model_name: String = model_name_db.unwrap_or("".to_owned());
 
@@ -176,9 +192,10 @@ fn fetch_delta_chats(
         if !session_id.is_empty() && !session_map.contains_key(&session_id) {
             // lets fetch the session details
             match fetch_session(conn, &session_id) {
-                Ok(session) => {
+                Ok(Some(session)) => {
                     session_map.insert(session_id.clone(), session);
                 }
+                Ok(None) => warn!("Session {} of a chat does not exist", &session_id),
                 Err(err) => {
                     warn!("Fetching session {} failed due to {:?}", &session_id, err);
                 }
@@ -219,7 +236,7 @@ pub fn apply_delta(chat_conn: &mut Connection, delta_chats: DeltaChat) -> Result
     let sessions = delta_chats.sessions;
     let txn = chat_conn.transaction()?;
     {
-        let mut stmt = txn.prepare("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)")?;
+        let mut stmt = txn.prepare("insert into chats(id, user_id, content, resp_id, role, context_id, created_at, updated_at, row_counter, session_id, model_name) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)")?;
 
         for chat in chats {
             match stmt.execute(params![
@@ -232,7 +249,8 @@ pub fn apply_delta(chat_conn: &mut Connection, delta_chats: DeltaChat) -> Result
                 &chat.created_at.to_string(),
                 &chat.updated_at.to_string(),
                 &chat.row_counter,
-                &chat.session_id
+                &chat.session_id,
+                &chat.model_name
             ]) {
                 Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
                     if reason == "UNIQUE constraint failed: chats.id" =>
@@ -304,12 +322,12 @@ pub fn get_encoded_delta(
     Ok(encode_delta_to_bytes(&delta))
 }
 
-/// Spawns a concurrent process that can process DB operations for p2p syncing through channel communication
+/// Spawns a concurrent process that can process DB operations while p2p communication through rust channel communication
 ///
 /// Returns a sender to the caller.
 ///
 /// This is due to the restrictions on sharing around DB references across threads, due to the Connection object being not thread safe
-pub fn create_db_sync_channel() -> Sender<SyncOp> {
+pub fn create_db_channel() -> Sender<SyncOp> {
     let (sender, mut receiver) = mpsc::channel::<SyncOp>(32);
 
     tokio::spawn(async move {
@@ -359,44 +377,43 @@ pub fn create_session(conn: &Connection, id: &str, name: &str, user_id: &str) ->
         get_unix_time_now() as f64,
         None::<String>
     ]) {
-        Ok(_res) => {
-            let sesh = fetch_session(conn, id)?;
-            Ok(sesh)
-        }
+        Ok(_res) => fetch_session(conn, id)?
+            .ok_or_else(|| anyhow!("Session {id} is missing after writing it")),
         Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
             if reason == "UNIQUE constraint failed: sessions.id" =>
         {
             warn!("Session entry already exists, skipping");
-            let sesh = fetch_session(conn, id)?;
-            Ok(sesh)
+            fetch_session(conn, id)?
+                .ok_or_else(|| anyhow!("Session {id} is missing after writing it"))
         }
         Err(err) => Err(anyhow!("Err inserting due to {}", err)),
     }
 }
 
-pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Session> {
-    let sesh = conn.query_row(
-        "SELECT id, name, creator_id, created_at, snapshot FROM sessions WHERE id = ?1",
-        [session_id],
-        |row| {
-            Ok(Session {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                creator_id: row.get(2)?,
-                created_at: row.get::<usize, f64>(3)? as u64,
-                snapshot: row.get(4)?,
-            })
-        },
-    )?;
+pub fn fetch_session(conn: &Connection, session_id: &str) -> Result<Option<Session>> {
+    let sesh = conn
+        .query_row(
+            "SELECT id, name, creator_id, created_at, snapshot FROM sessions WHERE id = ?1",
+            [session_id],
+            |row| {
+                Ok(Session {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    creator_id: row.get(2)?,
+                    created_at: row.get::<usize, f64>(3)? as u64,
+                    snapshot: row.get(4)?,
+                })
+            },
+        )
+        .optional()?;
     Ok(sesh)
 }
 
-pub fn fetch_sessions(conn: &Connection) -> Result<Vec<Session>> {
-    let query =
-        "select id, name, creator_id, created_at, snapshot from sessions order by created_at desc";
+pub fn fetch_sessions(conn: &Connection, limit: Option<u32>) -> Result<Vec<Session>> {
+    let query = "select id, name, creator_id, created_at, snapshot from sessions order by created_at desc limit ?1";
 
     let mut stmt = conn.prepare(query)?;
-    let session_rows = stmt.query_map([], |row| {
+    let session_rows = stmt.query_map([limit.map_or(25, |v| v)], |row| {
         Ok(Session {
             id: row.get(0)?,
             name: row.get(1)?,
@@ -443,7 +460,7 @@ fn decode_delta_from_bytes(bytes: &[u8]) -> Result<DeltaChat> {
 }
 
 pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<DeltaChat> {
-    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id  from chats where session_id = ?1 order by id";
+    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id, model_name from chats where session_id = ?1 order by id";
 
     let params = vec![("?1", session_id)];
 
@@ -453,10 +470,8 @@ pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<
 pub fn update_snapshot(conn: &Connection, id: &str, snapshot: String) -> Result<Session> {
     let mut stmt = conn.prepare("update sessions set snapshot = ?1 where id = ?2")?;
     match stmt.execute(params![snapshot, id.to_owned(),]) {
-        Ok(_res) => {
-            let sesh = fetch_session(conn, id)?;
-            Ok(sesh)
-        }
+        Ok(_res) => fetch_session(conn, id)?
+            .ok_or_else(|| anyhow!("Session {id} is missing after writing it")),
         Err(err) => Err(anyhow!("Err updating session snapshot due to {}", err)),
     }
 }
@@ -474,7 +489,8 @@ pub mod tests {
             account::local::{ACCOUNT, User},
             chats::{
                 apply_delta, create_session, decode_delta_from_bytes, encode_delta_to_bytes,
-                fetch_models_used_by_session, get_delta, get_last_row_counter, save_chat,
+                fetch_models_used_by_session, fetch_session, get_delta, get_last_row_counter,
+                save_chat, save_first_chat,
             },
         },
         repl::ChatResponse,
@@ -795,6 +811,44 @@ pub mod tests {
         assert!(apply_delta(&mut conn_2, rows).is_ok());
         let rows = get_delta(&conn_2, &user.user_id, 0).unwrap();
         assert_eq!(rows.chats.len(), 4);
+        assert!(rows.chats.iter().all(|chat| chat.model_name == "gpt-oss"));
+    }
+
+    #[test]
+    fn test_save_first_chat_creates_session_and_chat() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let chat_response = ChatResponse {
+            input: "2+2".to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "gpt-oss".to_owned(),
+        };
+
+        let chat = save_first_chat(&conn, &user, "2+2", chat_response).unwrap();
+        let session = fetch_session(&conn, "session_abc").unwrap().unwrap();
+        assert_eq!(session.name, "2+2");
+        assert_eq!(chat.session_id, "session_abc");
+    }
+
+    #[test]
+    fn test_save_first_chat_leaves_no_session_when_the_chat_fails() {
+        let conn = setup_db_schema();
+        conn.execute("drop table chats", []).unwrap();
+        let user = create_user();
+        let chat_response = ChatResponse {
+            input: "2+2".to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "gpt-oss".to_owned(),
+        };
+
+        assert!(save_first_chat(&conn, &user, "2+2", chat_response).is_err());
+        assert!(fetch_session(&conn, "session_abc").unwrap().is_none());
     }
 
     #[test]

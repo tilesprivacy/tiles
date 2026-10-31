@@ -4,7 +4,6 @@
 ///
 /// - ~/.config/tiles (config dir) - Ofcourse the App configs
 ///     - config.toml
-///     - server.pid - current server daemon pid
 /// - ~/.local/share/tiles (data dir) - The User generated data should go here + app logs
 ///     - /logs
 ///     - /data (default, user can change this location tho)
@@ -75,6 +74,12 @@ impl LlamaConfig {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct UiConfig {
+    /// Whether the daemon launches the menu bar app alongside itself
+    pub menubar: Option<bool>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct RootConfig {
     #[serde(rename = "root-user")]
@@ -83,6 +88,7 @@ struct RootConfig {
     pub model: Option<ModelConfig>,
     pub inference: Option<InferenceConfig>,
     pub llama: Option<LlamaConfig>,
+    pub ui: Option<UiConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -139,7 +145,7 @@ const MAX_TOKENS: u32 = 30_000;
 // Hard default MIN_TOKENS passed to Pi, incase configured with something way less
 const MIN_TOKENS: u32 = 4_096;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultProvider;
 
 impl ConfigProvider for DefaultProvider {
@@ -199,7 +205,7 @@ impl ConfigProvider for DefaultProvider {
     }
 
     fn get_user_data_dir(&self) -> Result<PathBuf> {
-        let root_config = get_or_create_config()?;
+        let root_config = get_or_create_config(DefaultProvider)?;
         let data_config = root_config
             .get("data")
             .expect("Failed to get data")
@@ -273,7 +279,7 @@ pub fn set_user_data_path(path: &str) -> Result<String> {
 }
 
 pub fn get_memory_path() -> Result<String> {
-    let root_config = get_or_create_config()?;
+    let root_config = get_or_create_config(DefaultProvider)?;
     let memory_config = root_config
         .get("data")
         .ok_or_else(|| anyhow!("memory section doesnt exist"))?
@@ -321,7 +327,7 @@ fn set_user_data_path_with_provider<P: ConfigProvider>(
 ) -> Result<String> {
     let path_buf = PathBuf::from_str(path)?;
     if path_buf.try_exists()? {
-        let mut root_config = get_or_create_config()?;
+        let mut root_config = get_or_create_config(DefaultProvider)?;
         let mut memory_config = root_config
             .get("data")
             .ok_or_else(|| anyhow!("data section doesnt exist"))?
@@ -345,8 +351,8 @@ fn set_user_data_path_with_provider<P: ConfigProvider>(
 
 // TODO: This fn is very rigid and should be eventually replaced by
 // `get_or_create_root_config`
-pub fn get_or_create_config() -> Result<Table> {
-    let tiles_config_dir = DefaultProvider.get_config_dir()?;
+pub fn get_or_create_config(provider: impl ConfigProvider) -> Result<Table> {
+    let tiles_config_dir = provider.get_or_create_config_dir()?;
     let config_toml_path = tiles_config_dir.join("config.toml");
 
     if config_toml_path
@@ -398,7 +404,11 @@ fn get_or_create_root_config() -> Result<RootConfig> {
 }
 /// Saves the root config toml `Table` type
 pub fn save_config(config: &Table) -> Result<()> {
-    let tiles_config_dir = DefaultProvider.get_config_dir()?;
+    save_config_with_provider(config, DefaultProvider)
+}
+
+pub fn save_config_with_provider(config: &Table, provider: impl ConfigProvider) -> Result<()> {
+    let tiles_config_dir = provider.get_config_dir()?;
     let config_path = tiles_config_dir.join("config.toml");
     let tmp_path = tiles_config_dir.join("config.tmp.toml");
     fs::write(&tmp_path, config.to_string())?;
@@ -421,13 +431,34 @@ fn save_root_config(config: &RootConfig) -> Result<()> {
 /// Get the apt path where the model in the system.
 /// `model_name` may carry a `:quant` tag (e.g. `unsloth/gemma-4-12b-it-GGUF:Q8_0`),
 /// which is stripped before resolving the HF cache dir.
+/// Why a model lookup failed when it's not a disk error, so the API can answer 400 or
+/// 404 instead of 500
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelCacheError {
+    /// The name is not in `owner/repo` form
+    InvalidSpec,
+    /// The model is not downloaded
+    NotCached,
+}
+
+impl std::fmt::Display for ModelCacheError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidSpec => "Model spec should look like owner/repo",
+            Self::NotCached => "Model is not downloaded",
+        })
+    }
+}
+
+impl std::error::Error for ModelCacheError {}
+
 pub fn get_model_cache(model_name: &str) -> Result<PathBuf> {
     let (repo, _quant) = tilekit::modelfile::split_model_spec(model_name);
     let hf_model_dir = if repo.contains("/") {
         let model_spec_parts = repo.split("/").collect::<Vec<&str>>();
         format!("models--{}--{}", model_spec_parts[0], model_spec_parts[1])
     } else {
-        return Err(anyhow!("Modelfile not found"));
+        return Err(ModelCacheError::InvalidSpec.into());
         // TODO: Check for a better Modilefile search instead of relying on checking "/"
     };
 
@@ -449,7 +480,7 @@ pub fn get_model_cache(model_name: &str) -> Result<PathBuf> {
     } else if legacy_model_path.exists() {
         get_commit_path(legacy_model_path)
     } else {
-        Err(anyhow!("Model doesnt exist"))
+        Err(ModelCacheError::NotCached.into())
     }
 }
 
@@ -602,6 +633,11 @@ pub fn update_inference_config(config: InferenceConfig) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     root_config.inference = Some(config);
     save_root_config(&root_config)
+}
+
+pub fn get_ui_config() -> Result<UiConfig> {
+    let root_config = get_or_create_root_config()?;
+    Ok(root_config.ui.unwrap_or_default())
 }
 
 pub fn get_llama_config() -> Result<LlamaConfig> {

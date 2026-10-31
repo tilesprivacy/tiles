@@ -1,0 +1,22 @@
+info:
+  name: fetch-token-by-cid
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/authz/token-info"
+  body:
+    type: json
+    data: |-
+      {
+        "cid": "mAXESIJ9TXRmCvIFqH+12lszWKSEufz454rz2Fs7FPYSCTpzy"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

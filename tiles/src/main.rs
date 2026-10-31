@@ -1,26 +1,29 @@
 // #![warn(clippy::pedantic)]
 
-use std::error::Error;
+use std::{env, error::Error};
 
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use tiles::{
     core::{
         self,
-        account::atproto::{login, logout},
-        network::sync,
+        account::atproto::logout,
         plugin::{self, install, uninstall},
+        service,
     },
     daemon::{
-        remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
+        atproto::sign_in,
+        authz::{create_link_cli, join_request_cli, list_linked_devices_cli, revoke_peers_cli},
+        get_or_set_daemon_port,
+        net::{fetch_network_status_cli, start_network_cli, stop_network_cli, sync_with_peer_cli},
+        remote_status, share_remote_link, start_cmd, start_server, status_cmd, stop_cmd,
+        unshare_remote_link, web,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
 };
 
-use crate::commands::{
-    add_link, create_link, run_activate, run_deactivate, run_license_status, run_validate,
-    set_inference_config_to_daemon, show_peers, unlink_peer,
-};
+use crate::commands::set_inference_config_to_daemon;
+use crate::commands::{run_activate, run_deactivate, run_license_status, run_validate};
 
 mod commands;
 
@@ -52,12 +55,13 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "Commands:\n\n",
     "  Getting Started\n",
     "    run       Run a Modelfile (uses the default model if none is provided)\n",
+    "    ui        Open the Tiles web UI in your browser\n",
     "    help      Show this message or help for a specific command\n\n",
     "  Accounts\n",
     "    account   Manage your user account\n",
     "    at        ATProto-related commands\n",
     "    data      Configure your data and storage\n\n",
-    "  Sync\n",
+    "  Collaboration\n",
     "    link      Link devices via peer-to-peer\n",
     "    sync      Sync chats with peers\n",
     "    remote    Remote inference commands\n\n",
@@ -71,7 +75,9 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    uninstall Uninstall Tiles from this machine\n",
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
-    "    daemon    Configure daemon behavior\n\n",
+    "    daemon    Configure daemon behavior\n",
+    "    service   Run Tiles in the background from login\n",
+    "    network   Configure Tiles network\n\n",
     "  Tools\n",
     "    plugin    Manage plugins such as skills, extensions etc\n\n",
     "Options:\n",
@@ -124,6 +130,9 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum GettingStartedCommands {
+    /// Open the Tiles web UI in your browser
+    Ui,
+
     /// Run a Modelfile (uses the default model if none is provided)
     Run {
         /// Path to the Modelfile (uses default model if not provided)
@@ -171,10 +180,10 @@ enum SyncCommands {
     /// Sync chats with peers
     Sync {
         /// The DID of the peer you want to sync
-        did: Option<String>,
+        did: String,
     },
 
-    /// Remote stuff
+    /// Remote Inference
     Remote(RemoteArgs),
 }
 
@@ -191,6 +200,12 @@ enum SystemCommands {
 
     /// Configure daemon behavior
     Daemon(DaemonArgs),
+
+    /// Run Tiles in the background from login
+    Service(ServiceArgs),
+
+    /// Configure Tiles networking
+    Network(NetworkArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -346,14 +361,67 @@ enum AccountCommands {
 struct DaemonArgs {
     #[command(subcommand)]
     command: Option<DaemonCommands>,
+
+    /// Serve without launching the menu bar app
+    #[arg(long)]
+    no_ui: bool,
 }
 
 #[derive(Debug, Subcommand)]
 enum DaemonCommands {
     /// Start the daemon
-    Start { port: Option<u32> },
+    Start,
 
     /// Stops the daemon
+    Stop,
+
+    /// Shows whether the daemon and the web UI are running
+    Status,
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct ServiceArgs {
+    #[command(subcommand)]
+    command: ServiceCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServiceCommands {
+    /// Start Tiles automatically at login
+    Add,
+
+    /// Stop starting Tiles at login
+    Remove,
+
+    /// Show whether the service is installed and running
+    Status,
+
+    /// Start the service now
+    Start,
+
+    /// Stop the service now
+    Stop,
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct NetworkArgs {
+    #[command(subcommand)]
+    command: NetworkCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum NetworkCommands {
+    /// Start Tiles network
+    Start,
+
+    /// Get Tiles network status
+    Status,
+
+    /// Stop Tiles network
     Stop,
 }
 
@@ -393,21 +461,21 @@ struct LinkArgs {
 
 #[derive(Debug, Subcommand)]
 enum LinkCommands {
-    /// Creates an authorization token for linking
-    Create {
-        peer_did: Option<String>,
-    },
+    /// Creates an authorization token for device-linking
+    Create { peer_did: Option<String> },
 
-    /// Adds the sync authorization token from peer
-    Add {
+    /// Complete the device link with the authorization token from to-be-linked device
+    Join {
         token: String,
+        nickname: Option<String>,
     },
     /// List the linked peers
-    ListPeers,
+    LinkedDevices,
 
-    // Revokes the given peer
+    /// Revokes the given linked peer
     Revoke {
-        peer_did: String,
+        /// DID of the peer token
+        did: String,
     },
 }
 
@@ -445,6 +513,7 @@ enum AtCommands {
     #[command(about = "Log out of your Atproto account.")]
     Logout,
 }
+
 #[tokio::main]
 pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
@@ -455,6 +524,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    let daemon_port = get_or_set_daemon_port();
+    log::info!("DAEMON PORT: {}", daemon_port);
     let db_conn = core::init()?;
 
     match cli.command {
@@ -511,6 +582,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("Tiles failed to run due to {:?}", e))?;
         }
+        Some(Commands::GettingStarted(GettingStartedCommands::Ui)) => web::open_cli().await?,
         Some(Commands::GettingStarted(GettingStartedCommands::Help { command })) => {
             print_help_for_command(&command)?;
         }
@@ -550,15 +622,31 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             println!("{}", res);
         }
         Some(Commands::System(SystemCommands::Daemon(daemon_args))) => match daemon_args.command {
-            Some(DaemonCommands::Start { port }) => start_cmd(port)
+            Some(DaemonCommands::Start) => start_cmd(None)
                 .await
                 .inspect_err(|e| eprintln!("Daemon starting failed, reason: {:?}", e))?,
+            Some(DaemonCommands::Status) => status_cmd().await,
             Some(DaemonCommands::Stop) => stop_cmd()
                 .await
                 .inspect_err(|e| eprintln!("{:?}", e))
                 .inspect(|_| println!("Daemon stopped successfully"))?,
-            _ => start_server(None).await?,
+            _ => start_server(None, !daemon_args.no_ui).await?,
         },
+        Some(Commands::System(SystemCommands::Service(service_args))) => {
+            match service_args.command {
+                ServiceCommands::Add => service::add()?,
+                ServiceCommands::Remove => service::remove()?,
+                ServiceCommands::Status => service::status().await?,
+                ServiceCommands::Start => {
+                    service::start()?;
+                    println!("Service started");
+                }
+                ServiceCommands::Stop => {
+                    service::stop()?;
+                    println!("Service stopped");
+                }
+            }
+        }
         Some(Commands::Tools(ToolsCommandsGroup::Plugin(plugin_args))) => {
             match plugin_args.command {
                 PluginCommands::List => {
@@ -580,25 +668,26 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         }
         Some(Commands::Sync(SyncCommands::Link(link_args))) => match link_args.command {
-            LinkCommands::Revoke { peer_did } => unlink_peer(&db_conn, &peer_did)?,
-
-            LinkCommands::ListPeers => {
-                show_peers(&db_conn)?;
+            LinkCommands::Revoke { did } => {
+                revoke_peers_cli(&did).await?;
+            }
+            LinkCommands::LinkedDevices => {
+                list_linked_devices_cli().await?;
             }
             LinkCommands::Create { peer_did } => {
-                create_link(peer_did, &db_conn).await?;
+                create_link_cli(peer_did).await?;
             }
-            LinkCommands::Add { token } => {
-                add_link(token, &db_conn).await?;
+            LinkCommands::Join { token, nickname } => {
+                join_request_cli(token, nickname).await?;
             }
         },
-        Some(Commands::Sync(SyncCommands::Sync { did })) => sync(did).await?,
+        Some(Commands::Sync(SyncCommands::Sync { did })) => {
+            sync_with_peer_cli(did).await?;
+        }
         Some(Commands::Sync(SyncCommands::Remote(remote_args))) => match remote_args.command {
             RemoteCommands::Share => {
-                //open py inference proxy
-                // share(&db_conn).await?;
-                //
                 println!("{}", share_remote_link().await?);
+                println!("\nUse `tiles run --remote <ticket>` on the other peer");
             }
             RemoteCommands::Unshare => {
                 unshare_remote_link().await?;
@@ -609,11 +698,27 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
-                login(&db_conn, &handle).await?;
+                let account = sign_in(&handle).await?;
+                println!("Logged in successfully as @{}", account.handle);
             }
-            AtCommands::Logout => logout(&db_conn)?,
+            AtCommands::Logout => {
+                logout(&db_conn.common)?;
+            }
         },
         Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,
+        Some(Commands::System(SystemCommands::Network(network_args))) => {
+            match network_args.command {
+                NetworkCommands::Start => {
+                    start_network_cli().await?;
+                }
+                NetworkCommands::Stop => {
+                    stop_network_cli().await?;
+                }
+                NetworkCommands::Status => {
+                    fetch_network_status_cli().await?;
+                }
+            }
+        }
     }
     Ok(())
 }

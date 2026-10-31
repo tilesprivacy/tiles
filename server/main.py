@@ -7,7 +7,7 @@ import uvicorn
 from .api import app
 import logging
 
-from .config import PORT
+from .config import PORT, remove_pid_file, write_pid_file
 from fastapi import Request
 from . import runtime
 
@@ -74,7 +74,12 @@ signal.signal(signal.SIGTERM, _handle_termination)
 signal.signal(signal.SIGINT, _handle_termination)
 
 def run():
-    uvicorn.run(app, host="127.0.0.1", port=PORT)
+    config = uvicorn.Config(app, host="127.0.0.1", port=PORT)
+    # get the port first, so the pid file never points at a server that didn't get it
+    sock = config.bind_socket()
+    write_pid_file()
+    atexit.register(remove_pid_file)
+    uvicorn.Server(config).run(sockets=[sock])
 
 
 if __name__ == "__main__":

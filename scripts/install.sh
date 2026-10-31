@@ -251,6 +251,25 @@ else
   cp "${LOCAL_TARBALL}" "${TMPDIR}/tiles.tar.gz"
 fi
 
+# a daemon left running would keep serving the old version, so stop it first
+stop_running_daemon() {
+  local url="http://127.0.0.1:1729"
+  curl -fsS -m 2 -o /dev/null "${url}/" 2>/dev/null || return 0
+
+  log "⏹️ Stopping the running Tiles daemon..."
+  curl -fsS -m 5 -o /dev/null -X POST -H "Content-Type: application/json" "${url}/shutdown" 2>/dev/null \
+    || curl -fsS -m 5 -o /dev/null "${url}/shutdown" 2>/dev/null \
+    || true
+
+  for _ in $(seq 40); do
+    curl -fsS -m 1 -o /dev/null "${url}/" 2>/dev/null || return 0
+    sleep 0.25
+  done
+  warn "⚠️  The Tiles daemon is still running. Run \`tiles daemon stop\` after the update."
+}
+
+stop_running_daemon
+
 echo "⬇️ Installing tiles..."
 # Lets point to tile repo
 tar -xzf "${TMPDIR}/tiles.tar.gz" -C "${TMPDIR}"

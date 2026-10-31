@@ -106,6 +106,28 @@ Open two terminal windows:
 
 > **Tip:** Refer to the `justfile` for additional common commands and automation. For troubleshooting, see [CONTRIBUTING.md](CONTRIBUTING.md) and open an issue if you need help.
 
+## Running the menu bar app (Development)
+
+The menu bar app lives in `apps/menubar`. It needs [`pnpm`](https://pnpm.io/installation).
+
+Open two terminal windows:
+
+1. **Terminal 1: Start the daemon**
+
+   From the project root:
+
+   ```sh
+   cargo run -- daemon --no-ui
+   ```
+
+2. **Terminal 2: Run the app**
+
+   From the root directory:
+
+   ```sh
+   pnpm --filter tiles-menubar tauri dev
+   ```
+
 ## Building Tiles installer (Development)
 
 Install [venvstacks](https://github.com/lmstudio-ai/venvstacks?tab=readme-ov-file#installing) for portable py runtime

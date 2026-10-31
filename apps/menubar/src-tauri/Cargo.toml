@@ -1,0 +1,28 @@
+[package]
+name = "tiles-menubar"
+version = "0.1.0"
+description = "The Tiles menu bar control panel"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2.11", features = [] }
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "c9ec2130422200f0863b23dfdad02b133a529b07" }
+tauri-plugin-single-instance = "2"
+dispatch2 = { version = "0.3", default-features = false, features = ["std", "objc2"] }
+objc2-quartz-core = { version = "0.3", default-features = false, features = [
+    "std",
+    "CALayer",
+    "objc2-core-foundation",
+] }
+
+reqwest = { version = "0.12", default-features = false, features = ["default-tls"] }
+data-encoding = "2"
+tokio = { version = "1", features = ["time"] }
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+

@@ -11,7 +11,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -33,12 +33,12 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install just
-        run: command -v just || cargo install just
+        uses: extractions/setup-just@v4
 
       - name: Run checks
         run: just check
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: check   # optional but recommended
     steps:
       - uses: actions/checkout@v4
@@ -60,7 +60,9 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin
 
       - name: Run coverage
         run: cargo tarpaulin --out Xml -- --test-threads 1

@@ -29,7 +29,7 @@ env:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     strategy:
       matrix:
         backend: [cuda, vulkan]
@@ -87,7 +87,7 @@ jobs:
           if-no-files-found: error
 
   publish-linux:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-2vcpu-ubuntu-2404
     needs: build-linux
     steps:
       - name: Download build artifacts

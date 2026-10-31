@@ -6,16 +6,15 @@ use anyhow::{Context, Result, anyhow};
 use owo_colors::OwoColorize;
 
 use tiles::core::account::local::{
-    RootUser, add_token, create_root_account, create_token, get_peer_list, get_root_user_details,
-    is_valid_delegation, save_root_account, set_nickname, unlink,
+    RootUser, create_root_account, get_root_user_details, save_root_account, set_nickname,
 };
+
 use tiles::core::license::{
     activate_license, deactivate_license, fetch_licenses, validate_license,
 };
-use tiles::core::network::link;
+use tiles::core::server::{ping, start_server_daemon, stop_server_daemon};
 use tiles::core::storage::db::{Dbconn, get_db_conn};
 use tiles::daemon::{ping as ping_daemon, stop_cmd};
-use tiles::repl::{start_server_daemon, stop_server_daemon};
 use tiles::utils::config::{
     ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
     set_user_data_path, update_inference_config,
@@ -72,7 +71,7 @@ pub async fn run_setup_for_ftue(_run_args: &RunArgs) -> Result<()> {
     config_provider.get_or_create_config_dir()?;
     config_provider.get_or_create_data_dir()?;
 
-    let root_config = get_or_create_config()?;
+    let root_config = get_or_create_config(DefaultProvider)?;
     let root_user_details = get_root_user_details(&root_config)?;
     println!("{}", FTUE_ASCII_ART.blue());
     println!("{} {}", FTUE_VERSION_TITLE, env!("CARGO_PKG_VERSION"));
@@ -258,15 +257,21 @@ pub async fn check_health() -> Result<()> {
 }
 
 pub async fn start_server() {
-    let _ = start_server_daemon().await;
+    match start_server_daemon().await {
+        Ok(state) => println!("{state}"),
+        Err(err) => eprintln!("{err}"),
+    }
 }
 
 pub async fn stop_server() {
-    let _ = stop_server_daemon().await;
+    match stop_server_daemon().await {
+        Ok(msg) => println!("{msg}"),
+        Err(err) => eprintln!("{err}"),
+    }
 }
 
 pub async fn uninstall_tiles(all: bool) -> Result<()> {
-    if tiles::repl::ping().await.is_ok() {
+    if ping().await.is_ok() {
         return Err(anyhow!(
             "Inference server is still running. Stop it with `tiles server stop` and try again."
         ));
@@ -296,7 +301,7 @@ pub fn set_inference_config_to_daemon(is_background: bool) -> Result<()> {
 }
 /// Runs the account command with the args being passed.
 pub async fn run_account_commands(account_args: AccountArgs) -> Result<()> {
-    let config = get_or_create_config()?;
+    let config = get_or_create_config(DefaultProvider)?;
     let root_user_details = get_root_user_details(&config)?;
     match account_args.command {
         Some(AccountCommands::Create { nickname }) => {
@@ -350,53 +355,6 @@ fn get_account_not_created_msg() -> String {
         "Local Identity not created yet, use {}",
         "tiles account create".yellow()
     )
-}
-
-pub fn show_peers(db_conn: &Dbconn) -> Result<()> {
-    let peers = get_peer_list(&db_conn.common)?;
-
-    println!("DID\tNickname\n");
-    for peer in peers {
-        println!("{}\t{}", peer.user_id, peer.username)
-    }
-    Ok(())
-}
-
-pub fn unlink_peer(db_conn: &Dbconn, user_id: &str) -> Result<()> {
-    if let Err(err) = unlink(&db_conn.common, user_id) {
-        println!("{:?}", err)
-    } else {
-        println!("Succesfully disabled the peer")
-    }
-    Ok(())
-}
-
-pub async fn create_link(aud_did: Option<String>, db_conn: &Dbconn) -> Result<()> {
-    if let Some(audience_did) = aud_did {
-        // aud_did is there, so definitely trying online syncing
-        let token = create_token(&audience_did, db_conn).await?;
-        println!(
-            "\nHere's the UCAN token:\n\n{}\n\nPlease share this with {} out-of-band",
-            token, audience_did
-        );
-    } else {
-        // will do a syncronized linking over offline network
-        link(None).await?;
-    }
-    Ok(())
-}
-
-pub async fn add_link(token: String, db_conn: &Dbconn) -> Result<()> {
-    // 8 letter hex-code is used for offline link
-    if token.len() == 8 {
-        link(Some(token)).await?;
-    } else if is_valid_delegation(&token).is_ok() {
-        let token = add_token(&token, db_conn)?;
-        println!("Added the token from DID={}", token.did);
-    } else {
-        eprintln!("Invalid token")
-    }
-    Ok(())
 }
 
 pub async fn run_validate(license_key: &str) {

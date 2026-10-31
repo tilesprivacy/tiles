@@ -1,4 +1,4 @@
-use crate::core::account::atproto::{fetch_logged_in_data, login, share_session};
+use crate::core::account::atproto::{fetch_logged_in_data, share_session};
 use crate::core::account::local::get_current_user;
 use crate::core::agent::pi::{PiAgent, PiWriter};
 use crate::core::agent::types::{
@@ -7,20 +7,20 @@ use crate::core::agent::types::{
 };
 use crate::core::agent::{pi, types};
 use crate::core::chats::{
-    Session, create_session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat,
+    Session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat, save_first_chat,
     update_snapshot,
 };
 use crate::core::network;
+use crate::core::server::{start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::Dbconn;
+use crate::daemon::atproto::sign_in;
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_inference_config,
     get_memory_path, get_model_cache, update_current_model, update_llama_config,
 };
-use crate::utils::hf_model_downloader::*;
 use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
-use nix::unistd::setsid;
 use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
 use rustyline::completion::Completer;
@@ -32,18 +32,14 @@ use rustyline::{Config, Editor, Helper};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::fs::{self, OpenOptions};
+use std::fs::{self};
 use std::io::{self};
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
-use tokio::process::Command;
-use tokio::time::sleep;
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
 
@@ -120,13 +116,13 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
                 return Ok(());
             }
         };
-        let default_modelfile = get_default_modelfile()
+        let default_modelfile = get_default_modelfile(DefaultProvider)
             .ok()
             .and_then(|path| tilekit::modelfile::parse_from_file(path.to_str()?).ok())
             .unwrap_or_else(|| modelfile.clone());
         (modelfile, default_modelfile)
     } else {
-        let default_modelfile_path = get_default_modelfile()?;
+        let default_modelfile_path = get_default_modelfile(DefaultProvider)?;
         let default_modelfile = match tilekit::modelfile::parse_from_file(
             default_modelfile_path
                 .to_str()
@@ -142,82 +138,6 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
     };
 
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
-}
-
-#[allow(clippy::zombie_processes)]
-pub async fn start_server_daemon() -> Result<()> {
-    // check if the server is running
-    // start server as a child process
-    // save the pid in a file under ~/.config/tiles/server_pid
-
-    if (ping().await).is_ok() {
-        println!("server is already up");
-        return Ok(());
-    }
-
-    let config_dir = DefaultProvider.get_config_dir()?;
-    let data_dir = DefaultProvider.get_data_dir()?;
-    let mut server_dir = DefaultProvider.get_lib_dir()?;
-    let pid_file = config_dir.join("server.pid");
-    server_dir = server_dir.join("server");
-    let stdout_log = OpenOptions::new()
-        .append(true)
-        .open(data_dir.join("logs/server.out.log"))?;
-    let stderr_log = OpenOptions::new()
-        .append(true)
-        .open(data_dir.join("logs/server.err.log"))?;
-    let server_path = server_dir.join("stack_export_prod/app-server/bin/python");
-    server_dir.pop();
-    let child = unsafe {
-        Command::new(server_path)
-            .args(["-m", "server.main"])
-            .current_dir(server_dir)
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(stdout_log))
-            .stderr(Stdio::from(stderr_log))
-            .pre_exec(|| {
-                if let Err(err) = setsid() {
-                    Err(Into::into(err))
-                } else {
-                    Ok(())
-                }
-            })
-            .spawn()
-            .expect("failed to start server")
-    };
-
-    std::fs::write(pid_file, child.id().expect("Not child Id").to_string())
-        .expect("Failed to write to pid file");
-    println!(
-        "Server started with PID {}",
-        child.id().expect("No child Id")
-    );
-    Ok(())
-}
-
-pub async fn stop_server_daemon() -> Result<()> {
-    if (ping().await).is_err() {
-        println!("Server is not running");
-        return Ok(());
-    }
-
-    let pid_file = DefaultProvider.get_config_dir()?.join("server.pid");
-
-    if !pid_file.exists() {
-        eprintln!("server pid doesnt exist");
-        return Ok(());
-    }
-
-    let pid = std::fs::read_to_string(&pid_file).context("Failed to read the string")?;
-    Command::new("kill")
-        .arg(pid.trim())
-        .status()
-        .await
-        .context("Failed to initiate kill commad")?;
-
-    std::fs::remove_file(pid_file).context("Failed to removed pid file")?;
-    println!("Server stopped.");
-    Ok(())
 }
 
 struct TilesHinter;
@@ -411,6 +331,8 @@ async fn run_model_with_server(
     if let Some(llama_config) = &run_args.llama_config {
         update_llama_config(llama_config).context("Failed to update llama config")?;
     }
+    //TODO: Remove this remote infy code, refactor it
+    // If remote inference mode then no need to load or leverage local server
     if let Some(ticket) = run_args.remote.clone() {
         tokio::spawn(async move {
             let _ = network::connect(&ticket)
@@ -423,10 +345,10 @@ async fn run_model_with_server(
             .map_err(|e| anyhow!(e))
     } else {
         if !cfg!(debug_assertions) {
+            // start waits until the server answers
             let _ = start_server_daemon().await.inspect_err(|e| {
-                eprintln!("Failed to start inference server due to {:?}", e);
+                eprintln!("Failed to start inference server: {e}");
             });
-            let _ = wait_until_server_is_up().await;
         }
         match load_model(&modelfile, &default_modelfile, &memory_path, 0).await {
             Ok(_) => start_repl(&modelfile, run_args, db_conn)
@@ -552,6 +474,9 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                     .await?;
                     break;
                 }
+                PiResponse::AgentSettled => {
+                    info!("agent settled")
+                }
                 PiResponse::TurnEnd(_turn_event) => {
                     println!("\n");
                 }
@@ -582,21 +507,11 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                     info!("Unsupported response {}", &line);
                     continue;
                 }
+                _ => (),
             }
         }
     }
     Ok(())
-}
-
-pub async fn ping() -> Result<()> {
-    let client = Client::new();
-    let url = format!("http://127.0.0.1:{}/ping", PY_PORT);
-    let res = client.get(url).send().await;
-
-    match res {
-        Err(err) => Err(anyhow!("Server down due to {:?}", err)),
-        _ => Ok(()),
-    }
 }
 
 /// Full `repo:quant` spec used as the model identity across config, Pi and the py server
@@ -611,7 +526,10 @@ pub fn model_spec(modelfile: &Modelfile) -> Result<String> {
     })
 }
 
-fn resolve_gguf_path(model_cache_path: &PathBuf, quant: Option<&str>) -> Result<PathBuf> {
+pub(crate) fn resolve_gguf_path(
+    model_cache_path: &PathBuf,
+    quant: Option<&str>,
+) -> Result<PathBuf> {
     let Some(quant) = quant else {
         return Ok(model_cache_path.clone());
     };
@@ -656,7 +574,12 @@ async fn load_model(
             retries
         ));
     }
-    let model_name = modelfile.from.clone().unwrap();
+    // TODO: why `from` is even an Option, gotta check latta
+    let model_name = modelfile
+        .from
+        .clone()
+        .expect("Modelfile not found, this is impossible to occur");
+
     let quant = modelfile.quant.as_deref();
     let model_cache_res = get_model_cache(&model_name);
 
@@ -692,24 +615,8 @@ async fn load_model(
     }
 }
 
-async fn wait_until_server_is_up() {
-    loop {
-        match ping().await {
-            Ok(()) => {
-                break;
-            }
-            Err(_err) => {
-                println!("### tiling ###...");
-                sleep(Duration::from_secs(5)).await;
-            }
-        }
-    }
-}
-
-pub fn get_default_modelfile() -> Result<PathBuf> {
-    let path = DefaultProvider
-        .get_lib_dir()?
-        .join("modelfiles/gemma-4-12b-gguf");
+pub fn get_default_modelfile(provider: impl ConfigProvider) -> Result<PathBuf> {
+    let path = provider.get_lib_dir()?.join("modelfiles/gemma-4-12b-gguf");
     Ok(path)
 }
 
@@ -763,7 +670,7 @@ fn model_load_warnings(payload: &serde_json::Value) -> Vec<String> {
 }
 
 async fn download_model(model_name: &str, quant: Option<&str>) -> Result<()> {
-    match pull_model(model_name, quant).await {
+    match crate::daemon::model::pull(model_name, quant).await {
         Ok(_) => {
             println!("\nDownloading completed \n");
             Ok(())
@@ -892,8 +799,11 @@ async fn process_share_session(
                 input.clear();
                 println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
                 stdin.read_line(&mut input)?;
-                login(conn, input.trim()).await?;
-                share_session(&conn.common, &shared_session, is_private).await?;
+                // a bad handle is reported, it does not end the session
+                match sign_in(input.trim()).await {
+                    Ok(_) => share_session(&conn.common, &shared_session, is_private).await?,
+                    Err(err) => eprintln!("Could not sign in: {err}"),
+                }
             }
         }
         Err(err) => {
@@ -907,7 +817,7 @@ async fn process_share_session(
 }
 
 fn show_session_info(db_conn: &Dbconn) -> Result<()> {
-    let sessions = fetch_sessions(&db_conn.chat)?;
+    let sessions = fetch_sessions(&db_conn.chat, None)?;
 
     let mut count = 0;
     for session in sessions {
@@ -967,7 +877,9 @@ fn show_status(repl_session: &ReplSession, db_conn: &Dbconn) -> Result<()> {
     let cwd_pathbuf = std::env::current_dir()?;
     let cwd = cwd_pathbuf.to_string_lossy();
     let logged_in_atproto = fetch_logged_in_data(&db_conn.common)?;
-    let session_data: Option<Session> = fetch_session(&db_conn.chat, &repl_session.session_id).ok();
+    let session_data: Option<Session> = fetch_session(&db_conn.chat, &repl_session.session_id)
+        .ok()
+        .flatten();
     let status_lines = build_status_lines(&cwd, session_data, repl_session, logged_in_atproto);
 
     println!("\n");
@@ -1086,10 +998,14 @@ async fn handle_repl_exit(agent_writer: &mut PiWriter) -> Result<()> {
     if !cfg!(debug_assertions) {
         match get_inference_config()? {
             Some(inference_config) if !inference_config.daemon => {
-                let _res = stop_server_daemon().await;
+                if let Ok(msg) = stop_server_daemon().await {
+                    println!("{msg}");
+                }
             }
             None => {
-                let _res = stop_server_daemon().await;
+                if let Ok(msg) = stop_server_daemon().await {
+                    println!("{msg}");
+                }
             }
             _ => (),
         }
@@ -1227,27 +1143,29 @@ fn save_agent_session(
         match msg.role {
             Role::User => {
                 let input = get_pi_msg_content(msg.content);
-                let parent_chat_id = if !repl_session.session_started {
-                    create_session(
-                        &db_conn.chat,
-                        &repl_session.session_id,
-                        &repl_session.session_snapshot.name,
-                        &current_user.user_id,
-                    )?;
-                    repl_session.session_started = true;
-                    None
-                } else {
-                    repl_session.last_chat_id.clone()
-                };
                 let chat_response = ChatResponse {
                     input,
                     session_id: repl_session.session_id.clone(),
                     role: Role::User,
-                    parent_chat_id,
+                    parent_chat_id: repl_session
+                        .session_started
+                        .then(|| repl_session.last_chat_id.clone())
+                        .flatten(),
                     metrics: None,
                     model_used: repl_session.current_modelname.clone(),
                 };
-                let prompt_chat = save_chat(&db_conn.chat, current_user, chat_response)?;
+                let prompt_chat = if repl_session.session_started {
+                    save_chat(&db_conn.chat, current_user, chat_response)?
+                } else {
+                    let chat = save_first_chat(
+                        &db_conn.chat,
+                        current_user,
+                        &repl_session.session_snapshot.name,
+                        chat_response,
+                    )?;
+                    repl_session.session_started = true;
+                    chat
+                };
                 repl_session.last_chat_id = Some(prompt_chat.id);
             }
             Role::Assistant => {
@@ -1401,7 +1319,8 @@ mod tests {
 
     #[test]
     fn default_modelfile_uses_platform_default() {
-        let path = get_default_modelfile().expect("default modelfile should resolve");
+        let path =
+            get_default_modelfile(DefaultProvider).expect("default modelfile should resolve");
         assert!(path.ends_with("modelfiles/gemma-4-12b-gguf"));
     }
 
@@ -1459,7 +1378,7 @@ mod tests {
             .expect("session should be created");
         insert_atproto_login(&db_conn.common);
 
-        let session = fetch_session(&db_conn.chat, "session-1").ok();
+        let session = fetch_session(&db_conn.chat, "session-1").ok().flatten();
         let atproto_login =
             fetch_logged_in_data(&db_conn.common).expect("login lookup should succeed");
         let state = GetStateData {
@@ -1593,7 +1512,9 @@ mod tests {
             save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok()
         );
 
-        let session = fetch_session(&db_conn.chat, "abc").unwrap();
+        let session = fetch_session(&db_conn.chat, "abc")
+            .unwrap()
+            .expect("session abc was created above");
 
         let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
 
@@ -1703,7 +1624,9 @@ mod tests {
             save_agent_session(&mut repl_session, agent_end_event, &db_conn, &current_user).is_ok()
         );
 
-        let session = fetch_session(&db_conn.chat, "abc").unwrap();
+        let session = fetch_session(&db_conn.chat, "abc")
+            .unwrap()
+            .expect("session abc was created above");
 
         let chats = fetch_chats_by_session_id(&db_conn.chat, &session.id).unwrap();
 

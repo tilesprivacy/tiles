@@ -1,0 +1,17 @@
+info:
+  name: model
+  type: folder
+  seq: 6
+
+request:
+  auth: inherit
+
+docs:
+  content: |-
+    Model apis list the models Tiles offers and download them, with progress, pause and resume.
+
+    - A model is named `org/name:quant`, like `unsloth/gemma-4-12b-it-GGUF:Q4_K_M`. Starting, pausing and following without one use the default Modelfile's model, and `model-status` without one lists every bundled model
+    - Downloads run in the daemon, so the UI and the CLI see the same ones. Several models can download at once
+    - A paused or interrupted download continues from where it stopped
+    - `model-events` keeps the UI in step with downloads started anywhere, so it can show what the CLI is downloading and the other way round
+  type: text/markdown

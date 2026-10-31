@@ -1,0 +1,5 @@
+name: dev
+variables:
+  - name: tilekit_base_url
+    value: http://127.0.0.1:1728/v1/tilekit
+    description: ""
