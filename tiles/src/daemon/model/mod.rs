@@ -187,7 +187,10 @@ impl Models {
             Picked::Config => get_current_model(),
             Picked::Memory(picked) => picked.lock().expect("picked model lock").clone(),
         };
-        Spec::parse(&picked?).ok()
+        // only Tiles' own models, like agent startup
+        Spec::parse(&picked?)
+            .ok()
+            .filter(|spec| bundled::modelfile_for(&self.modelfiles, spec).is_some())
     }
 
     fn pick(&self, spec: &Spec) -> anyhow::Result<()> {

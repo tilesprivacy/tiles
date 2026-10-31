@@ -265,10 +265,10 @@ mod tests {
             "sh",
             &[
                 "-c",
-                r#"read request
-  printf '{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false}}\n'
-    read request
- printf '{"type": "response", "command": "get_state", "success": true, "data": {"sessionId": "session_id", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": true}}\n'
+                r#"read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+  printf '{"type": "response", "id": "'"$id"'", "command": "new_session", "success": true, "data": {"cancelled": false}}\n'
+    read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+ printf '{"type": "response", "id": "'"$id"'", "command": "get_state", "success": true, "data": {"sessionId": "session_id", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": true}}\n'
   "#,
             ],
         )
@@ -312,10 +312,10 @@ mod tests {
             "sh",
             &[
                 "-c",
-                r#"read request
-  printf '{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false}}\n'
-    read request
- printf '{"type": "response", "command": "get_state", "success": true, "data": {"sessionId": "session_id", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": true}}\n'
+                r#"read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+  printf '{"type": "response", "id": "'"$id"'", "command": "new_session", "success": true, "data": {"cancelled": false}}\n'
+    read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+ printf '{"type": "response", "id": "'"$id"'", "command": "get_state", "success": true, "data": {"sessionId": "session_id", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": true}}\n'
   "#,
             ],
         )
@@ -358,10 +358,10 @@ mod tests {
             "sh",
             &[
                 "-c",
-                r#"read request
-printf '%s\n' '{"type":"response","command":"new_session","success":true}'
-read request
-printf '%s\n' '{"type":"response","command":"get_state","success":true,"data":{"sessionId":"kept","model":{"id":"id","name":"old"},"thinkingLevel":"off","isStreaming":false}}'"#,
+                r#"read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+printf '%s\n' '{"type":"response","id":"'"$id"'","command":"new_session","success":true}'
+read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+printf '%s\n' '{"type":"response","id":"'"$id"'","command":"get_state","success":true,"data":{"sessionId":"kept","model":{"id":"id","name":"old"},"thinkingLevel":"off","isStreaming":false}}'"#,
             ],
         )
         .unwrap();
@@ -397,8 +397,8 @@ printf '%s\n' '{"type":"response","command":"get_state","success":true,"data":{"
             &[
                 "-c",
                 r#"
-                    read request
- printf '{"type": "response", "command": "get_state", "success": true, "data": {"sessionId": "session_id", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": true}}\n'
+                    read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+ printf '{"type": "response", "id": "'"$id"'", "command": "get_state", "success": true, "data": {"sessionId": "session_id", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": true}}\n'
                 "#,
             ],
         )

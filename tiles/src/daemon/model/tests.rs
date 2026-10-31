@@ -622,6 +622,24 @@ async fn deleting_a_model_frees_its_files_but_never_the_one_chats_use() {
 }
 
 #[tokio::test]
+async fn a_picked_model_tiles_doesnt_ship_leaves_the_default_in_use() {
+    let server = hub_with_model(Duration::ZERO).await;
+    // what `tiles run` saves for a custom Modelfile
+    let daemon = Daemon::with(&server, tempdir().unwrap(), |models| {
+        models.picked = Picked::Memory(Mutex::new(Some("org/custom-GGUF:Q4_K_M".to_owned())));
+    });
+
+    let (status, _) = daemon
+        .json(
+            "POST",
+            "/v1/tilekit/model/delete",
+            Some(json!({ "model": REPO })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
 async fn a_model_downloading_cant_be_deleted() {
     let server = hub_with_model(Duration::from_millis(500)).await;
     serve_model(&server, OTHER, Duration::from_millis(500)).await;

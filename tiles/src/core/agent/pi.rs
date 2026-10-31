@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use std::{fs, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use uuid::Uuid;
 
 // get_state and new_session answer at once, this only guards against a stuck Pi
 const ANSWER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -132,8 +133,7 @@ impl PiWriter {
 impl PiReader {
     /// Gets current Pi State
     pub async fn get_pi_state(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
-        writer.send_to_pi(json!({"type": "get_state"})).await?;
-        let answer = self.answer(CommandType::GetState).await?;
+        let answer = self.ask(writer, CommandType::GetState).await?;
         let data = answer
             .data
             .filter(|_| answer.success)
@@ -148,19 +148,28 @@ impl PiReader {
 
     /// Creates a new Pi session
     pub async fn create_new_session(&mut self, writer: &mut PiWriter) -> Result<GetStateData> {
-        writer.send_to_pi(json!({"type": "new_session"})).await?;
-        if !self.answer(CommandType::NewSession).await?.success {
+        let answer = self.ask(writer, CommandType::NewSession).await?;
+        // an extension can cancel it
+        if !answer.success || answer.data.is_some_and(|data| data["cancelled"] == true) {
             bail!("Creating new session failed");
         }
         self.get_pi_state(writer).await
     }
 
-    // reads until Pi answers `command`, skipping leftovers like a stopped reply's events
-    async fn answer(&mut self, command: CommandType) -> Result<PiResponseMessage> {
+    // sends `command` and waits for its answer, skipping anything else Pi prints
+    async fn ask(
+        &mut self,
+        writer: &mut PiWriter,
+        command: CommandType,
+    ) -> Result<PiResponseMessage> {
+        let id = Uuid::now_v7().to_string();
+        writer
+            .send_to_pi(json!({"type": command, "id": id}))
+            .await?;
         let read = async {
             while let Some(line) = self.lines.next_line().await? {
                 if let Ok(PiResponse::Response(answer)) = serde_json::from_str(&line)
-                    && answer.command == command
+                    && answer.id.as_deref() == Some(id.as_str())
                 {
                     return Ok(answer);
                 }
@@ -197,25 +206,54 @@ pub fn from_test_command(program: &str, args: &[&str]) -> anyhow::Result<PiAgent
 mod tests {
     use super::from_test_command;
 
-    const STATE: &str = r#"{"type":"response","command":"get_state","success":true,"data":{"sessionId":"s1","model":{"id":"id","name":"model"},"thinkingLevel":"off","isStreaming":false}}"#;
+    // a fake Pi that answers the request it reads with `answers`, where $id is the request's id
+    fn pi(answers: &str) -> super::PiAgent {
+        let script = format!(
+            r#"read request; id=${{request#*'"id":"'}}; id=${{id%%'"'*}}
+printf '%s\n' {answers}"#
+        );
+        from_test_command("sh", &["-c", &script]).unwrap()
+    }
+
+    const STATE: &str = r#"'{"type":"response","id":"'"$id"'","command":"get_state","success":true,"data":{"sessionId":"s1","model":{"id":"id","name":"model"},"thinkingLevel":"off","isStreaming":false}}'"#;
 
     #[tokio::test]
     async fn the_state_is_found_past_what_a_stopped_reply_left() {
-        let script = format!(
-            r#"read request
-printf '%s\n' '{{"type":"agent_settled"}}' '{{"type":"response","command":"abort","success":true}}' '{STATE}'"#
-        );
-        let mut agent = from_test_command("sh", &["-c", &script]).unwrap();
+        let mut agent = pi(&format!(
+            r#"'{{"type":"agent_settled"}}' '{{"type":"response","command":"abort","success":true}}' {STATE}"#
+        ));
+        let state = agent.reader.get_pi_state(&mut agent.writer).await.unwrap();
+        assert_eq!(state.session_id, "s1");
+    }
+
+    #[tokio::test]
+    async fn a_late_answer_to_an_earlier_call_is_skipped() {
+        let mut agent = pi(&format!(
+            r#"'{{"type":"response","id":"earlier","command":"get_state","success":true,"data":{{"sessionId":"old","model":{{"id":"id","name":"model"}},"thinkingLevel":"off","isStreaming":false}}}}' {STATE}"#
+        ));
         let state = agent.reader.get_pi_state(&mut agent.writer).await.unwrap();
         assert_eq!(state.session_id, "s1");
     }
 
     #[tokio::test]
     async fn a_failed_answer_is_an_error_not_a_panic() {
-        let script = r#"read request
-printf '%s\n' '{"type":"response","command":"get_state","success":false}'"#;
-        let mut agent = from_test_command("sh", &["-c", script]).unwrap();
+        let mut agent =
+            pi(r#"'{"type":"response","id":"'"$id"'","command":"get_state","success":false}'"#);
         assert!(agent.reader.get_pi_state(&mut agent.writer).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_new_session_is_an_error() {
+        let mut agent = pi(
+            r#"'{"type":"response","id":"'"$id"'","command":"new_session","success":true,"data":{"cancelled":true}}'"#,
+        );
+        assert!(
+            agent
+                .reader
+                .create_new_session(&mut agent.writer)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

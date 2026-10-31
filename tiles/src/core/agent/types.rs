@@ -167,6 +167,7 @@ pub enum AsstMsgEventType {
 }
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PiResponseMessage {
+    pub id: Option<String>,
     pub command: CommandType,
     pub success: bool,
     pub data: Option<Value>,

@@ -420,8 +420,8 @@ pub fn save_config_with_provider(config: &Table, provider: impl ConfigProvider) 
     let config_path = tiles_config_dir.join("config.toml");
     let tmp_path = tiles_config_dir.join("config.tmp.toml");
     fs::write(&tmp_path, config.to_string())?;
-    fs::copy(&tmp_path, &config_path)?;
-    fs::remove_file(tmp_path)?;
+    // readers never see half a file
+    fs::rename(&tmp_path, &config_path)?;
     Ok(())
 }
 
@@ -432,8 +432,8 @@ fn save_root_config(config: &RootConfig) -> Result<()> {
     let config_path = tiles_config_dir.join("config.toml");
     let tmp_path = tiles_config_dir.join("config.tmp.toml");
     fs::write(&tmp_path, toml::to_string(config)?)?;
-    fs::copy(&tmp_path, &config_path)?;
-    fs::remove_file(tmp_path)?;
+    // readers never see half a file
+    fs::rename(&tmp_path, &config_path)?;
     Ok(())
 }
 /// Get the apt path where the model in the system.
