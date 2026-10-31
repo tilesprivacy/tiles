@@ -1,0 +1,24 @@
+info:
+  name: select-model
+  type: http
+  seq: 7
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/model/select"
+  body:
+    type: json
+    data: |-
+      {
+        "model": "unsloth/gemma-4-E2B-it-GGUF:Q4_K_M"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs: The model new chats use. It has to be one of Tiles' own models, already downloaded

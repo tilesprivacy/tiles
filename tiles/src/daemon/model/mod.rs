@@ -23,7 +23,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::future::join_all;
 use serde::Deserialize;
@@ -31,6 +31,7 @@ use serde_json::json;
 use tilekit::modelfile::split_model_spec;
 use tokio::sync::broadcast::{self, error::RecvError};
 
+pub use bundled::picked_modelfile;
 pub use download::{DownloadState, ModelChange, ModelDownload};
 pub use pull::pull;
 
@@ -39,7 +40,8 @@ use crate::{
     repl::get_default_modelfile,
     utils::{
         config::{
-            ConfigProvider, DefaultProvider, get_config_json, get_or_create_model_download_path,
+            ConfigProvider, DefaultProvider, get_current_model, get_or_create_model_download_path,
+            update_current_model,
         },
         hf_model_downloader::{DEFAULT_QUANT, Hub},
     },
@@ -62,6 +64,8 @@ pub fn model_router() -> Router<Arc<AppState>> {
             "/v1/tilekit/model/download",
             get(progress).post(start).delete(pause),
         )
+        .route("/v1/tilekit/model/select", post(select))
+        .route("/v1/tilekit/model/delete", post(delete))
 }
 
 /// A model as `org/name:quant`
@@ -111,8 +115,14 @@ pub struct Models {
     default: Option<Spec>,
     downloads: Mutex<HashMap<Spec, Arc<ModelDownload>>>,
     changes: broadcast::Sender<ModelChange>,
-    // the model `tiles run` last ran
-    current_model: fn() -> Option<String>,
+    picked: Picked,
+}
+
+// the model chats use, picked in the UI or last run by `tiles run`
+enum Picked {
+    // saved in config.toml, same as `tiles run`
+    Config,
+    Memory(Mutex<Option<String>>),
 }
 
 impl Models {
@@ -125,7 +135,7 @@ impl Models {
             default,
             downloads: Mutex::new(HashMap::new()),
             changes: broadcast::Sender::new(CHANGES_KEPT),
-            current_model: || None,
+            picked: Picked::Memory(Mutex::default()),
         }
     }
 
@@ -135,10 +145,7 @@ impl Models {
             .inspect_err(|err| log::warn!("No default model to download: {err:#}"))
             .ok();
         Ok(Self {
-            current_model: || {
-                let config = get_config_json().ok()?;
-                config["model"]["current"].as_str().map(str::to_owned)
-            },
+            picked: Picked::Config,
             ..Self::new(
                 Hub::from_env()?,
                 get_or_create_model_download_path()?,
@@ -173,6 +180,39 @@ impl Models {
             ))
         });
         download.clone()
+    }
+
+    // every quant of `repo` known so far, sorted for a fixed lock order
+    fn quants(&self, repo: &str) -> Vec<Arc<ModelDownload>> {
+        let downloads = self.downloads.lock().expect("model downloads lock");
+        let mut quants: Vec<_> = downloads
+            .iter()
+            .filter(|(spec, _)| spec.repo == repo)
+            .map(|(_, download)| download.clone())
+            .collect();
+        quants.sort_by(|a, b| a.spec().quant.cmp(&b.spec().quant));
+        quants
+    }
+
+    fn current(&self) -> Option<Spec> {
+        let picked = match &self.picked {
+            Picked::Config => get_current_model(),
+            Picked::Memory(picked) => picked.lock().expect("picked model lock").clone(),
+        };
+        // only Tiles' own models, like agent startup
+        Spec::parse(&picked?)
+            .ok()
+            .filter(|spec| bundled::modelfile_for(&self.modelfiles, spec).is_some())
+    }
+
+    fn pick(&self, spec: &Spec) -> anyhow::Result<()> {
+        match &self.picked {
+            Picked::Config => update_current_model(&spec.to_string()),
+            Picked::Memory(picked) => {
+                *picked.lock().expect("picked model lock") = Some(spec.to_string());
+                Ok(())
+            }
+        }
     }
 
     /// Downloads that are running, paused or failed
@@ -280,6 +320,54 @@ async fn pause(
 ) -> Result<impl IntoResponse, AppError> {
     let download = state.models.get(which.model.as_deref())?;
     Ok(ApiResponse::success(download.pause().await?))
+}
+
+// only Tiles' own models, they come with a Modelfile
+async fn select(
+    State(state): State<Arc<AppState>>,
+    ApiJson(which): ApiJson<Which>,
+) -> Result<impl IntoResponse, AppError> {
+    let download = state.models.get(which.model.as_deref())?;
+    let spec = download.spec().clone();
+    if bundled::modelfile_for(&state.models.modelfiles, &spec).is_none() {
+        return Err(AppError::NotFound(format!(
+            "Tiles has no Modelfile for {spec}"
+        )));
+    }
+    if !download.status().await?.is_done() {
+        return Err(AppError::Conflict(format!(
+            "Download {spec} before using it"
+        )));
+    }
+    state
+        .models
+        .pick(&spec)
+        .map_err(|err| AppError::InternalServerError(format!("{err:#}")))?;
+    Ok(ApiResponse::success(json!({ "model": spec.to_string() })))
+}
+
+// never the model chats use
+async fn delete(
+    State(state): State<Arc<AppState>>,
+    ApiJson(which): ApiJson<Which>,
+) -> Result<impl IntoResponse, AppError> {
+    let download = state.models.get(which.model.as_deref())?;
+    let spec = download.spec().clone();
+    // quants of one repo share its folder
+    if let Some(in_use) = state
+        .models
+        .current()
+        .or_else(|| state.models.default.clone())
+        && in_use.repo == spec.repo
+    {
+        return Err(AppError::Conflict(format!(
+            "Chats use {in_use}, pick another model before deleting {spec}"
+        )));
+    }
+    let freed = download.delete(&state.models.quants(&spec.repo)).await?;
+    Ok(ApiResponse::success(
+        json!({ "model": spec.to_string(), "freed": freed }),
+    ))
 }
 
 // closing it only pauses the download with `pause_on_close`

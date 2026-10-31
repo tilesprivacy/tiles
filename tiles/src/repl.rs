@@ -13,10 +13,11 @@ use crate::core::chats::{
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::Dbconn;
-use crate::daemon::atproto::sign_in;
+use crate::daemon::{atproto::sign_in, model::picked_modelfile};
 use crate::utils::config::{
-    ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_inference_config,
-    get_memory_path, get_model_cache, update_current_model, update_llama_config,
+    ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
+    get_inference_config, get_memory_path, get_model_cache, update_current_model,
+    update_llama_config,
 };
 use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Context, Result, anyhow};
@@ -123,18 +124,27 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
         (modelfile, default_modelfile)
     } else {
         let default_modelfile_path = get_default_modelfile(DefaultProvider)?;
-        let default_modelfile = match tilekit::modelfile::parse_from_file(
-            default_modelfile_path
-                .to_str()
-                .expect("default_modelfile_path: Failed PathBuf to str"),
-        ) {
+        // the model picked in the UI, or the one `tiles run` ran last, when it's one of Tiles' own
+        let picked_path = default_modelfile_path
+            .parent()
+            .and_then(|modelfiles| picked_modelfile(modelfiles, &get_current_model()?));
+        let parse = |path: &PathBuf| tilekit::modelfile::parse_from_file(&path.to_string_lossy());
+        let default_modelfile = match parse(&default_modelfile_path) {
             Ok(mf) => mf,
             Err(err) => {
                 eprintln!("Invalid default Modelfile due to {:?}", err);
                 return Ok(());
             }
         };
-        (default_modelfile.clone(), default_modelfile)
+        let modelfile = match picked_path.as_ref().map(parse) {
+            Some(Ok(mf)) => mf,
+            Some(Err(err)) => {
+                eprintln!("Invalid Modelfile for the picked model due to {:?}", err);
+                return Ok(());
+            }
+            None => default_modelfile.clone(),
+        };
+        (modelfile, default_modelfile)
     };
 
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
