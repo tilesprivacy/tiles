@@ -57,8 +57,28 @@ pub struct LlamaConfig {
     pub n_cpu_moe: Option<u32>,
     /// Enable flash attention (`--flash-attn`).
     pub flash_attn: Option<bool>,
-    /// Disable memory-mapping the GGUF (`--no-mmap`).
-    pub no_mmap: Option<bool>,
+    /// How llama.cpp loads the model (`--load-mode`).
+    pub load_mode: Option<LoadMode>,
+}
+
+/// llama.cpp's `--load-mode`, with llama.cpp's own value names
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LoadMode {
+    /// mmap, unless a device doesn't support it (llama.cpp's default)
+    Auto,
+    /// read the model into memory
+    None,
+    /// memory-map the model
+    Mmap,
+    /// keep the model in RAM, never swapped out
+    Mlock,
+    /// mmap, and keep the model in RAM
+    #[serde(rename = "mmap+mlock")]
+    #[value(name = "mmap+mlock")]
+    MmapMlock,
+    /// DirectIO, where the system has it
+    Dio,
 }
 
 impl LlamaConfig {
@@ -78,7 +98,7 @@ impl LlamaConfig {
             && self.mtp.is_none()
             && self.n_cpu_moe.is_none()
             && self.flash_attn.is_none()
-            && self.no_mmap.is_none()
+            && self.load_mode.is_none()
     }
 }
 
@@ -677,7 +697,7 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     llama_config.mtp = config.mtp.or(llama_config.mtp);
     llama_config.n_cpu_moe = config.n_cpu_moe.or(llama_config.n_cpu_moe);
     llama_config.flash_attn = config.flash_attn.or(llama_config.flash_attn);
-    llama_config.no_mmap = config.no_mmap.or(llama_config.no_mmap);
+    llama_config.load_mode = config.load_mode.or(llama_config.load_mode);
     root_config.llama = Some(llama_config.with_defaults());
     save_root_config(&root_config)
 }
@@ -711,6 +731,39 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use tempfile::tempdir;
+
+    // old configs still have no_mmap, and nothing migrates them. the next save drops it
+    #[test]
+    fn a_config_with_retired_keys_still_loads() {
+        let config: RootConfig = toml::from_str(
+            r#"
+                [llama]
+                context_length = 32768
+                no_mmap = true
+            "#,
+        )
+        .unwrap();
+
+        let llama = config.llama.unwrap();
+        assert_eq!(llama.context_length, Some(32768));
+        assert_eq!(llama.load_mode, None);
+    }
+
+    #[test]
+    fn load_mode_takes_llama_cpp_names_only() {
+        for (name, mode) in [
+            ("auto", LoadMode::Auto),
+            ("none", LoadMode::None),
+            ("mmap", LoadMode::Mmap),
+            ("mlock", LoadMode::Mlock),
+            ("mmap+mlock", LoadMode::MmapMlock),
+            ("dio", LoadMode::Dio),
+        ] {
+            let config: LlamaConfig = toml::from_str(&format!("load_mode = \"{name}\"")).unwrap();
+            assert_eq!(config.load_mode, Some(mode));
+        }
+        assert!(toml::from_str::<LlamaConfig>("load_mode = \"no-mmap\"").is_err());
+    }
 
     fn expected_pi_provider_json(model_name: &str, endpoint_base_url: &str) -> Value {
         let mut model = json!({
@@ -803,8 +856,8 @@ mod tests {
         // --n-cpu-moe turns off llama.cpp's --fit for every model
         assert_eq!(filled.n_cpu_moe, None);
         assert_eq!(filled.flash_attn, Some(true));
-        // llama.cpp b11005 dropped --no-mmap, a default would break every load
-        assert_eq!(filled.no_mmap, None);
+        // llama.cpp picks how to load the model
+        assert_eq!(filled.load_mode, None);
 
         let mine = LlamaConfig {
             context_length: Some(8192),
