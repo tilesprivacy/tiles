@@ -51,7 +51,7 @@ def test_get_llama_config_returns_present_llama_values():
             "batch_size": 128,
             "n_cpu_moe": 12,
             "flash_attn": True,
-            "no_mmap": True,
+            "load_mode": "auto",
         }
     }
 
@@ -63,7 +63,7 @@ def test_get_llama_config_returns_present_llama_values():
             "batch_size": 128,
             "n_cpu_moe": 12,
             "flash_attn": True,
-            "no_mmap": True,
+            "load_mode": "auto",
         }
 
 
