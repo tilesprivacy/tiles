@@ -1,12 +1,14 @@
 <script lang="ts">
   import Chevron from "./Chevron.svelte";
+  import Info from "./Info.svelte";
 
   interface Props {
     title: string;
+    info?: string;
     onback: () => void;
   }
 
-  let { title, onback }: Props = $props();
+  let { title, info, onback }: Props = $props();
 </script>
 
 <div class="navbar">
@@ -14,10 +16,12 @@
     <Chevron dir="back" />
   </button>
   <span class="navbar__title">{title}</span>
+  {#if info}<Info text={info} />{/if}
 </div>
 
 <style>
   .navbar {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 8px;

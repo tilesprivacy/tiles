@@ -7986,6 +7986,7 @@ dependencies = [
 name = "tiles-menubar"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.10.1",
  "data-encoding",
  "dispatch2",
  "objc2-quartz-core",

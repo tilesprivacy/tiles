@@ -1,6 +1,6 @@
 <script lang="ts">
   interface Props {
-    dir?: "forward" | "back" | "up";
+    dir?: "forward" | "back" | "up" | "down";
   }
 
   let { dir = "forward" }: Props = $props();
@@ -20,7 +20,9 @@
   .chevron {
     flex: none;
     color: var(--row-mark, var(--slate));
-    transition: color var(--dur-state) ease-out;
+    transition:
+      color var(--dur-state) ease-out,
+      transform var(--dur-state) ease-out;
   }
 
   .chevron[data-dir="back"] {
@@ -30,5 +32,9 @@
 
   .chevron[data-dir="up"] {
     transform: rotate(-90deg);
+  }
+
+  .chevron[data-dir="down"] {
+    transform: rotate(90deg);
   }
 </style>

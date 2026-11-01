@@ -5,7 +5,6 @@
   import Avatar from "../lib/Avatar.svelte";
   import CopyMark from "../lib/CopyMark.svelte";
   import Navbar from "../lib/Navbar.svelte";
-  import Note from "../lib/Note.svelte";
   import OpenMark from "../lib/OpenMark.svelte";
   import Row from "../lib/Row.svelte";
   import Zone from "../lib/Zone.svelte";
@@ -39,7 +38,11 @@
   const home = $derived(dataDir?.replace(/^\/Users\/[^/]+/, "~") ?? "—");
 </script>
 
-<Navbar title="Tiles Account" onback={() => nav.pop()} />
+<Navbar
+  title="Tiles Account"
+  info="Your identity, generated on this Mac. It links your devices and keeps your chats end-to-end encrypted."
+  onback={() => nav.pop()}
+/>
 
 <!-- no label, an avatar beside a name does not need one told -->
 <Zone>
@@ -48,8 +51,6 @@
       <Avatar nickname={local?.nickname ?? "?"} size={26} />
     {/snippet}
   </Row>
-  <!-- the sub said what the name was, this says what the account is -->
-  <Note>This Tiles account is generated and saved locally</Note>
 </Zone>
 
 <Zone label="Decentralized ID">
