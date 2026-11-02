@@ -3,7 +3,7 @@
 use std::{fmt, path::Path, time::Duration};
 
 use anyhow::Result;
-use reqwest::{StatusCode, header::RANGE};
+use reqwest::{RequestBuilder, Response, StatusCode, header::RANGE};
 use sha2::{Digest, Sha256};
 use tokio::{
     fs,
@@ -11,11 +11,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{
-    DownloadEvent, DownloadPlan, ModelFile,
-    cache::file_len,
-    hub::{Hub, check},
-};
+use super::{DownloadEvent, cache::file_len};
 
 // retried after 1, 2, 4, 8 and 16 seconds
 const RETRIES: u32 = 5;
@@ -47,11 +43,17 @@ fn is_transient(err: &anyhow::Error) -> bool {
         })
 }
 
-// the file's SHA-256, or `None` when cancelled
-pub(super) async fn fetch(
-    hub: &Hub,
-    plan: &DownloadPlan,
-    file: &ModelFile,
+/// One file to download. `check` turns a refusal into a clear error
+pub struct Remote<'a> {
+    pub name: &'a str,
+    pub size: u64,
+    pub request: &'a (dyn Fn() -> RequestBuilder + Sync),
+    pub check: &'a (dyn Fn(Response) -> Result<Response> + Sync),
+}
+
+/// Downloads into `part`, continuing what's there. Returns the file's SHA-256, or `None` when cancelled
+pub async fn fetch(
+    file: &Remote<'_>,
     part: &Path,
     cancel: &CancellationToken,
     on_event: &mut impl FnMut(DownloadEvent),
@@ -59,7 +61,7 @@ pub(super) async fn fetch(
     let mut retries = 0;
     loop {
         let before = file_len(part).await;
-        let err = match fetch_once(hub, plan, file, part, cancel, on_event).await {
+        let err = match fetch_once(file, part, cancel, on_event).await {
             Ok(fetched) => return Ok(fetched),
             Err(err) => err,
         };
@@ -80,9 +82,7 @@ pub(super) async fn fetch(
 }
 
 async fn fetch_once(
-    hub: &Hub,
-    plan: &DownloadPlan,
-    file: &ModelFile,
+    file: &Remote<'_>,
     part: &Path,
     cancel: &CancellationToken,
     on_event: &mut impl FnMut(DownloadEvent),
@@ -100,7 +100,7 @@ async fn fetch_once(
     // hash what's on disk first, so the end needs no second pass
     let mut hasher = if offset > 0 {
         on_event(DownloadEvent::Verifying {
-            file: file.name.clone(),
+            file: file.name.to_owned(),
         });
         hash_file(part).await?
     } else {
@@ -110,16 +110,13 @@ async fn fetch_once(
         return Ok(Some(hex(hasher)));
     }
 
-    let mut request = hub.get(&format!(
-        "{}/resolve/{}/{}",
-        plan.repo, plan.commit, file.name
-    ));
+    let mut request = (file.request)();
     if offset > 0 {
         request = request.header(RANGE, format!("bytes={offset}-"));
     }
     let mut res = tokio::select! {
         () = cancel.cancelled() => return Ok(None),
-        res = request.send() => check(res?, &plan.repo)?,
+        res = request.send() => (file.check)(res?)?,
     };
     // the server ignored the range
     if offset > 0 && res.status() != StatusCode::PARTIAL_CONTENT {
