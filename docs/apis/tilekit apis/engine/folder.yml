@@ -1,0 +1,15 @@
+info:
+  name: engine
+  type: folder
+  seq: 9
+
+request:
+  auth: inherit
+
+docs:
+  content: |-
+    Engine apis are about the llama.cpp build Tiles runs models with.
+
+    - An engine is `cuda-13`, `cuda-12`, `vulkan`, `cpu` or, on macOS, `metal`
+    - Tiles picks one for the computer's GPU and driver, unless the user picks another
+  type: text/markdown

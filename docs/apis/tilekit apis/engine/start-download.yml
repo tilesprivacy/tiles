@@ -1,0 +1,26 @@
+info:
+  name: start-download
+  type: http
+  seq: 3
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/engine/download"
+  body:
+    type: json
+    data: "{}"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Downloads, unpacks and checks the engine Tiles runs. The check runs `llama-server --list-devices` and needs the GPU in its list, which can take a few minutes the first time with Vulkan. When the check fails, the next engine is tried: CUDA 13, CUDA 12, Vulkan, then the CPU.
+
+    Answers with the state right away. It's `done` when the engine is already there, and 507 when the disk is too full.
+  type: text/markdown

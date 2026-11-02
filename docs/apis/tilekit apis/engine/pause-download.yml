@@ -1,0 +1,21 @@
+info:
+  name: pause-download
+  type: http
+  seq: 5
+
+http:
+  method: DELETE
+  url: "{{tilekit_base_url}}/engine/download"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Pauses the install. Starting it again continues the download. 404 when nothing is downloading
+  type: text/markdown

@@ -33,6 +33,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 
 pub use bundled::picked_modelfile;
 pub use download::{DownloadState, ModelChange, ModelDownload};
+pub(crate) use download::{free_space, gb};
 pub use model_fetch::pull;
 
 use crate::{
@@ -53,7 +54,7 @@ const SPARE_ROOM: u64 = 1_000_000_000;
 const CHANGES_KEPT: usize = 64;
 
 // needed for `pause_on_close`, a web page can't send it without a CORS preflight
-pub(super) const CLIENT_HEADER: &str = "x-tiles-client";
+pub(crate) const CLIENT_HEADER: &str = "x-tiles-client";
 
 pub fn model_router() -> Router<Arc<AppState>> {
     Router::new()

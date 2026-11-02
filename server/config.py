@@ -24,7 +24,8 @@ MEMORY_PATH = os.path.expanduser("~") + "/tiles_memory"
 # avoid a localhost round-trip on every request; config changes propagate within
 # this TTL. Keep small so user edits to config.toml pick up quickly.
 _LLAMA_CONFIG_TTL_S = 1.0
-_llama_config_cache: dict[str, Any] | None = None
+# the [llama] table and the llama-server path the daemon picked
+_llama_config_cache: tuple[dict[str, Any], str | None] | None = None
 _llama_config_cache_ts: float = 0.0
 
 # Canonical llama config field set. MUST stay in sync with the Rust
@@ -95,6 +96,15 @@ def _read_llama_config_from_toml() -> dict:
 
 
 def get_llama_config() -> dict:
+    return _cached_config()[0]
+
+
+def get_llama_server() -> str | None:
+    """The llama-server of the engine the daemon installed, None for the one bundled with Tiles."""
+    return _cached_config()[1]
+
+
+def _cached_config() -> tuple[dict[str, Any], str | None]:
     global _llama_config_cache, _llama_config_cache_ts
     now = time.monotonic()
     if (
@@ -118,7 +128,7 @@ def _reset_llama_config_cache() -> None:
     _llama_config_cache_ts = 0.0
 
 
-def _fetch_llama_config() -> dict:
+def _fetch_llama_config() -> tuple[dict[str, Any], str | None]:
     try:
         response = httpx.get(f"http://127.0.0.1:{DAEMON_PORT}/config", timeout=2)
         response.raise_for_status()
@@ -127,11 +137,11 @@ def _fetch_llama_config() -> dict:
         # not "keep looking in ~/.config".
         llama = config.get("llama") or {}
         logger.info("Loaded llama config from Tiles daemon")
-        return LlamaConfig(**llama).model_dump(exclude_none=True)
+        return LlamaConfig(**llama).model_dump(exclude_none=True), config.get("llama_server")
     except httpx.HTTPError:
         pass
 
-    return _read_llama_config_from_toml()
+    return _read_llama_config_from_toml(), None
 
 
 # pid file the server writes for itself once it has PORT. the daemon reads it to

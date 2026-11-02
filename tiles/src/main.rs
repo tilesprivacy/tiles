@@ -123,6 +123,10 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
+
+    /// Reads the NVIDIA driver libraries for engine detection, in a process of its own
+    #[command(hide = true)]
+    NvidiaProbe,
 }
 
 #[derive(Debug, Subcommand)]
@@ -496,6 +500,10 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         commands::uninstall_tiles(*all).await?;
         return Ok(());
     }
+    if let Some(Commands::NvidiaProbe) = &cli.command {
+        tiles_engine::nvidia_probe();
+        return Ok(());
+    }
 
     let daemon_port = get_or_set_daemon_port();
     log::info!("DAEMON PORT: {}", daemon_port);
@@ -667,6 +675,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             }
         },
         Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,
+        Some(Commands::NvidiaProbe) => tiles_engine::nvidia_probe(),
         Some(Commands::System(SystemCommands::Network(network_args))) => {
             match network_args.command {
                 NetworkCommands::Start => {

@@ -9,6 +9,7 @@ from server.config import (
     PORT,
     LlamaConfig,
     get_llama_config,
+    get_llama_server,
     pid_path,
     remove_pid_file,
     write_pid_file,
@@ -67,6 +68,14 @@ def test_get_llama_config_returns_present_llama_values():
         }
 
 
+def test_the_daemon_names_the_engines_llama_server():
+    response = Mock()
+    response.json.return_value = {"llama": None, "llama_server": "/engines/vulkan-b1/llama-server"}
+
+    with patch("server.config.httpx.get", return_value=response):
+        assert get_llama_server() == "/engines/vulkan-b1/llama-server"
+
+
 def test_get_llama_config_falls_back_to_toml_when_daemon_down():
     with (
         patch("server.config.httpx.get", side_effect=httpx.ConnectError("down")),
@@ -76,6 +85,8 @@ def test_get_llama_config_falls_back_to_toml_when_daemon_down():
         ),
     ):
         assert get_llama_config() == {"gpu_layers": 4}
+        # without the daemon, the bundled llama-server
+        assert get_llama_server() is None
 
 
 def test_canonical_field_list_matches_python_model():

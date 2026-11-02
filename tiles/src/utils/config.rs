@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::SystemTime;
 use std::{env, fs};
+use tiles_engine::Engine;
 use toml::Table;
 
 use crate::core::agent::types::{CompactionSettings, PiSettings};
@@ -108,6 +109,12 @@ pub struct UiConfig {
     pub menubar: Option<bool>,
 }
 
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct EngineConfig {
+    /// The llama.cpp build picked by hand, like "vulkan". Tiles picks one when it's unset
+    pub pick: Option<String>,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct RootConfig {
     #[serde(rename = "root-user")]
@@ -117,6 +124,7 @@ struct RootConfig {
     pub inference: Option<InferenceConfig>,
     pub llama: Option<LlamaConfig>,
     pub ui: Option<UiConfig>,
+    pub engine: Option<EngineConfig>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -672,6 +680,20 @@ pub fn get_ui_config() -> Result<UiConfig> {
 pub fn get_llama_config() -> Result<LlamaConfig> {
     let root_config = get_or_create_root_config()?;
     Ok(root_config.llama.unwrap_or_default().with_defaults())
+}
+
+/// The engine picked by hand, `None` for auto or a name this Tiles doesn't know
+pub fn get_engine_pick() -> Option<Engine> {
+    let pick = get_or_create_root_config().ok()?.engine?.pick?;
+    Engine::from_name(&pick)
+}
+
+pub fn set_engine_pick(pick: Option<Engine>) -> Result<()> {
+    let mut root_config = get_or_create_root_config()?;
+    root_config.engine = Some(EngineConfig {
+        pick: pick.map(|engine| engine.name().to_owned()),
+    });
+    save_root_config(&root_config)
 }
 
 /// The model chats use, last picked in the UI or run by `tiles run`

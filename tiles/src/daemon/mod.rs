@@ -15,6 +15,7 @@ use crate::{
         agent::agent_router,
         atproto::atproto_router,
         authz::authz_router,
+        engine::engine_router,
         model::model_router,
         net::{NetworkState, network_router, start_network_cli},
         server::server_router,
@@ -58,6 +59,7 @@ pub mod account;
 pub mod agent;
 pub mod atproto;
 pub mod authz;
+pub mod engine;
 mod job;
 pub mod model;
 pub mod net;
@@ -96,6 +98,7 @@ pub struct AppState {
     pub ui: Arc<Ui>,
     pub web_ui: web::WebUiState,
     pub models: model::Models,
+    pub engines: Arc<engine::Engines>,
     pub network_state: AsyncRwLock<Option<NetworkState>>,
 }
 
@@ -126,6 +129,14 @@ impl AppState {
                 std::env::temp_dir(),
                 std::env::temp_dir(),
                 None,
+            ),
+            engines: Arc::new(
+                engine::Engines::new(
+                    std::env::temp_dir().join("tiles-test-engines"),
+                    "http://127.0.0.1:9",
+                    &tiles_engine::BUILDS,
+                )
+                .expect("test engines"),
             ),
             network_state: None.into(),
         }
@@ -325,6 +336,7 @@ fn tilekit_router() -> Router<Arc<AppState>> {
         .merge(session_router())
         .merge(atproto_router())
         .merge(model_router())
+        .merge(engine_router())
         .merge(authz_router())
         .merge(network_router())
         .route("/v1/tilekit/ui", get(web::ui_state))
@@ -493,6 +505,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
     let ui = Ui::new();
     let (web_ui_state, web_ui_listener) = web::bind().await;
     let models = model::Models::for_daemon()?;
+    let engines = Arc::new(engine::Engines::for_daemon()?);
 
     let state = AppState {
         shutdown_sender: shutdown_tx,
@@ -506,6 +519,7 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         ui: ui.clone(),
         web_ui: web_ui_state,
         models,
+        engines,
         network_state: None.into(),
     };
 
@@ -607,6 +621,12 @@ pub async fn shutdown_all(state: Arc<AppState>) {
         .is_err()
     {
         log::warn!("Model downloads did not pause in time");
+    }
+    if tokio::time::timeout(MODEL_PAUSE_TIMEOUT, state.engines.pause())
+        .await
+        .is_err()
+    {
+        log::warn!("The engine download did not pause in time");
     }
     // a stuck inference server must not hold the shutdown open
     match tokio::time::timeout(
@@ -713,10 +733,14 @@ async fn get_model_cache_path(
     })
 }
 
-/// Gets the contents of config.toml in json
-async fn get_config(State(_state): State<Arc<AppState>>) -> Result<String, AppError> {
+/// Gets the contents of config.toml in json, with the llama-server replies run on
+async fn get_config(State(state): State<Arc<AppState>>) -> Result<String, AppError> {
     get_config_json()
-        .and_then(|config| serde_json::to_string(&config).map_err(Into::into))
+        .and_then(|mut config| {
+            // null for the one that comes with Tiles
+            config["llama_server"] = json!(state.engines.server());
+            serde_json::to_string(&config).map_err(Into::into)
+        })
         .map_err(|e| AppError::InternalServerError(format!("Failed to read config.toml: {e}")))
 }
 

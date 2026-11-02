@@ -16,7 +16,7 @@ from typing import Any
 
 import httpx
 
-from ...config import LLAMA_SERVER_HOST, LLAMA_SERVER_PORT
+from ...config import LLAMA_SERVER_HOST, LLAMA_SERVER_PORT, get_llama_server
 from .gguf import find_mtp_gguf_file
 
 logger = logging.getLogger("app")
@@ -54,6 +54,11 @@ def resolve_llama_server_binary() -> str:
     if env_bin and Path(env_bin).is_file():
         return env_bin
 
+    # the engine the daemon downloaded for this computer
+    engine_bin = get_llama_server()
+    if engine_bin and Path(engine_bin).is_file():
+        return engine_bin
+
     server_root = Path(__file__).resolve().parents[2]
     for candidate in (
         server_root / "bin" / "llama-server",
@@ -73,20 +78,20 @@ def resolve_llama_server_binary() -> str:
     )
 
 
-def _config_key(llama_config: dict[str, Any]) -> str:
-
-    return json.dumps(llama_config, sort_keys=True, default=str)
+def _config_key(llama_config: dict[str, Any], binary: str) -> str:
+    # a different engine restarts llama-server, like a changed flag
+    return json.dumps({"config": llama_config, "binary": binary}, sort_keys=True, default=str)
 
 
 def build_llama_server_command(
-    gguf_path: Path, llama_config: dict[str, Any]
+    gguf_path: Path, llama_config: dict[str, Any], binary: str | None = None
 ) -> list[str]:
     """Build the llama-server argv from Tiles config.
 
     Only flags explicitly set in ``llama_config`` are forwarded; unset values
     are left to llama-server's own defaults.
     """
-    binary = resolve_llama_server_binary()
+    binary = binary or resolve_llama_server_binary()
     # Always bind to Tiles' llama-server port (default 18080) so we don't
     # collide with a stock llama-server on 8080.
     cmd = [
@@ -296,7 +301,8 @@ def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
 
     gguf_path = Path(os.path.abspath(gguf_path))
     resolved_gguf = gguf_path.resolve()
-    key = _config_key(llama_config)
+    binary = resolve_llama_server_binary()
+    key = _config_key(llama_config, binary)
     with _ensure_lock:
         # Fresh call: drop warnings from any previous spawn so callers only
         # ever see warnings from this invocation.
@@ -322,7 +328,7 @@ def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
                 gpu_layers,
             )
 
-        cmd = build_llama_server_command(gguf_path, llama_config)
+        cmd = build_llama_server_command(gguf_path, llama_config, binary)
 
         logger.info("Starting llama-server: %s", " ".join(cmd))
         env = os.environ.copy()
