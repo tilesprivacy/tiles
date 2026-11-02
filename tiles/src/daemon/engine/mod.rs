@@ -1,5 +1,6 @@
 //! APIs for the llama.cpp build Tiles runs models with
 
+mod engine_fetch;
 mod install;
 
 use std::{env, sync::Arc};
@@ -18,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tiles_engine::{BUILDS, Engine, Hardware, auto, choices, detect, engine_to_run};
 
+pub use engine_fetch::offer;
 pub use install::{Engines, InstallState};
 
 use crate::{

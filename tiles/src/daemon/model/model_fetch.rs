@@ -63,7 +63,7 @@ pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
     bail!("The daemon closed the download before it finished")
 }
 
-async fn answer<T: DeserializeOwned>(res: reqwest::Response) -> Result<T> {
+pub(crate) async fn answer<T: DeserializeOwned>(res: reqwest::Response) -> Result<T> {
     let ok = res.status().is_success();
     let mut body: Value = res
         .json()
@@ -80,7 +80,7 @@ async fn answer<T: DeserializeOwned>(res: reqwest::Response) -> Result<T> {
     Ok(serde_json::from_value(body["data"].take())?)
 }
 
-fn download_bar(total: u64, done: u64) -> ProgressBar {
+pub(crate) fn download_bar(total: u64, done: u64) -> ProgressBar {
     let bar = ProgressBar::with_draw_target(Some(total), ProgressDrawTarget::hidden())
         .with_position(done)
         .with_style(bar_style(
@@ -94,7 +94,7 @@ fn download_bar(total: u64, done: u64) -> ProgressBar {
 }
 
 // the last jump isn't a real speed, so only the size is shown
-fn finish(bar: &ProgressBar) {
+pub(crate) fn finish(bar: &ProgressBar) {
     bar.set_style(bar_style("{decimal_total_bytes:.dim}"));
     bar.finish();
 }
