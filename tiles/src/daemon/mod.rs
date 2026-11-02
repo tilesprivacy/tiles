@@ -58,6 +58,7 @@ pub mod account;
 pub mod agent;
 pub mod atproto;
 pub mod authz;
+mod job;
 pub mod model;
 pub mod net;
 pub mod server;

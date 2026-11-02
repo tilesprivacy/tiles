@@ -2,7 +2,7 @@
 
 mod bundled;
 mod download;
-mod pull;
+mod model_fetch;
 #[cfg(test)]
 mod tests;
 
@@ -33,7 +33,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 
 pub use bundled::picked_modelfile;
 pub use download::{DownloadState, ModelChange, ModelDownload};
-pub use pull::pull;
+pub use model_fetch::pull;
 
 use crate::{
     daemon::{ApiJson, ApiResponse, AppError, AppState},
