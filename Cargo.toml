@@ -1,12 +1,14 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/engine",
     "tilekit",
     "tiles",
     "apps/menubar/src-tauri",
 ]
 
 default-members = [
+    "crates/engine",
     "tilekit",
     "tiles",
 ]
