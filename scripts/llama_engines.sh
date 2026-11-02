@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Writes the llama.cpp builds Tiles downloads on Linux to crates/engine/src/engines.json,
+# Writes the llama.cpp builds Tiles downloads on Linux to crates/tiles-engine/src/engines.json,
 # for the llama.cpp release pinned in toolchain.toml. Run it after changing that pin.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${ROOT}/crates/engine/src/engines.json"
+OUT="${ROOT}/crates/tiles-engine/src/engines.json"
 TAG=$(grep '^llama.cpp' "${ROOT}/toolchain.toml" | head -1 | awk -F'"' '{print $2}')
 API_JSON="$(curl -fsSL "https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${TAG}")"
 
