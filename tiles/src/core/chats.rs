@@ -1306,7 +1306,7 @@ pub mod tests {
         User {
             id: Uuid::now_v7().to_string(),
             user_id: String::from("did"),
-            username: String::from("nickname"),
+            username: Some(String::from("nickname")),
             account_type: ACCOUNT::LOCAL,
             active_profile: true,
             root: true,
@@ -1324,7 +1324,7 @@ pub mod tests {
         User {
             id: Uuid::now_v7().to_string(),
             user_id: String::from(user_id),
-            username: String::from("nickname"),
+            username: Some(String::from("nickname")),
             account_type: ACCOUNT::LOCAL,
             active_profile: true,
             root: true,

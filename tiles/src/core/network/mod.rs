@@ -80,7 +80,7 @@ impl NetworkMessage {
     ) -> Self {
         Self {
             from_did: user.user_id.clone(),
-            from_nickname: user.username.clone(),
+            from_nickname: user.username.clone().unwrap_or("".to_string()),
             is_online,
             body,
             nonce: get_random_bytes(),
@@ -165,7 +165,7 @@ async fn process_gossip_network_events(
 ) -> Result<()> {
     while let Some(event) = msg_receiver.try_next().await? {
         info!(
-            "Gossip Loop: Received by {}:, event {:?}",
+            "Gossip Loop: Received by {:?}:, event {:?}",
             user.username, event
         );
         if let Event::Received(msg) = event {
@@ -407,7 +407,10 @@ pub async fn create_endpoint(user: &account::local::User) -> Result<Endpoint> {
     info!("Creating endpoint for {}", user.user_id);
     // In release mode, we will build the endpoint using
     // tiles keypair in keychain
-    let usr_data = EndpointUserData::new(&user.user_id, &user.username);
+    let usr_data = EndpointUserData::new(
+        &user.user_id,
+        user.username.as_ref().unwrap_or(&user.user_id),
+    );
     if !cfg!(debug_assertions) {
         let secret_key = get_app_secret_key(&user.user_id)?;
         Endpoint::builder(presets::N0)
@@ -530,7 +533,12 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
         issuer_delegated_token
     } else {
         // create a reverse delegated token
-        create_token(&delegation_token.did, Some(&user.username), Capability::All).await?
+        create_token(
+            &delegation_token.did,
+            user.username.as_deref(),
+            Capability::All,
+        )
+        .await?
     };
 
     // create invocation token
@@ -578,7 +586,7 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
                 MessageBody::LinkRequest {
                     auth_token: invocation_token,
                     peer_delegation_token: peer_delegation_token.token,
-                    nickname: Some(user.username.clone()),
+                    nickname: user.username.clone(),
                 },
                 NetworkMessageType::Link,
             );

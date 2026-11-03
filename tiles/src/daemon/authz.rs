@@ -10,7 +10,10 @@ use serde_json::json;
 
 use crate::{
     core::{
-        account::local::{self, Capability, Token, fetch_linked_tokens, get_current_user},
+        account::local::{
+            self, Capability, Token, TokenQueryOptions, TokenType, UserQueryOptions, fetch_tokens,
+            fetch_users, get_current_user, update_user,
+        },
         storage::db::get_db_conn,
     },
     daemon::{
@@ -49,6 +52,12 @@ pub struct FetchTokenParams {
     cid: String,
 }
 
+#[derive(Deserialize, Serialize)]
+pub struct UpdatePeerParams {
+    pub user_did: String,
+    pub username: Option<String>,
+}
+
 pub fn authz_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/authz/create-token", post(create_token))
@@ -59,17 +68,16 @@ pub fn authz_router() -> Router<Arc<AppState>> {
             post(fetch_linked_devices),
         )
         .route("/v1/tilekit/peers/revoke", post(revoke_token))
+        .route("/v1/tilekit/peers/update-peer", post(update_peer))
 }
 
 #[debug_handler]
 pub async fn create_token(
     ApiJson(create_token_req): ApiJson<TokenCreateRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let aud_nickname = create_token_req.aud_nickname.unwrap_or(String::from(""));
-
     let token = crate::core::account::local::create_token(
         &create_token_req.aud_did,
-        Some(&aud_nickname),
+        create_token_req.aud_nickname.as_deref(),
         create_token_req.capability,
     )
     .await
@@ -82,13 +90,12 @@ pub async fn create_token(
 pub async fn add_token(
     ApiJson(add_token_req): ApiJson<TokenAddRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let issuer_nickname = add_token_req.issuer_nickname.unwrap_or(String::from(""));
     let common_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
     let token = crate::core::account::local::add_token(
         &add_token_req.delegated_token,
         &common_db_conn,
-        Some(&issuer_nickname),
+        add_token_req.issuer_nickname.as_deref(),
     )
     .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
@@ -117,10 +124,34 @@ pub async fn fetch_linked_devices() -> Result<impl IntoResponse, AppError> {
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     let user = get_current_user(&common_db_conn).map_err(|e| AppError::NotFound(e.to_string()))?;
-    let tokens = fetch_linked_tokens(&common_db_conn, &user.user_id)
-        .map_err(|e| AppError::NotFound(e.to_string()))?;
 
-    Ok(ApiResponse::success(tokens))
+    // fetch the auth tokens delegated to this device and which are linked.
+    let tokens = fetch_tokens(
+        &common_db_conn,
+        TokenQueryOptions {
+            aud_did: Some(user.user_id.clone()),
+            token_type: Some(TokenType::Linked),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+
+    if tokens.is_empty() {
+        return Err(AppError::NotFound("No linked devices".to_string()));
+    }
+
+    let peer_ids = tokens.into_iter().map(|t| t.did).collect::<Vec<String>>();
+
+    let peers = fetch_users(
+        &common_db_conn,
+        UserQueryOptions {
+            user_ids: Some(peer_ids),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+
+    Ok(ApiResponse::success(peers))
 }
 
 // Later we will see into UCAN revocation
@@ -140,6 +171,37 @@ pub async fn revoke_token(
     }))
 }
 
+#[debug_handler]
+pub async fn update_peer(
+    ApiJson(update_params): ApiJson<UpdatePeerParams>,
+) -> Result<impl IntoResponse, AppError> {
+    let common_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    let user = update_peer_in_db(&common_db_conn, update_params)?;
+
+    Ok(ApiResponse::success(user))
+}
+
+fn update_peer_in_db(
+    common_db_conn: &rusqlite::Connection,
+    update_params: UpdatePeerParams,
+) -> Result<local::User, AppError> {
+    let users = fetch_users(
+        common_db_conn,
+        UserQueryOptions {
+            user_id: Some(update_params.user_did.clone()),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    if users.is_empty() {
+        return Err(AppError::NotFound("Peer not found".to_string()));
+    };
+
+    update_user(common_db_conn, update_params).map_err(|e| AppError::CannotProcess(e.to_string()))
+}
 /// CLI command handler for create-link
 pub async fn create_link_cli(aud_did: Option<String>) -> Result<()> {
     if let Some(audience_did) = aud_did {
@@ -217,14 +279,13 @@ pub async fn list_linked_devices_cli() -> Result<()> {
         .await
         .context("Could not reach the Tiles daemon")?;
     if res.status().is_success() {
-        let resp_struct = res.json::<ApiResponse<Vec<Token>>>().await?;
+        let resp_struct = res.json::<ApiResponse<Vec<local::User>>>().await?;
         println!();
         resp_struct.data.iter().for_each(|t| {
             println!(
-                "Nickname: {}\nDID: {}\nCID: {}\n",
-                t.nickname.clone().unwrap_or("".to_string()),
-                t.aud_did,
-                t.cid
+                "Nickname: {}\nDID: {}\n",
+                t.username.clone().unwrap_or("".to_string()),
+                t.user_id,
             );
 
             println!();
@@ -312,6 +373,7 @@ mod tests {
     use tokio::sync::OnceCell;
 
     use super::*;
+    use crate::core::account::local::{save_peer_account_db, tests::setup_db_conn_v2};
 
     type Requests = Arc<Mutex<Vec<(String, Value)>>>;
     static TEST_DAEMON: OnceCell<Requests> = OnceCell::const_new();
@@ -330,6 +392,18 @@ mod tests {
         })
     }
 
+    fn user() -> Value {
+        json!({
+            "id": "token-id",
+            "user_id": "did:key:issuer",
+            "created_at": 1,
+            "updated_at": 1,
+            "username": "peer",
+            "active_profile": false,
+            "account_type": "PEER",
+            "root": false
+        })
+    }
     async fn daemon_root() -> &'static str {
         env!("CARGO_PKG_VERSION")
     }
@@ -354,7 +428,7 @@ mod tests {
                 "data": { "message": "Device linked" }
             }),
             "/v1/tilekit/peers/list-linked-devices" => {
-                json!({ "status": "success", "data": [token()] })
+                json!({ "status": "success", "data": [user()] })
             }
             "/v1/tilekit/peers/revoke" => json!({
                 "status": "success",
@@ -440,5 +514,24 @@ mod tests {
         assert_eq!(requests[0].1["peer_did"], "did:key:peer");
 
         create_link_cli(None).await.unwrap();
+    }
+
+    #[test]
+    fn update_peer_updates_existing_peer_username() {
+        let db = setup_db_conn_v2();
+        let peer_did = "did:key:peer";
+        save_peer_account_db(&db.common, peer_did, "old-name").unwrap();
+
+        let user = update_peer_in_db(
+            &db.common,
+            UpdatePeerParams {
+                user_did: peer_did.to_owned(),
+                username: Some("new-name".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(user.user_id, peer_did);
+        assert_eq!(user.username.as_deref(), Some("new-name"));
     }
 }

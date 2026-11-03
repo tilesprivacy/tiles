@@ -82,6 +82,27 @@ const COMMON_MIGRATION_ARRAY: &[M] = &[
         ALTER TABLE tokens ADD COLUMN nickname TEXT;
         CREATE UNIQUE INDEX did_aud_type ON tokens(did, aud_did) where type = 'linked';",
     ),
+    // need to make username NOT NULL
+    M::up(
+        "
+         CREATE TABLE IF NOT EXISTS users_new (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            username TEXT,
+            active_profile INTEGER NOT NULL DEFAULT 0 CHECK (active_profile IN (0,1)),
+            account_type TEXT NOT NULL,
+            root INTEGER NOT NULL DEFAULT 0 CHECK (root IN (0,1)),
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            UNIQUE(account_type, user_id)
+        );
+        INSERT INTO users_new (id, user_id, username, active_profile, account_type, root, created_at, updated_at) SELECT id, user_id, username, active_profile, account_type, root, created_at, updated_at from users;
+        DROP TABLE users;
+        ALTER TABLE users_new RENAME TO users;
+        CREATE UNIQUE INDEX user_id_unique_idx ON users(user_id);
+        CREATE UNIQUE INDEX user_name_unique_idx ON users(username);
+        ",
+    ),
 ];
 
 const COMMON_MIGRATIONS: Migrations = Migrations::from_slice(COMMON_MIGRATION_ARRAY);
