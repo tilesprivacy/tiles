@@ -13,6 +13,26 @@ use crate::utils::config::{
     SYSTEM_LIB_DIR, is_tiles_lib_dir,
 };
 
+/// closed-display mode: the sudoers grant and the boot guard the pkg installs
+#[cfg(target_os = "macos")]
+const SLEEP_GRANT_PATH: &str = "/private/etc/sudoers.d/tiles";
+#[cfg(target_os = "macos")]
+const SLEEP_GUARD_PATH: &str = "/Library/LaunchDaemons/com.tilesprivacy.tiles.sleep-guard.plist";
+
+/// written by the menu bar app while it holds sleep off
+#[cfg(target_os = "macos")]
+const SLEEP_MARKER: &str =
+    "Library/Application Support/com.tilesprivacy.tiles.menubar/closed-display";
+
+/// every user's marker, like the boot guard. $1 is SLEEP_MARKER
+#[cfg(target_os = "macos")]
+const SLEEP_RESET: &str = r#"failed=0
+for marker in /Users/*/"$1"; do
+  [ -f "$marker" ] || continue
+  /usr/bin/pmset -a disablesleep 0 && rm -f "$marker" || failed=1
+done
+exit $failed"#;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InstallLayout {
     bin: PathBuf,
@@ -25,6 +45,9 @@ pub fn uninstall(all: bool) -> Result<()> {
     if !plan.remove_files.iter().any(|path| path.exists())
         && !plan.remove_dirs.iter().any(|path| path.exists())
     {
+        // a marker can outlive the grant and the guard
+        #[cfg(target_os = "macos")]
+        restore_sleep();
         println!("No Tiles files found to uninstall.");
         return Ok(());
     }
@@ -34,7 +57,11 @@ pub fn uninstall(all: bool) -> Result<()> {
     confirm_uninstall(all)?;
     #[cfg(target_os = "macos")]
     crate::core::service::unload().context("Failed to unload Tiles service")?;
-    plan.apply()?;
+    // a half done apply may have taken the grant already, and the app's reset with it
+    let applied = plan.apply();
+    #[cfg(target_os = "macos")]
+    restore_sleep();
+    applied?;
 
     println!("Tiles uninstalled successfully.");
     Ok(())
@@ -58,6 +85,8 @@ impl UninstallPlanner {
         plan.remove_files.insert(layout.bin);
         #[cfg(target_os = "macos")]
         add_service_file_to_plan(&mut plan, crate::core::service::plist_path()?);
+        #[cfg(target_os = "macos")]
+        add_sleep_grant_to_plan(&mut plan);
 
         if all {
             let user_data_dir = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
@@ -82,8 +111,11 @@ impl UninstallPlanner {
             }
             self.remove_files
                 .iter()
-                .any(|path| requires_elevation(path))
-                || self.remove_dirs.iter().any(|path| requires_elevation(path))
+                .any(|path| path.exists() && requires_elevation(path))
+                || self
+                    .remove_dirs
+                    .iter()
+                    .any(|path| path.exists() && requires_elevation(path))
         }
         #[cfg(not(unix))]
         {
@@ -132,6 +164,44 @@ fn add_service_file_to_plan(plan: &mut UninstallPlanner, path: PathBuf) {
     plan.remove_files.insert(path);
 }
 
+#[cfg(target_os = "macos")]
+fn add_sleep_grant_to_plan(plan: &mut UninstallPlanner) {
+    for path in [SLEEP_GRANT_PATH, SLEEP_GUARD_PATH] {
+        plan.remove_files.insert(PathBuf::from(path));
+    }
+}
+
+/// after the grant is gone, so an app still on its way out cannot turn sleep
+/// back off, and its own reset may already have failed for want of it
+#[cfg(target_os = "macos")]
+fn restore_sleep() {
+    // the boot guard may have turned it back on already, no password needed then
+    if !sleep_disabled() {
+        if let Some(home) = std::env::home_dir() {
+            let _ = fs::remove_file(home.join(SLEEP_MARKER));
+        }
+        return;
+    }
+
+    // other users' markers sit behind their own 700 ~/Library, only root sees them all
+    let command = if is_running_as_root() {
+        Ok(Command::new("/bin/sh"))
+    } else {
+        new_trusted_sudo_command().map(|mut command| {
+            command.arg("/bin/sh");
+            command
+        })
+    };
+    let restored = command.and_then(|mut command| {
+        command.args(["-c", SLEEP_RESET, "tiles-uninstall", SLEEP_MARKER]);
+        run_elevated_command(&mut command, "turn sleep back on")
+    });
+
+    if let Err(err) = restored {
+        eprintln!("Sleep may still be off, run `sudo pmset -a disablesleep 0`: {err}");
+    }
+}
+
 fn print_plan(plan: &UninstallPlanner, needs_elevation: bool) {
     println!("Tiles uninstall will remove:");
 
@@ -145,7 +215,7 @@ fn print_plan(plan: &UninstallPlanner, needs_elevation: bool) {
 
     if needs_elevation {
         println!();
-        println!("Administrator privileges are required to remove system files under /usr/local.");
+        println!("Administrator privileges are required to remove system files.");
         println!();
     }
 }
@@ -389,7 +459,31 @@ impl InstallLayout {
     }
 }
 
+/// unreadable counts as disabled, a spare reset beats losing the marker
+#[cfg(target_os = "macos")]
+fn sleep_disabled() -> bool {
+    Command::new("/usr/bin/pmset")
+        .arg("-g")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .is_none_or(|output| reports_sleep_disabled(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn reports_sleep_disabled(pmset: &str) -> bool {
+    pmset.lines().any(|line| {
+        let mut words = line.split_whitespace();
+        words.next() == Some("SleepDisabled") && words.next() == Some("1")
+    })
+}
+
 fn requires_elevation(path: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    if path.starts_with(SLEEP_GRANT_PATH) || path.starts_with(SLEEP_GUARD_PATH) {
+        return true;
+    }
+
     path.starts_with(SYSTEM_BIN_DIR) || path.starts_with(SYSTEM_LIB_DIR)
 }
 
@@ -609,6 +703,27 @@ mod tests {
         assert_eq!(layout.lib_dir, root.path());
         assert!(is_tiles_lib_dir(&layout.lib_dir));
         Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_sleep_grant_goes_with_the_app() {
+        let mut plan = UninstallPlanner::default();
+        super::add_sleep_grant_to_plan(&mut plan);
+        for path in [super::SLEEP_GRANT_PATH, super::SLEEP_GUARD_PATH] {
+            let path = PathBuf::from(path);
+            assert!(plan.remove_files.contains(&path), "{path:?} missing");
+            assert!(requires_elevation(&path));
+        }
+    }
+
+    #[test]
+    fn sleep_disabled_is_read_from_pmset() {
+        let off = "System-wide power settings:\n SleepDisabled\t\t1\nCurrently in use:\n";
+        let on = "System-wide power settings:\n SleepDisabled\t\t0\n";
+        assert!(super::reports_sleep_disabled(off));
+        assert!(!super::reports_sleep_disabled(on));
+        assert!(!super::reports_sleep_disabled(""));
     }
 
     #[test]

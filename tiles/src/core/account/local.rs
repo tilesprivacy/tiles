@@ -543,6 +543,7 @@ pub async fn create_token(
     // TODO: Getting a db conn again here, cuz the await above could move a
     // db reference to another thread. Used tokio-rusqlite
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
+
     let token = generate_delegation_token(issuer, aud_did, nickname, capability, db_conn).await?;
     Ok(token)
 }
@@ -572,6 +573,12 @@ async fn generate_delegation_token(
         .await
         .map_err(|e| anyhow!("Generating delegation token failed due to {}", e))?;
 
+    // if we are creating a Linked Token then don't set a nickname, since we anyway get the reverse delegation token from the peer, so nickname can be derived then. This also prevents overwriting peer nickname with ours during reverse delegation during the link process
+    let nickname = if matches!(token_type, TokenType::Linked) {
+        None
+    } else {
+        nickname
+    };
     let delegation_token = save_token(&db_conn, delegation, nickname, token_type)?;
     Ok(delegation_token)
 }
@@ -782,10 +789,6 @@ fn save_token<S: Signature>(
     nickname: Option<&str>,
     token_type: TokenType,
 ) -> Result<Token> {
-    // We do an upsert only when the did, aud_did and the the type of token
-    // is `linked`. As there is no point of accumulating these, as it proves
-    // same point, but with maybe an extension of time
-
     let issuer_did = delegation.issuer().did();
     let aud_did = delegation.audience().did();
     let token_cid = delegation

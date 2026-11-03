@@ -1,5 +1,6 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
 
   import AwakeMenu from "./AwakeMenu.svelte";
   import Chevron from "./Chevron.svelte";
@@ -16,6 +17,14 @@
   let { note, alert = false }: Props = $props();
 
   let menu = $state(false);
+
+  // a menu does not outlive its window
+  $effect(() => {
+    const off = getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+      if (!focused) menu = false;
+    });
+    return () => void off.then((unlisten) => unlisten());
+  });
 
   let now = $state(Date.now());
 
@@ -38,6 +47,29 @@
 
   const session: "none" | "running" | "paused" = $derived(
     awake.value.paused ? "paused" : awake.value.active ? "running" : "none",
+  );
+  const powerCopy = $derived.by(() => {
+    const percent = awake.value.power.batteryPercent;
+    if (!awake.value.available && percent !== null) {
+      return `${percent}% battery · Connect a charger to enable`;
+    }
+    return "Available when plugged in or battery is above 10%";
+  });
+  const lidNote = $derived.by(() => {
+    if (session !== "running") return null;
+    // the grant comes with the pkg, so a Mac without it sleeps on a closed lid
+    if (awake.value.lid === "refused") {
+      return "Closing the lid will still sleep this Mac · Reinstall Tiles to fix";
+    }
+    if (awake.value.lid === "cleared") {
+      return "Closing the lid will sleep this Mac · sleep was turned back on";
+    }
+    return null;
+  });
+  const heat = $derived(
+    awake.value.lidOffered
+      ? "Stays awake with the lid closed, so it can get hot in a bag for long periods."
+      : null,
   );
 
   const reading = $derived.by(() => {
@@ -82,6 +114,10 @@
       ></button>
       <AwakeMenu
         {session}
+        available={awake.value.available}
+        rule="Works when plugged in or above 10% battery."
+        {heat}
+        alert={lidNote ?? (awake.value.available ? null : powerCopy)}
         onpick={pick}
         onpause={() => run("awake_pause")}
         onresume={() => run("awake_resume")}
@@ -92,8 +128,8 @@
     <button
       class="footer__cup"
       data-state={session}
-      disabled={!awake.value.ac}
-      aria-label={awake.value.ac ? "Keep this Mac awake" : "Keeping awake needs mains power"}
+      aria-label="Keep this Mac awake"
+      title={awake.value.available ? "Keep this Mac awake" : powerCopy}
       aria-haspopup="menu"
       aria-expanded={menu}
       onclick={() => (menu = !menu)}
@@ -101,13 +137,11 @@
       <CupMark active={session === "running"} />
       {#if session !== "none"}
         <span class="footer__count">{reading}</span>
-      {:else if awake.value.ac}
-        <span>Keep awake</span>
       {:else}
-        <span>Needs mains</span>
+        <span>Keep awake</span>
       {/if}
 
-      <Chevron dir="up" />
+      <Chevron dir={menu ? "down" : "up"} />
     </button>
   </div>
 
@@ -163,8 +197,8 @@
     text-align: left;
   }
 
+  /* static, so the menu spans the footer rather than the button */
   .footer__cupwrap {
-    position: relative;
     flex: none;
     display: flex;
   }
@@ -174,7 +208,14 @@
     inset: 0;
     z-index: 1;
     border: none;
-    background: transparent;
+    background: rgba(0, 0, 0, 0.5);
+    animation: footer-dim var(--dur-push) ease-out;
+  }
+
+  @keyframes footer-dim {
+    from {
+      background: transparent;
+    }
   }
 
   .footer__cup,
@@ -204,7 +245,7 @@
     z-index: 2;
   }
 
-  .footer__cup[data-state="none"]:hover:not(:disabled) {
+  .footer__cup[data-state="none"]:hover {
     color: var(--bone);
   }
 
@@ -213,18 +254,12 @@
     color: var(--void);
   }
 
-  .footer__cup[data-state="running"]:hover:not(:disabled) {
+  .footer__cup[data-state="running"]:hover {
     background: rgba(247, 255, 97, 0.8);
   }
 
   .footer__cup[data-state="paused"] {
     color: var(--signal);
-  }
-
-  .footer__cup:disabled {
-    background: var(--steel);
-    color: var(--slate);
-    opacity: 0.5;
   }
 
   .footer__quit:hover {

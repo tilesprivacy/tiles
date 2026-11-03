@@ -1,0 +1,16 @@
+info:
+  name: pause-download
+  type: http
+  seq: 4
+
+http:
+  method: DELETE
+  url: "{{tilekit_base_url}}/model/download?model=unsloth/gemma-4-12b-it-GGUF:Q4_K_M"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false

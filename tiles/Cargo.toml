@@ -10,10 +10,9 @@ reqwest = { version = "0.12", features = ["json", "blocking", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 anyhow = "1.0"
-tokio = { version = "1" , features = ["macros", "process", "rt-multi-thread", "io-util", "signal", "sync", "time"]}
+tokio = { version = "1" , features = ["macros", "process", "rt-multi-thread", "io-util", "signal", "sync", "time", "fs"]}
 owo-colors = "4"
 futures-util = "0.3"
-hf-hub = {version = "0.4", features = ["tokio"]}
 indicatif = "0.17"
 rustyline = "18.0"
 toml = "1.0.3"
@@ -48,7 +47,7 @@ keyring-core = "1.0.0"
 iroh-mdns-address-lookup = "0.4.0"
 tempfile = "3"
 tower = {version = "0.5.3", features = ["timeout"]}
-tower-http = {version = "0.6.11", features = ["cors"]}
+tower-http = {version = "0.6.11", features = ["cors", "fs", "set-header"]}
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 async-stream = "0.3.6"

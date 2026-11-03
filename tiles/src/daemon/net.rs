@@ -258,7 +258,7 @@ fn get_did_from_device_handle(handle: String, common_db_conn: &Connection) -> Re
         )?;
 
         if users.is_empty() {
-            Err(anyhow!("No peer found by the nickame {}", &handle))
+            Err(anyhow!("No peer found by the nickname {}", &handle))
         } else {
             users
                 .first()

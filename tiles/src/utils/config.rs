@@ -352,7 +352,7 @@ fn set_user_data_path_with_provider<P: ConfigProvider>(
 // TODO: This fn is very rigid and should be eventually replaced by
 // `get_or_create_root_config`
 pub fn get_or_create_config(provider: impl ConfigProvider) -> Result<Table> {
-    let tiles_config_dir = provider.get_config_dir()?;
+    let tiles_config_dir = provider.get_or_create_config_dir()?;
     let config_toml_path = tiles_config_dir.join("config.toml");
 
     if config_toml_path

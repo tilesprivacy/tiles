@@ -250,7 +250,12 @@ async fn request(app: &AppHandle, client: &reqwest::Client, on: bool) -> Result<
         set_power(app, Power::Starting);
     }
 
-    let outcome = match client.post(daemon::url(path)).timeout(timeout).send().await {
+    // the daemon needs the JSON content type on every POST
+    let request = client
+        .post(daemon::url(path))
+        .header("content-type", "application/json")
+        .timeout(timeout);
+    let outcome = match request.send().await {
         Ok(res) if res.status().is_success() => Ok(()),
         Ok(res) => Err(format!("{path} answered {}", res.status())),
         Err(err) => Err(err.to_string()),

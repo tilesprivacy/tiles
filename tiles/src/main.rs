@@ -15,7 +15,8 @@ use tiles::{
         authz::{create_link_cli, join_request_cli, list_linked_devices_cli, revoke_peers_cli},
         get_or_set_daemon_port,
         net::{fetch_network_status_cli, start_network_cli, stop_network_cli, sync_with_peer_cli},
-        remote_status, share_remote_link, start_cmd, start_server, stop_cmd, unshare_remote_link,
+        remote_status, share_remote_link, start_cmd, start_server, status_cmd, stop_cmd,
+        unshare_remote_link, web,
     },
     repl::{self, RunArgs},
     utils::{config::LlamaConfig, installer},
@@ -53,6 +54,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "Commands:\n\n",
     "  Getting Started\n",
     "    run       Run a Modelfile (uses the default model if none is provided)\n",
+    "    ui        Open the Tiles web UI in your browser\n",
     "    help      Show this message or help for a specific command\n\n",
     "  Accounts\n",
     "    account   Manage your user account\n",
@@ -122,6 +124,9 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum GettingStartedCommands {
+    /// Open the Tiles web UI in your browser
+    Ui,
+
     /// Run a Modelfile (uses the default model if none is provided)
     Run {
         /// Path to the Modelfile (uses default model if not provided)
@@ -339,6 +344,9 @@ enum DaemonCommands {
 
     /// Stops the daemon
     Stop,
+
+    /// Shows whether the daemon and the web UI are running
+    Status,
 }
 
 #[derive(Debug, Args)]
@@ -544,6 +552,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("Tiles failed to run due to {:?}", e))?;
         }
+        Some(Commands::GettingStarted(GettingStartedCommands::Ui)) => web::open_cli().await?,
         Some(Commands::GettingStarted(GettingStartedCommands::Help { command })) => {
             print_help_for_command(&command)?;
         }
@@ -574,6 +583,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             Some(DaemonCommands::Start) => start_cmd(None)
                 .await
                 .inspect_err(|e| eprintln!("Daemon starting failed, reason: {:?}", e))?,
+            Some(DaemonCommands::Status) => status_cmd().await,
             Some(DaemonCommands::Stop) => stop_cmd()
                 .await
                 .inspect_err(|e| eprintln!("{:?}", e))

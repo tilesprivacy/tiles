@@ -1,0 +1,21 @@
+info:
+  name: list-downloads
+  type: http
+  seq: 5
+
+http:
+  method: GET
+  url: "{{tilekit_base_url}}/model/downloads"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Every download that's running, paused or failed, from the UI or the CLI
+  type: text/markdown
