@@ -142,7 +142,7 @@ impl Daemon {
     }
 
     async fn until(&self, model: Option<&str>, done: impl FnMut(&DownloadState) -> bool) {
-        let mut changes = self.download(model).state.subscribe();
+        let mut changes = self.download(model).job.subscribe();
         tokio::time::timeout(Duration::from_secs(5), changes.wait_for(done))
             .await
             .expect("the download never got there")
@@ -234,7 +234,7 @@ async fn closing_a_stream_that_asked_to_pause_pauses_the_download() {
     drop(daemon.send("GET", "/v1/tilekit/model/download", None).await);
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(matches!(
-        *daemon.download(None).state.borrow(),
+        daemon.download(None).job.state(),
         DownloadState::Downloading { .. }
     ));
 
@@ -248,7 +248,7 @@ async fn closing_a_stream_that_asked_to_pause_pauses_the_download() {
         .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert!(matches!(
-        *daemon.download(None).state.borrow(),
+        daemon.download(None).job.state(),
         DownloadState::Downloading { .. }
     ));
 
@@ -331,7 +331,7 @@ async fn a_download_too_big_for_the_disk_is_refused() {
 
     assert_eq!(status, StatusCode::INSUFFICIENT_STORAGE);
     assert!(body["reason"].as_str().unwrap().contains("free disk space"));
-    assert_eq!(*daemon.download(None).state.borrow(), DownloadState::Idle);
+    assert_eq!(daemon.download(None).job.state(), DownloadState::Idle);
     assert!(!repo_dir(daemon.root.path(), REPO).exists());
 }
 
