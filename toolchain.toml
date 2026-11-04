@@ -4,6 +4,7 @@
 
 [embedded-tools]
 pi = "v0.84.2"
+tiles-ui = "v0.2.0"
 sqlcipher = "4.10.0"
 
 [dev-tools]

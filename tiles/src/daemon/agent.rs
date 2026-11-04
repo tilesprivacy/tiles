@@ -5,9 +5,9 @@ use crate::{
         pi::{self, PiAgent, handle_graceful_exit},
         types::PiResponse,
     },
-    daemon::{ApiJson, ApiResponse, AppError, AppState},
+    daemon::{ApiJson, ApiResponse, AppError, AppState, model::picked_modelfile},
     repl::{get_default_modelfile, model_spec},
-    utils::config::{ConfigProvider, DefaultProvider, PY_PORT},
+    utils::config::{ConfigProvider, DefaultProvider, PY_PORT, get_current_model},
 };
 
 // use async_stream::stream;
@@ -55,7 +55,7 @@ pub fn agent_router() -> Router<Arc<AppState>> {
 }
 
 async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let (modelname, system_prompt) = get_agent_start_params(DefaultProvider)?;
+    let (modelname, system_prompt) = get_agent_start_params(DefaultProvider, get_current_model())?;
 
     let mut agent = state.agent.lock().await;
     if agent.is_some() {
@@ -74,9 +74,19 @@ async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
     }
 }
 
-pub fn get_agent_start_params(provider: impl ConfigProvider) -> Result<(String, String), AppError> {
-    let modelfile_path =
-        get_default_modelfile(provider).map_err(|e| AppError::NotFound(e.to_string()))?;
+/// The model and system prompt from the picked model's Modelfile, else the default one
+pub fn get_agent_start_params(
+    provider: impl ConfigProvider,
+    picked: Option<String>,
+) -> Result<(String, String), AppError> {
+    let modelfiles = provider
+        .get_lib_dir()
+        .map_err(|e| AppError::NotFound(e.to_string()))?
+        .join("modelfiles");
+    let modelfile_path = match picked.and_then(|picked| picked_modelfile(&modelfiles, &picked)) {
+        Some(path) => path,
+        None => get_default_modelfile(provider).map_err(|e| AppError::NotFound(e.to_string()))?,
+    };
 
     let default_modelfile = tilekit::modelfile::parse_from_file(&modelfile_path.to_string_lossy())
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;

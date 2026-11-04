@@ -208,6 +208,7 @@ fi
 SERVER_DIR="${LIB_DIR}/server"         # Python server folder
 MODELFILE_DIR="${LIB_DIR}/modelfiles"  # Modelfile server folder
 PI_DIR="${LIB_DIR}/pi"
+UI_DIR="${LIB_DIR}/ui"                 # web UI the daemon serves on port 1730
 
 TMPDIR="$(mktemp -d)"
 RELEASE_TAG="${VERSION}"
@@ -293,6 +294,14 @@ rm -rf "${PI_DIR}"
 mkdir -p "${PI_DIR}"
 
 cp -r "${TMPDIR}/pi"/* "${PI_DIR}/"
+
+# releases from before the web UI have no ui folder
+if [[ -d "${TMPDIR}/ui" ]]; then
+  log "Installing the web UI ..."
+  rm -rf "${UI_DIR}"
+  mkdir -p "${UI_DIR}"
+  cp -r "${TMPDIR}/ui"/. "${UI_DIR}/"
+fi
 
 
 log "📦 Installing Python server to ${SERVER_DIR}..."
