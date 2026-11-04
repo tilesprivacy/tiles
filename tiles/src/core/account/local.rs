@@ -829,10 +829,11 @@ fn save_token<S: Signature>(
                 let token = fetch_token_by_cid(&token_cid, conn)?;
                 Ok(token.expect("Expected token"))
             }
-            Err(err) => {
-                println!("{:?}", err);
-                Err(anyhow!("Err inserting token due to {}", err))
-            }
+            Err(err) if err.to_string().contains("UNIQUE constraint") => Err(anyhow!(
+                "Username {} already taken",
+                nickname.expect("Can't unfurl username")
+            )),
+            Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
         };
 
         let mut stmt2 = txn.prepare("insert into users (id, user_id, username, active_profile, account_type, root, created_at, updated_at) values (?1, ?2, ?3,?4, ?5, ?6, ?7, ?8) on conflict(user_id) do update set username = excluded.username, updated_at = excluded.updated_at WHERE excluded.username IS NOT NULL")?;
@@ -1064,7 +1065,7 @@ pub fn create_dummy_user(conn: &Connection, did: Option<String>) -> User {
         id,
         user_id,
         username: Some(username),
-        account_type: ACCOUNT::PEER,
+        account_type: ACCOUNT::LOCAL,
         active_profile: true,
         root: true,
         created_at: SystemTime::now()
@@ -1783,6 +1784,30 @@ pub mod tests {
         assert!(matches!(peer.account_type, ACCOUNT::PEER));
     }
 
+    #[test]
+    fn test_valid_add_token_but_with_same_name() {
+        let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
+
+        let db_conn = setup_db_conn_v2();
+        let _user = create_dummy_user(
+            &db_conn.common,
+            Some("did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5".to_string()),
+        );
+        let resp = add_token(token, &db_conn.common, Some("bunty"));
+
+        assert!(resp.is_ok());
+        let token_struct = resp.unwrap();
+        assert_eq!(token_struct.token, token);
+        assert_eq!(token_struct.r#type, TokenType::Linked);
+
+        let peer = get_user_info(&db_conn.common, &token_struct.aud_did).unwrap();
+        assert_eq!(peer.username, Some("bunty".to_string()));
+        assert!(matches!(peer.account_type, ACCOUNT::PEER));
+
+        let token = "glhARHCdirxNbF0FacMvSW5Se+eNV5yPkVtq9EliSNX879iYM4bZEQwQsDzl5HFFtX8A+ETBX17dz2u3Ihjdqi6rD6JhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4OGRpZDprZXk6ejZNa3FQbnZwMnhFUWFiRlo4bzF2eEFzOUJGVDJkTXVZM0cyaThXdjNKRHNOUDFNY2NtZGEvY2V4cBpszCIRY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUIkXrgZSswKCMsMtZGovTkQ=";
+        let resp = add_token(token, &db_conn.common, Some("bunty"));
+        assert!(resp.is_err())
+    }
     #[test]
     fn test_add_token_with_none_nickname_does_not_upsert_existing_user() {
         let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
