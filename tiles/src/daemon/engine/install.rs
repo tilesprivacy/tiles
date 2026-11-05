@@ -87,6 +87,8 @@ pub struct Engines {
     client: Client,
     releases: String,
     pub(super) job: Arc<Job<InstallState>>,
+    /// held while the pick is saved, and while a download reads it and starts
+    pub(super) picking: tokio::sync::Mutex<()>,
 }
 
 impl Engines {
@@ -103,6 +105,7 @@ impl Engines {
             client,
             releases: releases.trim_end_matches('/').to_owned(),
             job: Job::new(InstallState::Idle),
+            picking: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -181,9 +184,11 @@ impl Engines {
         let total: u64 = build.files.iter().map(|file| file.size).sum();
         let mut on_disk = 0;
         for file in &build.files {
+            // a part longer than its file counts as the whole file, past it the sum below underflows
             on_disk += file_len(&downloads.join(&file.name))
                 .await
-                .max(file_len(&downloads.join(format!("{}.part", file.name))).await);
+                .max(file_len(&downloads.join(format!("{}.part", file.name))).await)
+                .min(file.size);
         }
         let unpacked: u64 = build.files.iter().map(|file| file.unpacked).sum();
         let needed = total - on_disk + unpacked + SPARE_ROOM;
@@ -527,6 +532,19 @@ mod tests {
                 engine: Engine::Vulkan
             }
         );
+    }
+
+    #[tokio::test]
+    async fn a_part_longer_than_its_file_counts_as_the_whole_file() {
+        let (_server, _dir, engines) = setup(NO_LIBCUDA, LISTS_VULKAN, Duration::ZERO).await;
+        let downloads = engines.store.downloads();
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(downloads.join("vulkan.tar.gz.part"), vec![0; 1 << 20]).unwrap();
+        let choices = order(&[Engine::Vulkan, Engine::Cpu]);
+
+        // the free space check underflowed on it
+        assert!(engines.start(Engine::Vulkan, &choices).await.is_ok());
+        let _ = tokio::time::timeout(Duration::from_secs(10), finished(&engines)).await;
     }
 
     #[tokio::test]

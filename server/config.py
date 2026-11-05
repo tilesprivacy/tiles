@@ -27,6 +27,9 @@ _LLAMA_CONFIG_TTL_S = 1.0
 # the [llama] table and the llama-server path the daemon picked
 _llama_config_cache: tuple[dict[str, Any], str | None] | None = None
 _llama_config_cache_ts: float = 0.0
+# the daemon's last answer, kept when it can't be asked. forgetting it would move a
+# running model onto the bundled build for as long as /config fails
+_llama_server_seen: str | None = None
 
 # Canonical llama config field set. MUST stay in sync with the Rust
 # `LlamaConfig` struct in tiles/src/utils/config.rs. The drift-guard test
@@ -123,12 +126,14 @@ def _cached_config() -> tuple[dict[str, Any], str | None]:
 
 def _reset_llama_config_cache() -> None:
     """Clear the cached llama config (used by tests)."""
-    global _llama_config_cache, _llama_config_cache_ts
+    global _llama_config_cache, _llama_config_cache_ts, _llama_server_seen
     _llama_config_cache = None
     _llama_config_cache_ts = 0.0
+    _llama_server_seen = None
 
 
 def _fetch_llama_config() -> tuple[dict[str, Any], str | None]:
+    global _llama_server_seen
     try:
         response = httpx.get(f"http://127.0.0.1:{DAEMON_PORT}/config", timeout=2)
         response.raise_for_status()
@@ -137,11 +142,12 @@ def _fetch_llama_config() -> tuple[dict[str, Any], str | None]:
         # not "keep looking in ~/.config".
         llama = config.get("llama") or {}
         logger.info("Loaded llama config from Tiles daemon")
-        return LlamaConfig(**llama).model_dump(exclude_none=True), config.get("llama_server")
+        _llama_server_seen = config.get("llama_server")
+        return LlamaConfig(**llama).model_dump(exclude_none=True), _llama_server_seen
     except httpx.HTTPError:
         pass
 
-    return _read_llama_config_from_toml(), None
+    return _read_llama_config_from_toml(), _llama_server_seen
 
 
 # pid file the server writes for itself once it has PORT. the daemon reads it to

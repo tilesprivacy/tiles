@@ -86,12 +86,14 @@ async fn select(
                 .ok_or_else(|| AppError::BadRequest(format!("No engine named {name}")))?,
         ),
     };
+    let hardware = detect().await;
+    // a download that starts meanwhile reads this pick, or is running and turns it away
+    let _picking = state.engines.picking.lock().await;
     if state.engines.is_installing().await {
         return Err(AppError::Conflict(
             "An engine is downloading, pause it before picking another".to_owned(),
         ));
     }
-    let hardware = detect().await;
     if let Some(engine) = pick {
         // the reasons from the hardware alone, a failed check can be tried again
         let choice = choices(&hardware, &BUILDS)
@@ -113,6 +115,8 @@ async fn select(
 /// Downloads and installs the engine Tiles runs, unless it's there already
 async fn start(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let hardware = detect().await;
+    // the pick and the failure marks as select left them, see `Engines::picking`
+    let _picking = state.engines.picking.lock().await;
     let choices = state.engines.choices(&hardware);
     let engine = engine_to_run(get_engine_pick(), &hardware, &choices);
     Ok(ApiResponse::success(

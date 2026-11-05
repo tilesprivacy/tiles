@@ -89,6 +89,23 @@ def test_get_llama_config_falls_back_to_toml_when_daemon_down():
         assert get_llama_server() is None
 
 
+def test_a_failed_config_read_keeps_the_engine_the_daemon_named():
+    import server.config
+
+    response = Mock()
+    response.json.return_value = {"llama": None, "llama_server": "/engines/cuda-13-b1/llama-server"}
+    with patch("server.config.httpx.get", return_value=response):
+        assert get_llama_server() == "/engines/cuda-13-b1/llama-server"
+
+    # the cached answer runs out, and the daemon doesn't answer this time
+    server.config._llama_config_cache = None
+    with (
+        patch("server.config.httpx.get", side_effect=httpx.ReadTimeout("busy")),
+        patch("server.config._read_llama_config_from_toml", return_value={}),
+    ):
+        assert get_llama_server() == "/engines/cuda-13-b1/llama-server"
+
+
 def test_canonical_field_list_matches_python_model():
     assert set(LLAMA_CONFIG_FIELDS) == set(LlamaConfig.model_fields.keys())
 
