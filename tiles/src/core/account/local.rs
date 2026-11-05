@@ -835,7 +835,7 @@ fn save_token<S: Signature>(
         // We kinda do the unique username check in the query itself, so that we can assign username as None if conflict happens. This is fine as a local user can change this peer's username to whatever they wants ;ater. Usernames are always local and not globally unique unline DIDs
         let mut stmt2= txn.prepare("INSERT INTO users (id, user_id, username, active_profile, account_type, root, created_at, updated_at) SELECT ?1, ?2, CASE WHEN ?3 IS NOT NULL AND EXISTS (SELECT 1 FROM users WHERE username = ?3 AND user_id IS NOT ?2) THEN NULL ELSE ?3 END, ?4, ?5, ?6, ?7, ?8 ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, updated_at = excluded.updated_at WHERE excluded.username IS NOT NULL")?;
 
-        match stmt3.execute(params![
+        match stmt2.execute(params![
             Uuid::now_v7().to_string(),
             peer_user.to_string(),
             nickname,
@@ -981,7 +981,7 @@ async fn create_root_user(root_user_config: &Table, nickname: Option<String>) ->
 }
 
 fn parse_user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
-    let account_type: String = row.get(3)?;
+    let account_type: String = row.get(4)?;
     let created_at: f64 = row.get(6)?;
     let updated_at: f64 = row.get(7)?;
     Ok(User {
@@ -989,7 +989,7 @@ fn parse_user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
         user_id: row.get(1)?,
         username: row.get(2)?,
         account_type: ACCOUNT::try_from(account_type).map_err(FromSqlError::other)?,
-        active_profile: row.get(4)?,
+        active_profile: row.get(3)?,
         root: row.get(5)?,
 
         created_at: created_at as u64,
@@ -998,7 +998,7 @@ fn parse_user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
 }
 /// Gets a user account by its DID
 pub fn get_user_info(conn: &Connection, did: &str) -> Result<User> {
-    let mut fetch_user = conn.prepare("select id, user_id, username, account_type, active_profile, root, created_at, updated_at from users    where user_id = ?1")?;
+    let mut fetch_user = conn.prepare("select id, user_id, username, active_profile,account_type, root, created_at, updated_at from users    where user_id = ?1")?;
 
     match fetch_user.query_one([did], parse_user_from_row) {
         Ok(user) => Ok(user),
@@ -1011,7 +1011,7 @@ pub fn get_user_info(conn: &Connection, did: &str) -> Result<User> {
 }
 
 pub fn get_peer_list(db_conn: &Connection) -> Result<Vec<User>> {
-    let mut stmt= db_conn.prepare("select id, user_id, username, account_type, active_profile, root, created_at, updated_at  from users where account_type != \'local\'")?;
+    let mut stmt= db_conn.prepare("select id, user_id, username,active_profile, account_type, root, created_at, updated_at  from users where account_type != \'local\'")?;
 
     let user_rows = stmt
         .query_map([], parse_user_from_row)
@@ -1169,23 +1169,7 @@ pub fn fetch_users(conn: &Connection, filter: UserQueryOptions) -> Result<Vec<Us
     final_query.push_str(" ORDER BY updated_at");
 
     let mut stmt = conn.prepare(&final_query)?;
-    let user_rows = stmt.query_map(params_from_iter(params.iter()), |row| {
-        let account_type: String = row.get(4)?;
-        let created_at: f64 = row.get(6)?;
-        let updated_at: f64 = row.get(7)?;
-        Ok(User {
-            id: row.get(0)?,
-
-            user_id: row.get(1)?,
-            username: row.get(2)?,
-            account_type: ACCOUNT::try_from(account_type).map_err(FromSqlError::other)?,
-            active_profile: row.get(3)?,
-            root: row.get(5)?,
-
-            created_at: created_at as u64,
-            updated_at: updated_at as u64,
-        })
-    })?;
+    let user_rows = stmt.query_map(params_from_iter(params.iter()), parse_user_from_row)?;
 
     let mut users: Vec<User> = vec![];
 
