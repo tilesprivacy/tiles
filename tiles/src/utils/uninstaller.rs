@@ -24,10 +24,10 @@ const SLEEP_GUARD_PATH: &str = "/Library/LaunchDaemons/com.tilesprivacy.tiles.sl
 const MAC_APP: &str = "/Applications/Tiles.app";
 const DESKTOP_BIN: &str = "tiles-desktop";
 
-/// written by the menu bar app while it holds sleep off
+/// written by the desktop app's menu bar while it holds sleep off
 #[cfg(target_os = "macos")]
 const SLEEP_MARKER: &str =
-    "Library/Application Support/com.tilesprivacy.tiles.menubar/closed-display";
+    "Library/Application Support/com.tilesprivacy.tiles.desktop/closed-display";
 
 /// every user's marker, like the boot guard. $1 is SLEEP_MARKER
 #[cfg(target_os = "macos")]

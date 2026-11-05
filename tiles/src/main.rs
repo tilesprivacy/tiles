@@ -342,10 +342,6 @@ enum AccountCommands {
 struct DaemonArgs {
     #[command(subcommand)]
     command: Option<DaemonCommands>,
-
-    /// Serve without launching the menu bar app
-    #[arg(long)]
-    no_ui: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -609,7 +605,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("{:?}", e))
                 .inspect(|_| println!("Daemon stopped successfully"))?,
-            _ => start_server(None, !daemon_args.no_ui).await?,
+            _ => start_server(None).await?,
         },
         Some(Commands::System(SystemCommands::Service(service_args))) => {
             match service_args.command {

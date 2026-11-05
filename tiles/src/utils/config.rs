@@ -104,12 +104,6 @@ impl LlamaConfig {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct UiConfig {
-    /// Whether the daemon launches the menu bar app alongside itself
-    pub menubar: Option<bool>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
 pub struct EngineConfig {
     /// The llama.cpp build replies run on, like "vulkan", or "auto" for Tiles to pick one
     pub backend: Option<String>,
@@ -123,7 +117,6 @@ struct RootConfig {
     pub model: Option<ModelConfig>,
     pub inference: Option<InferenceConfig>,
     pub llama: Option<LlamaConfig>,
-    pub ui: Option<UiConfig>,
     pub engine: Option<EngineConfig>,
 }
 
@@ -162,14 +155,7 @@ pub const PY_PORT: u32 = 6969;
 pub const REMOTE_BOUND_PORT: u32 = 9271;
 
 /// Bundled runtime directories under lib_dir removed on default uninstall.
-pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &[
-    "server",
-    "modelfiles",
-    "pi",
-    "ui",
-    "models",
-    "Tiles Menu Bar.app",
-];
+pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "ui", "models"];
 
 pub trait ConfigProvider {
     fn get_config_dir(&self) -> Result<PathBuf>;
@@ -676,11 +662,6 @@ pub fn update_inference_config(config: InferenceConfig) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     root_config.inference = Some(config);
     save_root_config(&root_config)
-}
-
-pub fn get_ui_config() -> Result<UiConfig> {
-    let root_config = get_or_create_root_config()?;
-    Ok(root_config.ui.unwrap_or_default())
 }
 
 /// With the defaults filled in, matching what the model server gets
