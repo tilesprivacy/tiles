@@ -20,7 +20,8 @@ use tokio::{process::Command, sync::Notify};
 
 use crate::utils::config::{ConfigProvider, DefaultProvider, get_ui_config};
 
-const BUNDLE_EXEC: &str = "Tiles.app/Contents/MacOS/tiles-menubar";
+// in the lib dir, out of /Applications. Tiles.app there is the desktop app
+const BUNDLE_EXEC: &str = "Tiles Menu Bar.app/Contents/MacOS/tiles-menubar";
 
 /// Set on the child so it knows to watch the lifeline. A hand-launched app has
 /// no parent to outlive and leaves the watcher dormant
@@ -57,17 +58,18 @@ impl Ui {
     }
 }
 
-/// Release runs the installed bundle, debug the one `tauri build` leaves in the
-/// workspace target. Neither is required to exist
+/// Release runs the bundle installed in the lib dir, debug the one `tauri build`
+/// leaves in the workspace target. Neither is required to exist
 fn resolve() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("TILES_MENUBAR_BIN") {
         let path = PathBuf::from(path);
         return path.is_file().then_some(path);
     }
 
-    let installed = PathBuf::from("/Applications").join(BUNDLE_EXEC);
-    if installed.is_file() {
-        return Some(installed);
+    if let Ok(lib_dir) = DefaultProvider.get_lib_dir()
+        && lib_dir.join(BUNDLE_EXEC).is_file()
+    {
+        return Some(lib_dir.join(BUNDLE_EXEC));
     }
 
     if cfg!(debug_assertions) {

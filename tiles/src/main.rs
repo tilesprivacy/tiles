@@ -57,7 +57,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "Commands:\n\n",
     "  Getting Started\n",
     "    run       Run a Modelfile (uses the default model if none is provided)\n",
-    "    ui        Open the Tiles web UI in your browser\n",
+    "    ui        Open the Tiles app, or the web UI in your browser\n",
     "    help      Show this message or help for a specific command\n\n",
     "  Accounts\n",
     "    account   Manage your user account\n",
@@ -131,8 +131,12 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum GettingStartedCommands {
-    /// Open the Tiles web UI in your browser
-    Ui,
+    /// Open the Tiles app, or the web UI in your browser when the app isn't installed
+    Ui {
+        /// Open the web UI in the browser even when the app is installed
+        #[arg(long)]
+        browser: bool,
+    },
 
     /// Run a Modelfile (uses the default model if none is provided)
     Run {
@@ -567,7 +571,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("Tiles failed to run due to {:?}", e))?;
         }
-        Some(Commands::GettingStarted(GettingStartedCommands::Ui)) => web::open_cli().await?,
+        Some(Commands::GettingStarted(GettingStartedCommands::Ui { browser })) => {
+            web::open_cli(browser).await?
+        }
         Some(Commands::GettingStarted(GettingStartedCommands::Help { command })) => {
             print_help_for_command(&command)?;
         }

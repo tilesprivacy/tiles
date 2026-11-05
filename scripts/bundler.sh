@@ -125,6 +125,20 @@ echo "🖥️ Embedding the web UI..."
 ./scripts/fetch_ui.sh
 cp -r ui "${DIST_DIR}/tmp/"
 
+echo "🪟 Embedding the desktop app..."
+./scripts/fetch_desktop.sh
+if [[ -d desktop ]]; then
+  if [[ "${OS}" == "darwin" ]]; then
+    codesign --force \
+      --sign "$DEVELOPER_ID_APPLICATION" \
+      --options runtime \
+      --timestamp \
+      --strict \
+      desktop/Tiles.app
+  fi
+  cp -R desktop "${DIST_DIR}/tmp/"
+fi
+
 echo "📦 Creating ${OUT_NAME}.tar.gz..."
 tar --exclude-from=scripts/tar.exclude -czf "${DIST_DIR}/${OUT_NAME}.tar.gz" -C "${DIST_DIR}/tmp" .
 

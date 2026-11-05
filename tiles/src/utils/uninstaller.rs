@@ -19,6 +19,11 @@ const SLEEP_GRANT_PATH: &str = "/private/etc/sudoers.d/tiles";
 #[cfg(target_os = "macos")]
 const SLEEP_GUARD_PATH: &str = "/Library/LaunchDaemons/com.tilesprivacy.tiles.sleep-guard.plist";
 
+/// the desktop app, where install.sh and the pkg put it
+#[cfg(target_os = "macos")]
+const MAC_APP: &str = "/Applications/Tiles.app";
+const DESKTOP_BIN: &str = "tiles-desktop";
+
 /// written by the menu bar app while it holds sleep off
 #[cfg(target_os = "macos")]
 const SLEEP_MARKER: &str =
@@ -87,6 +92,7 @@ impl UninstallPlanner {
         add_service_file_to_plan(&mut plan, crate::core::service::plist_path()?);
         #[cfg(target_os = "macos")]
         add_sleep_grant_to_plan(&mut plan);
+        add_desktop_app_to_plan(&mut plan, &lib_dir);
 
         if all {
             let user_data_dir = resolve_user_data_dir_for_uninstall(&data_dir, &config_dir)?;
@@ -162,6 +168,32 @@ impl UninstallPlanner {
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn add_service_file_to_plan(plan: &mut UninstallPlanner, path: PathBuf) {
     plan.remove_files.insert(path);
+}
+
+/// the desktop app, and on Linux its launcher entry and icon
+fn add_desktop_app_to_plan(plan: &mut UninstallPlanner, lib_dir: &Path) {
+    plan.remove_files.insert(lib_dir.join(DESKTOP_BIN));
+    #[cfg(target_os = "macos")]
+    plan.remove_dirs.insert(PathBuf::from(MAC_APP));
+    #[cfg(target_os = "linux")]
+    if let Some(share) = desktop_share_dir(lib_dir) {
+        plan.remove_files
+            .insert(share.join("applications/tiles.desktop"));
+        plan.remove_files
+            .insert(share.join("icons/hicolor/256x256/apps/tiles.png"));
+    }
+}
+
+/// where install.sh puts them, the system share dir for a system install
+#[cfg(target_os = "linux")]
+fn desktop_share_dir(lib_dir: &Path) -> Option<PathBuf> {
+    if lib_dir == Path::new(SYSTEM_LIB_DIR) {
+        return Some(PathBuf::from("/usr/local/share"));
+    }
+    env::var_os("XDG_DATA_HOME")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::home_dir().map(|home| home.join(".local/share")))
 }
 
 #[cfg(target_os = "macos")]
@@ -703,6 +735,26 @@ mod tests {
         assert_eq!(layout.lib_dir, root.path());
         assert!(is_tiles_lib_dir(&layout.lib_dir));
         Ok(())
+    }
+
+    #[test]
+    fn the_desktop_app_goes_with_tiles() {
+        let mut plan = UninstallPlanner::default();
+        let lib_dir = PathBuf::from(SYSTEM_LIB_DIR);
+        super::add_desktop_app_to_plan(&mut plan, &lib_dir);
+        assert!(plan.remove_files.contains(&lib_dir.join("tiles-desktop")));
+        #[cfg(target_os = "linux")]
+        for path in [
+            "/usr/local/share/applications/tiles.desktop",
+            "/usr/local/share/icons/hicolor/256x256/apps/tiles.png",
+        ] {
+            assert!(plan.remove_files.contains(&PathBuf::from(path)), "{path}");
+        }
+        #[cfg(target_os = "macos")]
+        assert!(
+            plan.remove_dirs
+                .contains(&PathBuf::from("/Applications/Tiles.app"))
+        );
     }
 
     #[cfg(target_os = "macos")]

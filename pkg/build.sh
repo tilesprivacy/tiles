@@ -76,6 +76,18 @@ echo "Embedding the web UI"
 ./scripts/fetch_ui.sh
 cp -r ui "${PKG_LIBS_PATH}/"
 
+echo "Embedding the Tiles app"
+./scripts/fetch_desktop.sh
+codesign --force \
+  --sign "$DEVELOPER_ID_APPLICATION" \
+  --options runtime \
+  --timestamp \
+  --strict \
+  desktop/Tiles.app
+mkdir -p pkgroot/Applications
+rm -rf pkgroot/Applications/Tiles.app
+cp -R desktop/Tiles.app pkgroot/Applications/
+
   
 # Build venvstack and move to /usr/local/share/tiles
 # 
@@ -122,4 +134,7 @@ cp -r "${MODELFILE_DIR}" "${PKG_LIBS_PATH}"
 
 
 # Creating .pkg
-pkgbuild --root pkgroot --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg
+# the app stays in /Applications, an update doesn't follow it to where it was moved
+pkgbuild --analyze --root pkgroot pkg/components.plist
+plutil -replace 0.BundleIsRelocatable -bool NO pkg/components.plist
+pkgbuild --root pkgroot --component-plist pkg/components.plist --scripts pkg/scripts --identifier com.tilesprivacy.tiles --version "$VERSION" pkg/tiles-unsigned.pkg
