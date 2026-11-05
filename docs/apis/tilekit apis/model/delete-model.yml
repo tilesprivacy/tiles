@@ -1,0 +1,24 @@
+info:
+  name: delete-model
+  type: http
+  seq: 8
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/model/delete"
+  body:
+    type: json
+    data: |-
+      {
+        "model": "unsloth/gemma-4-E2B-it-GGUF:Q4_K_M"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs: Deletes a downloaded model and returns the bytes freed. Not the model chats use, nor one downloading

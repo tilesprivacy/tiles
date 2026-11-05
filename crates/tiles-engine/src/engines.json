@@ -1,0 +1,110 @@
+{
+  "tag": "b11960",
+  "engines": [
+    {
+      "engine": "cuda-12",
+      "arch": "x86_64",
+      "version": "12.8",
+      "files": [
+        {
+          "name": "llama-b11960-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 182524002,
+          "unpacked": 240742400,
+          "sha256": "64d57beb9abb637c177c6afb313760a0c0782224cac71e74869eed5b8f9a1ea4"
+        },
+        {
+          "name": "cudart-llama-b11960-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 594371478,
+          "unpacked": 868904960,
+          "sha256": "7c4d5974bd39649df649649e5d71950688a70e37aaae00bf11afbb656ea2cc56"
+        }
+      ]
+    },
+    {
+      "engine": "cuda-13",
+      "arch": "x86_64",
+      "version": "13.4",
+      "files": [
+        {
+          "name": "llama-b11960-bin-ubuntu-cuda-13.4-x64.tar.gz",
+          "size": 163957335,
+          "unpacked": 227686400,
+          "sha256": "0cf758b28483593a5a15e0d2c9b686c40840d1f8be9b5bb2417f04a053113907"
+        },
+        {
+          "name": "cudart-llama-b11960-bin-ubuntu-cuda-13.4-x64.tar.gz",
+          "size": 440232534,
+          "unpacked": 603371520,
+          "sha256": "756e14988abb5daa60d25f27a9766a9a78f04c88647c4b92a88fb749488d72f7"
+        }
+      ]
+    },
+    {
+      "engine": "vulkan",
+      "arch": "x86_64",
+      "files": [
+        {
+          "name": "llama-b11960-bin-ubuntu-vulkan-x64.tar.gz",
+          "size": 35474467,
+          "unpacked": 98560000,
+          "sha256": "164199e978304bb32a8a6c24b8efa015528ddf286821596eab676c90b375feac"
+        }
+      ]
+    },
+    {
+      "engine": "cpu",
+      "arch": "x86_64",
+      "files": [
+        {
+          "name": "llama-b11960-bin-ubuntu-x64.tar.gz",
+          "size": 22686210,
+          "unpacked": 57425920,
+          "sha256": "31cc3a6bc638ac6c48dc4b1b74888f1eaadf3d14227c1e5f67daf9a49541d97a"
+        }
+      ]
+    },
+    {
+      "engine": "cuda-13",
+      "arch": "aarch64",
+      "version": "13.4",
+      "files": [
+        {
+          "name": "llama-b11960-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+          "size": 159059972,
+          "unpacked": 207288320,
+          "sha256": "a66743e250e2975d7181b9f51048bfbea7903106035b711bea5c552360323452"
+        },
+        {
+          "name": "cudart-llama-b11960-bin-ubuntu-cuda-13.4-arm64.tar.gz",
+          "size": 552521522,
+          "unpacked": 718807040,
+          "sha256": "4b20f8c8dab2eb49c9f46ab93e11858877f1c031696f665ed5584b045187d0a0"
+        }
+      ]
+    },
+    {
+      "engine": "vulkan",
+      "arch": "aarch64",
+      "files": [
+        {
+          "name": "llama-b11960-bin-ubuntu-vulkan-arm64.tar.gz",
+          "size": 28828107,
+          "unpacked": 76257280,
+          "sha256": "22d1f852055a95a5c969b90326a2b68b4618eca6c54638bae27b4ee603031d53"
+        }
+      ]
+    },
+    {
+      "engine": "cpu",
+      "arch": "aarch64",
+      "files": [
+        {
+          "name": "llama-b11960-bin-ubuntu-arm64.tar.gz",
+          "size": 18411465,
+          "unpacked": 42987520,
+          "sha256": "0065ecfbffe8a790bb0d28059a3320cdc8f723b7f3f248cdc8bfc04790927715"
+        }
+      ]
+    }
+  ]
+}

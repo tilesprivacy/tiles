@@ -14,6 +14,7 @@ use tokio::fs;
 use tokio_util::sync::CancellationToken;
 
 pub use cache::{on_disk, repo_dir};
+pub use fetch::{Remote, fetch};
 pub use hub::Hub;
 pub use plan::{DEFAULT_QUANT, plan};
 
@@ -118,7 +119,18 @@ async fn fetch_blob(
 
     let part = blobs.join(format!("{}.part", file.blob));
     cache::reuse_sync_part(blobs, file, &part).await?;
-    let Some(sha256) = fetch::fetch(hub, plan, file, &part, cancel, on_event)
+    let remote = Remote {
+        name: &file.name,
+        size: file.size,
+        request: &|| {
+            hub.get(&format!(
+                "{}/resolve/{}/{}",
+                plan.repo, plan.commit, file.name
+            ))
+        },
+        check: &|res| hub::check(res, &plan.repo),
+    };
+    let Some(sha256) = fetch::fetch(&remote, &part, cancel, on_event)
         .await
         .with_context(|| format!("Downloading {} failed", file.name))?
     else {

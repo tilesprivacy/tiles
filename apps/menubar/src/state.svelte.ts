@@ -17,7 +17,8 @@ export type Llama = {
   mtp: boolean | null;
   nCpuMoe: number | null;
   flashAttn: boolean | null;
-  noMmap: boolean | null;
+  /** llama.cpp's --load-mode value, e.g. "auto" or "mmap+mlock" */
+  loadMode: string | null;
 };
 
 export type Inference = { power: Power; model: string | null; llama: Llama | null };

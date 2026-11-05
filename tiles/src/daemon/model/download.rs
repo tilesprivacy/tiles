@@ -4,33 +4,27 @@ use std::{
     convert::Infallible,
     path::{Path, PathBuf},
     sync::Arc,
-    time::{Duration, Instant},
 };
 
 use axum::response::sse::Event;
 use futures_util::Stream;
 use nix::sys::statvfs::statvfs;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use tokio::{
-    runtime::Handle,
-    sync::{Mutex as AsyncMutex, broadcast, watch},
-    task::JoinHandle,
-};
+use tokio::sync::{Mutex as AsyncMutex, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use super::Spec;
 use crate::{
-    daemon::AppError,
+    daemon::{
+        AppError,
+        job::{Job, JobState, Speed, is_live},
+    },
     repl::resolve_gguf_path,
     utils::{
         config::get_model_cache,
         hf_model_downloader::{self as hf, DownloadEvent, DownloadOutcome, DownloadPlan, Hub},
     },
 };
-
-const UPDATE_EVERY: Duration = Duration::from_millis(250);
-const SPEED_WINDOW: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
@@ -55,11 +49,13 @@ pub enum DownloadState {
     },
 }
 
-impl DownloadState {
+impl JobState for DownloadState {
     fn is_running(&self) -> bool {
         matches!(self, Self::Downloading { .. } | Self::Verifying { .. })
     }
+}
 
+impl DownloadState {
     pub(super) fn is_unfinished(&self) -> bool {
         !matches!(self, Self::Idle | Self::Done)
     }
@@ -90,20 +86,27 @@ pub struct ModelStatus {
     download: DownloadState,
 }
 
-type Running = Option<(CancellationToken, JoinHandle<()>)>;
+impl ModelStatus {
+    pub(super) fn is_done(&self) -> bool {
+        matches!(self.download, DownloadState::Done)
+    }
+}
 
 pub struct ModelDownload {
     hub: Arc<Hub>,
     spec: Spec,
     root: PathBuf,
     spare_room: u64,
-    pub(super) state: watch::Sender<DownloadState>,
+    pub(super) job: Arc<Job<DownloadState>>,
     changes: broadcast::Sender<ModelChange>,
     plan: AsyncMutex<Option<DownloadPlan>>,
-    running: AsyncMutex<Running>,
 }
 
 impl ModelDownload {
+    pub(super) fn spec(&self) -> &Spec {
+        &self.spec
+    }
+
     pub(super) fn new(
         hub: Arc<Hub>,
         spec: Spec,
@@ -116,28 +119,22 @@ impl ModelDownload {
             spec,
             root,
             spare_room,
-            state: watch::Sender::new(DownloadState::Idle),
+            job: Job::new(DownloadState::Idle),
             changes,
             plan: AsyncMutex::new(None),
-            running: AsyncMutex::new(None),
         }
     }
 
     pub(super) fn change(&self) -> ModelChange {
         ModelChange {
             model: self.spec.to_string(),
-            state: self.state.borrow().clone(),
+            state: self.job.state(),
         }
     }
 
     // only sends real changes, as status re-reads the same state on every call
     fn set(&self, state: DownloadState) {
-        let changed = self.state.send_if_modified(|current| {
-            let changed = *current != state;
-            *current = state;
-            changed
-        });
-        if changed {
+        if self.job.set(state) {
             let _ = self.changes.send(self.change());
         }
     }
@@ -170,7 +167,7 @@ impl ModelDownload {
 
     pub async fn status(&self) -> Result<ModelStatus, AppError> {
         // held so a starting download isn't overwritten
-        let running = self.running.lock().await;
+        let running = self.job.lock().await;
         let free_disk = free_space(&self.root).ok();
         if !is_live(&running) && self.is_ready() {
             self.set(DownloadState::Done);
@@ -186,7 +183,7 @@ impl ModelDownload {
         let plan = self.plan().await?;
         let (total, on_disk) = (plan.total(), hf::on_disk(&plan, &self.root).await);
         // a failure stays until the next start
-        let failed = matches!(*self.state.borrow(), DownloadState::Failed { .. });
+        let failed = matches!(self.job.state(), DownloadState::Failed { .. });
         if !is_live(&running) && !failed {
             self.set(DownloadState::from_disk(on_disk, total));
         }
@@ -195,14 +192,14 @@ impl ModelDownload {
             total: Some(total),
             on_disk: Some(on_disk),
             free_disk,
-            download: self.state.borrow().clone(),
+            download: self.job.state(),
         })
     }
 
     pub async fn start(self: &Arc<Self>) -> Result<DownloadState, AppError> {
-        let mut running = self.running.lock().await;
+        let mut running = self.job.lock().await;
         if is_live(&running) {
-            return Ok(self.state.borrow().clone());
+            return Ok(self.job.state());
         }
 
         let plan = self.plan().await?;
@@ -228,7 +225,7 @@ impl ModelDownload {
         });
         let task = tokio::spawn(Arc::clone(self).run(plan, done, cancel.clone()));
         *running = Some((cancel, task));
-        Ok(self.state.borrow().clone())
+        Ok(self.job.state())
     }
 
     async fn run(self: Arc<Self>, plan: DownloadPlan, done: u64, cancel: CancellationToken) {
@@ -255,65 +252,69 @@ impl ModelDownload {
         self.set(state);
     }
 
+    /// Deletes the repo's folder, shared by all its quants, and returns the bytes freed.
+    /// `quants` lists every quant, this one included
+    pub async fn delete(&self, quants: &[Arc<ModelDownload>]) -> Result<u64, AppError> {
+        // blocks their downloads while the files are removed
+        let mut held = Vec::with_capacity(quants.len());
+        for quant in quants {
+            let running = quant.job.lock().await;
+            if is_live(&running) {
+                return Err(AppError::Conflict(format!(
+                    "{} is downloading, pause it before deleting {}",
+                    quant.spec, self.spec
+                )));
+            }
+            held.push(running);
+        }
+        let dir = hf::repo_dir(&self.root, &self.spec.repo);
+        let freed = tokio::task::spawn_blocking(move || {
+            let freed = size_of(&dir);
+            std::fs::remove_dir_all(&dir).map(|()| freed)
+        })
+        .await
+        .map_err(|err| AppError::InternalServerError(err.to_string()))?
+        .map_err(|err| match err.kind() {
+            std::io::ErrorKind::NotFound => {
+                AppError::NotFound(format!("{} isn't on this computer", self.spec))
+            }
+            _ => AppError::InternalServerError(format!("Couldn't delete {}: {err}", self.spec)),
+        })?;
+        for quant in quants {
+            quant.set(DownloadState::Idle);
+        }
+        Ok(freed)
+    }
+
     pub async fn pause(&self) -> Result<DownloadState, AppError> {
-        let mut running = self.running.lock().await;
-        let Some((cancel, task)) = running.take().filter(|(_, task)| !task.is_finished()) else {
-            return Err(AppError::NotFound(format!(
-                "{} isn't downloading",
-                self.spec
-            )));
-        };
-        cancel.cancel();
-        let _ = task.await;
-        Ok(self.state.borrow().clone())
+        self.job
+            .pause()
+            .await
+            .ok_or_else(|| AppError::NotFound(format!("{} isn't downloading", self.spec)))
     }
 
     // with `pause_on_close`, closing the stream early pauses the download
     pub fn events(
-        self: &Arc<Self>,
+        &self,
         pause_on_close: bool,
     ) -> impl Stream<Item = Result<Event, Infallible>> + use<> {
-        let mut changes = self.state.subscribe();
-        // made here, as the stream runs nothing until polled
-        let mut guard = PauseOnClose(pause_on_close.then(|| Arc::clone(self)));
-        async_stream::stream! {
-            loop {
-                let state = changes.borrow_and_update().clone();
-                let running = state.is_running();
-                yield Ok(Event::default().event("state").data(json!(state).to_string()));
-                if !running || changes.changed().await.is_err() {
-                    break;
-                }
-            }
-            guard.disarm();
-        }
+        self.job.events(pause_on_close)
     }
 }
 
-struct PauseOnClose(Option<Arc<ModelDownload>>);
-
-impl PauseOnClose {
-    fn disarm(&mut self) {
-        self.0 = None;
-    }
-}
-
-impl Drop for PauseOnClose {
-    fn drop(&mut self) {
-        if let Some(download) = self.0.take()
-            && let Ok(runtime) = Handle::try_current()
-        {
-            runtime.spawn(async move {
-                let _ = download.pause().await;
-            });
-        }
-    }
-}
-
-fn is_live(running: &Running) -> bool {
-    running
-        .as_ref()
-        .is_some_and(|(_, task)| !task.is_finished())
+// size of the files under `path`, skipping the snapshot links to blobs
+fn size_of(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => size_of(&entry.path()),
+            Ok(kind) if kind.is_file() => entry.metadata().map_or(0, |meta| meta.len()),
+            _ => 0,
+        })
+        .sum()
 }
 
 fn free_space(path: &Path) -> nix::Result<u64> {
@@ -331,28 +332,22 @@ fn gb(bytes: u64) -> String {
 struct Progress {
     done: u64,
     total: u64,
-    bytes_per_sec: u64,
-    sample: (Instant, u64),
-    sent: Instant,
+    speed: Speed,
 }
 
 impl Progress {
     fn new(done: u64, total: u64) -> Self {
-        let now = Instant::now();
         Self {
             done,
             total,
-            bytes_per_sec: 0,
-            sample: (now, done),
-            sent: now,
+            speed: Speed::new(),
         }
     }
 
     fn update(&mut self, event: DownloadEvent) -> Option<DownloadState> {
-        let now = Instant::now();
         match event {
             DownloadEvent::Verifying { .. } => {
-                self.sent = now;
+                self.speed.hold();
                 Some(DownloadState::Verifying {
                     done: self.done,
                     total: self.total,
@@ -360,21 +355,11 @@ impl Progress {
             }
             DownloadEvent::Progress { done, .. } => {
                 self.done = done;
-                let (at, from) = self.sample;
-                let elapsed = now - at;
-                if elapsed >= SPEED_WINDOW {
-                    self.bytes_per_sec =
-                        (done.saturating_sub(from) as f64 / elapsed.as_secs_f64()) as u64;
-                    self.sample = (now, done);
-                }
-                if now - self.sent < UPDATE_EVERY {
-                    return None;
-                }
-                self.sent = now;
+                let bytes_per_sec = self.speed.update(done)?;
                 Some(DownloadState::Downloading {
                     done,
                     total: self.total,
-                    bytes_per_sec: self.bytes_per_sec,
+                    bytes_per_sec,
                 })
             }
         }

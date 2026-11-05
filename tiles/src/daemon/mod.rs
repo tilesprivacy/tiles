@@ -58,6 +58,7 @@ pub mod account;
 pub mod agent;
 pub mod atproto;
 pub mod authz;
+mod job;
 pub mod model;
 pub mod net;
 pub mod server;
@@ -138,6 +139,7 @@ pub enum AppError {
     RequestTimeout,
     BadRequest(String),
     AlreadyExists(String),
+    Conflict(String),
     CannotProcess(String),
     Forbidden(String),
     MethodNotAllowed(String),
@@ -153,6 +155,7 @@ impl AppError {
             Self::RequestTimeout => (StatusCode::REQUEST_TIMEOUT, "request timedout".to_string()),
             Self::BadRequest(e) => (StatusCode::BAD_REQUEST, e),
             Self::AlreadyExists(e) => (StatusCode::CONFLICT, e),
+            Self::Conflict(e) => (StatusCode::CONFLICT, e),
             Self::CannotProcess(e) => (StatusCode::UNPROCESSABLE_ENTITY, e),
             Self::Forbidden(e) => (StatusCode::FORBIDDEN, e),
             Self::MethodNotAllowed(e) => (StatusCode::METHOD_NOT_ALLOWED, e),

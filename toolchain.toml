@@ -4,6 +4,9 @@
 
 [embedded-tools]
 pi = "v0.84.2"
+tiles-ui = "v0.2.0"
+# the build of llama.cpp v0.8.0. after changing it, run scripts/llama_engines.sh
+llama.cpp = "b11960"
 sqlcipher = "4.10.0"
 
 [dev-tools]

@@ -57,11 +57,39 @@ pub struct LlamaConfig {
     pub n_cpu_moe: Option<u32>,
     /// Enable flash attention (`--flash-attn`).
     pub flash_attn: Option<bool>,
-    /// Disable memory-mapping the GGUF (`--no-mmap`).
-    pub no_mmap: Option<bool>,
+    /// How llama.cpp loads the model (`--load-mode`).
+    pub load_mode: Option<LoadMode>,
+}
+
+/// llama.cpp's `--load-mode`, with llama.cpp's own value names
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum LoadMode {
+    /// mmap, unless a device doesn't support it (llama.cpp's default)
+    Auto,
+    /// read the model into memory
+    None,
+    /// memory-map the model
+    Mmap,
+    /// keep the model in RAM, never swapped out
+    Mlock,
+    /// mmap, and keep the model in RAM
+    #[serde(rename = "mmap+mlock")]
+    #[value(name = "mmap+mlock")]
+    MmapMlock,
+    /// DirectIO, where the system has it
+    Dio,
 }
 
 impl LlamaConfig {
+    /// Fills what's unset with Tiles' defaults. Without a context length llama.cpp uses
+    /// the model's maximum and runs out of memory on most machines
+    pub fn with_defaults(mut self) -> Self {
+        self.context_length = self.context_length.or(Some(65536));
+        self.flash_attn = self.flash_attn.or(Some(true));
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
         self.context_length.is_none()
             && self.gpu_layers.is_none()
@@ -70,7 +98,7 @@ impl LlamaConfig {
             && self.mtp.is_none()
             && self.n_cpu_moe.is_none()
             && self.flash_attn.is_none()
-            && self.no_mmap.is_none()
+            && self.load_mode.is_none()
     }
 }
 
@@ -126,7 +154,7 @@ pub const PY_PORT: u32 = 6969;
 pub const REMOTE_BOUND_PORT: u32 = 9271;
 
 /// Bundled runtime directories under lib_dir removed on default uninstall.
-pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "models"];
+pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "ui", "models"];
 
 pub trait ConfigProvider {
     fn get_config_dir(&self) -> Result<PathBuf>;
@@ -412,8 +440,8 @@ pub fn save_config_with_provider(config: &Table, provider: impl ConfigProvider) 
     let config_path = tiles_config_dir.join("config.toml");
     let tmp_path = tiles_config_dir.join("config.tmp.toml");
     fs::write(&tmp_path, config.to_string())?;
-    fs::copy(&tmp_path, &config_path)?;
-    fs::remove_file(tmp_path)?;
+    // readers never see half a file
+    fs::rename(&tmp_path, &config_path)?;
     Ok(())
 }
 
@@ -424,8 +452,8 @@ fn save_root_config(config: &RootConfig) -> Result<()> {
     let config_path = tiles_config_dir.join("config.toml");
     let tmp_path = tiles_config_dir.join("config.tmp.toml");
     fs::write(&tmp_path, toml::to_string(config)?)?;
-    fs::copy(&tmp_path, &config_path)?;
-    fs::remove_file(tmp_path)?;
+    // readers never see half a file
+    fs::rename(&tmp_path, &config_path)?;
     Ok(())
 }
 /// Get the apt path where the model in the system.
@@ -640,13 +668,21 @@ pub fn get_ui_config() -> Result<UiConfig> {
     Ok(root_config.ui.unwrap_or_default())
 }
 
+/// With the defaults filled in, matching what the model server gets
 pub fn get_llama_config() -> Result<LlamaConfig> {
     let root_config = get_or_create_root_config()?;
-    Ok(root_config.llama.unwrap_or_default())
+    Ok(root_config.llama.unwrap_or_default().with_defaults())
 }
 
+/// The model chats use, last picked in the UI or run by `tiles run`
+pub fn get_current_model() -> Option<String> {
+    Some(get_or_create_root_config().ok()?.model?.current)
+}
+
+/// The config for the model server, with the llama defaults filled in
 pub fn get_config_json() -> Result<serde_json::Value> {
-    let root_config = get_or_create_root_config()?;
+    let mut root_config = get_or_create_root_config()?;
+    root_config.llama = Some(root_config.llama.unwrap_or_default().with_defaults());
     serde_json::to_value(root_config).map_err(Into::<anyhow::Error>::into)
 }
 
@@ -654,18 +690,15 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     let mut llama_config = root_config.llama.unwrap_or_default();
 
-    llama_config.context_length = config
-        .context_length
-        .or(llama_config.context_length)
-        .or(Some(32768));
+    llama_config.context_length = config.context_length.or(llama_config.context_length);
     llama_config.gpu_layers = config.gpu_layers.or(llama_config.gpu_layers);
     llama_config.offload_kqv = config.offload_kqv.or(llama_config.offload_kqv);
     llama_config.batch_size = config.batch_size.or(llama_config.batch_size);
     llama_config.mtp = config.mtp.or(llama_config.mtp);
-    llama_config.n_cpu_moe = config.n_cpu_moe.or(llama_config.n_cpu_moe).or(Some(12));
-    llama_config.flash_attn = config.flash_attn.or(llama_config.flash_attn).or(Some(true));
-    llama_config.no_mmap = config.no_mmap.or(llama_config.no_mmap).or(Some(true));
-    root_config.llama = Some(llama_config);
+    llama_config.n_cpu_moe = config.n_cpu_moe.or(llama_config.n_cpu_moe);
+    llama_config.flash_attn = config.flash_attn.or(llama_config.flash_attn);
+    llama_config.load_mode = config.load_mode.or(llama_config.load_mode);
+    root_config.llama = Some(llama_config.with_defaults());
     save_root_config(&root_config)
 }
 
@@ -698,6 +731,39 @@ mod tests {
     use super::*;
     use serde_json::Value;
     use tempfile::tempdir;
+
+    // old configs still have no_mmap, and nothing migrates them. the next save drops it
+    #[test]
+    fn a_config_with_retired_keys_still_loads() {
+        let config: RootConfig = toml::from_str(
+            r#"
+                [llama]
+                context_length = 32768
+                no_mmap = true
+            "#,
+        )
+        .unwrap();
+
+        let llama = config.llama.unwrap();
+        assert_eq!(llama.context_length, Some(32768));
+        assert_eq!(llama.load_mode, None);
+    }
+
+    #[test]
+    fn load_mode_takes_llama_cpp_names_only() {
+        for (name, mode) in [
+            ("auto", LoadMode::Auto),
+            ("none", LoadMode::None),
+            ("mmap", LoadMode::Mmap),
+            ("mlock", LoadMode::Mlock),
+            ("mmap+mlock", LoadMode::MmapMlock),
+            ("dio", LoadMode::Dio),
+        ] {
+            let config: LlamaConfig = toml::from_str(&format!("load_mode = \"{name}\"")).unwrap();
+            assert_eq!(config.load_mode, Some(mode));
+        }
+        assert!(toml::from_str::<LlamaConfig>("load_mode = \"no-mmap\"").is_err());
+    }
 
     fn expected_pi_provider_json(model_name: &str, endpoint_base_url: &str) -> Value {
         let mut model = json!({
@@ -781,6 +847,26 @@ mod tests {
         );
 
         assert_eq!(expected_json, serde_json::to_value(&config).unwrap())
+    }
+
+    #[test]
+    fn unset_llama_settings_get_the_defaults_and_set_ones_stay() {
+        let filled = LlamaConfig::default().with_defaults();
+        assert_eq!(filled.context_length, Some(65536));
+        // --n-cpu-moe turns off llama.cpp's --fit for every model
+        assert_eq!(filled.n_cpu_moe, None);
+        assert_eq!(filled.flash_attn, Some(true));
+        // llama.cpp picks how to load the model
+        assert_eq!(filled.load_mode, None);
+
+        let mine = LlamaConfig {
+            context_length: Some(8192),
+            flash_attn: Some(false),
+            ..LlamaConfig::default()
+        }
+        .with_defaults();
+        assert_eq!(mine.context_length, Some(8192));
+        assert_eq!(mine.flash_attn, Some(false));
     }
 
     #[test]
