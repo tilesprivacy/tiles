@@ -16,7 +16,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tiles_engine::{BUILDS, Engine, Hardware, auto, choices, detect, wanted};
+use tiles_engine::{BUILDS, Engine, Hardware, auto, choices, detect, engine_to_run};
 
 pub use install::{Engines, InstallState};
 
@@ -44,7 +44,7 @@ async fn status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 fn describe(engines: &Engines, hardware: &Hardware) -> Value {
     let choices = engines.choices(hardware);
     let pick = get_engine_pick();
-    let engine = wanted(pick, hardware, &choices);
+    let engine = engine_to_run(pick, hardware, &choices);
     let installed = engines.installed();
     let needs_download = !engine.is_bundled()
         && !installed
@@ -114,7 +114,7 @@ async fn select(
 async fn start(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let hardware = detect().await;
     let choices = state.engines.choices(&hardware);
-    let engine = wanted(get_engine_pick(), &hardware, &choices);
+    let engine = engine_to_run(get_engine_pick(), &hardware, &choices);
     Ok(ApiResponse::success(
         state.engines.start(engine, &choices).await?,
     ))
