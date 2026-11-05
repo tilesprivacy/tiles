@@ -43,7 +43,13 @@ fi
 
 case "${OS}" in
   darwin) [[ -d "${STAGE}/Tiles.app" ]] || { echo "No Tiles.app in the desktop app" >&2; exit 1; } ;;
-  *) [[ -x "${STAGE}/tiles-desktop" ]] || { echo "No tiles-desktop in the desktop app" >&2; exit 1; } ;;
+  *)
+    [[ -x "${STAGE}/tiles-desktop" ]] || { echo "No tiles-desktop in the desktop app" >&2; exit 1; }
+    # install.sh needs the launcher entry and icon too
+    for file in tiles.desktop tiles.png; do
+      [[ -f "${STAGE}/${file}" ]] || { echo "No ${file} in the desktop app" >&2; exit 1; }
+    done
+    ;;
 esac
 chmod 755 "${STAGE}"
 rm -rf "${OUT_DIR}"

@@ -154,6 +154,9 @@ pub const PY_PORT: u32 = 6969;
 // Used in remote inference, this is port where we open a TCP connection to proxy
 pub const REMOTE_BOUND_PORT: u32 = 9271;
 
+/// Left in the lib dir by `install.sh --headless`, for updates to stay headless
+pub const HEADLESS_MARKER: &str = ".headless";
+
 /// Bundled runtime directories under lib_dir removed on default uninstall.
 pub const LIB_RUNTIME_DIRS_TO_REMOVE: &[&str] = &["server", "modelfiles", "pi", "ui", "models"];
 

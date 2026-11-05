@@ -275,6 +275,13 @@ elif [[ -d "${TMPDIR}/ui" ]]; then
   cp -r "${TMPDIR}/ui"/. "${UI_DIR}/"
 fi
 
+# remembered for `tiles update`, which runs this script again without the flag
+if [[ "${HEADLESS}" == "true" ]]; then
+  touch "${LIB_DIR}/.headless"
+else
+  rm -f "${LIB_DIR}/.headless"
+fi
+
 APP_INSTALLED="false"
 # a headless install also takes away an app an earlier install left
 if [[ "${HEADLESS}" == "true" ]]; then
