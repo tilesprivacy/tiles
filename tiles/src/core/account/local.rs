@@ -34,6 +34,7 @@ use crate::{
         account::{create_identity, get_secret_key, get_signing_key},
         storage::db::{DBTYPE, Dbconn, get_db_conn},
     },
+    daemon::authz::UpdatePeerParams,
     utils::{
         config::{
             ConfigProvider, DefaultProvider, get_app_name, get_or_create_config,
@@ -53,7 +54,7 @@ pub struct RootUser {
 }
 
 // Type of User account
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ACCOUNT {
     // root account, created in the system
     LOCAL,
@@ -95,14 +96,14 @@ impl Display for ACCOUNT {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct User {
     // unique uuidv7
     pub id: String,
     // did:key
     pub user_id: String,
     // nickname of the user
-    pub username: String,
+    pub username: Option<String>,
     // is this identity, user is using everywhere in Tiles
     pub active_profile: bool,
     // LOCAL / PEER(other identities other than user's)
@@ -268,6 +269,13 @@ pub struct TokenQueryOptions {
     pub issuer_did: Option<String>,
     pub aud_did: Option<String>,
     pub token_type: Option<TokenType>,
+}
+
+#[derive(Default)]
+pub struct UserQueryOptions {
+    pub user_id: Option<String>,
+    pub username: Option<String>,
+    pub user_ids: Option<Vec<String>>,
 }
 
 impl TokenQueryOptions {
@@ -454,7 +462,7 @@ pub fn save_root_account_db(db_conn: &Dbconn) -> Result<()> {
     let user = User {
         id: Uuid::now_v7().to_string(),
         user_id: root_user.id,
-        username: root_user.nickname,
+        username: Some(root_user.nickname),
         account_type: ACCOUNT::LOCAL,
         active_profile: true,
         root: true,
@@ -484,13 +492,11 @@ pub fn save_root_account_db(db_conn: &Dbconn) -> Result<()> {
     }
 }
 
-// TODO: We could add unique user_id constraints, but
-// we will wait for it until we solve the sync part
 pub fn save_peer_account_db(db_conn: &Connection, user_id: &str, nickname: &str) -> Result<()> {
     let user = User {
         id: Uuid::now_v7().to_string(),
         user_id: String::from(user_id),
-        username: String::from(nickname),
+        username: Some(String::from(nickname)),
         account_type: ACCOUNT::PEER,
         active_profile: false,
         root: false,
@@ -537,6 +543,7 @@ pub async fn create_token(
     // TODO: Getting a db conn again here, cuz the await above could move a
     // db reference to another thread. Used tokio-rusqlite
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
+
     let token = generate_delegation_token(issuer, aud_did, nickname, capability, db_conn).await?;
     Ok(token)
 }
@@ -566,6 +573,12 @@ async fn generate_delegation_token(
         .await
         .map_err(|e| anyhow!("Generating delegation token failed due to {}", e))?;
 
+    // if we are creating a Linked Token then don't set a nickname, since we anyway get the reverse delegation token from the peer, so nickname can be derived then. This also prevents overwriting peer nickname with ours during reverse delegation during the link process
+    let nickname = if matches!(token_type, TokenType::Linked) {
+        None
+    } else {
+        nickname
+    };
     let delegation_token = save_token(&db_conn, delegation, nickname, token_type)?;
     Ok(delegation_token)
 }
@@ -611,8 +624,7 @@ pub fn add_token(
     } else {
         TokenType::Peer
     };
-    let token = save_token(db_conn, delegation, nickname, token_type)
-        .context("Saving delegation token failed")?;
+    let token = save_token(db_conn, delegation, nickname, token_type)?;
     Ok(token)
 }
 
@@ -659,7 +671,6 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
 }
 
 /// Revokes the peer by deleting the related delegations
-/// TODO: Need test
 pub fn revoke_token(peer_did: &str, user: &User, conn: &Connection) -> Result<()> {
     let tokens = fetch_linked_tokens(conn, &user.user_id)?;
 
@@ -770,19 +781,14 @@ pub fn fetch_linked_tokens(conn: &Connection, issuer_did: &str) -> Result<Vec<To
     )
 }
 
+/// Saves the token and also tries to create the peer mentioned in the
+/// delegation
 fn save_token<S: Signature>(
     conn: &Connection,
     delegation: Delegation<S>,
     nickname: Option<&str>,
     token_type: TokenType,
 ) -> Result<Token> {
-    // We do an upsert only when the did, aud_did and the the type of token
-    // is `linked`. As there is no point of accumulating these, as it proves
-    // same point, but with maybe an extension of time
-    let mut stmt = conn.prepare(
-        "insert into tokens(id, did, token, cid, created_at, updated_at, type, aud_did, nickname) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) on conflict(did, aud_did) where type = 'linked' do update set token = ?3, updated_at = ?6, cid = ?4, nickname = ?9",
-    )?;
-
     let issuer_did = delegation.issuer().did();
     let aud_did = delegation.audience().did();
     let token_cid = delegation
@@ -792,23 +798,63 @@ fn save_token<S: Signature>(
 
     let token = data_encoding::BASE64.encode(&token_serialized);
 
-    match stmt.execute(params![
-        Uuid::now_v7().to_string(),
-        issuer_did.as_str().to_owned(),
-        token,
-        token_cid,
-        get_unix_time_now() as f64,
-        get_unix_time_now() as f64,
-        token_type,
-        aud_did.as_str(),
-        nickname
-    ]) {
-        Ok(_res) => {
-            let token = fetch_token_by_cid(&token_cid, conn)?;
-            Ok(token.expect("Expected token"))
-        }
-        Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
-    }
+    let user = get_current_user(conn)?;
+
+    // Who is the peer here in the delegation, we or another user
+    let peer_user = if aud_did.as_str() != user.user_id {
+        aud_did.as_str()
+    } else {
+        issuer_did.as_str()
+    };
+
+    let txn = conn.unchecked_transaction()?;
+
+    let resp = {
+        let mut stmt = txn.prepare(
+        "insert into tokens(id, did, token, cid, created_at, updated_at, type, aud_did, nickname) values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) on conflict(did, aud_did) where type = 'linked' do update set token = ?3, updated_at = ?6, cid = ?4, nickname = ?9",
+    )?;
+
+        let resp = match stmt.execute(params![
+            Uuid::now_v7().to_string(),
+            issuer_did.as_str().to_owned(),
+            token,
+            token_cid,
+            get_unix_time_now() as f64,
+            get_unix_time_now() as f64,
+            token_type,
+            aud_did.as_str(),
+            nickname
+        ]) {
+            Ok(_res) => {
+                let token = fetch_token_by_cid(&token_cid, conn)?;
+                Ok(token.expect("Expected token"))
+            }
+            Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
+        }?;
+
+        // We kinda do the unique username check in the query itself, so that we can assign username as None if conflict happens. This is fine as a local user can change this peer's username to whatever they wants ;ater. Usernames are always local and not globally unique unline DIDs
+        let mut stmt2= txn.prepare("INSERT INTO users (id, user_id, username, active_profile, account_type, root, created_at, updated_at) SELECT ?1, ?2, CASE WHEN ?3 IS NOT NULL AND EXISTS (SELECT 1 FROM users WHERE username = ?3 AND user_id IS NOT ?2) THEN NULL ELSE ?3 END, ?4, ?5, ?6, ?7, ?8 ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, updated_at = excluded.updated_at WHERE excluded.username IS NOT NULL")?;
+
+        match stmt2.execute(params![
+            Uuid::now_v7().to_string(),
+            peer_user.to_string(),
+            nickname,
+            false,
+            ACCOUNT::PEER.to_string(),
+            false,
+            get_unix_time_now() as f64,
+            get_unix_time_now() as f64,
+        ]) {
+            Ok(_res) => {
+                log::info!("New peer updated");
+                Ok(resp)
+            }
+
+            Err(err) => Err(anyhow!("Err insertin new peer due to {}", err)),
+        }?
+    };
+    txn.commit()?;
+    Ok(resp)
 }
 
 /// Create an invocation token with the delegation tokens
@@ -935,7 +981,7 @@ async fn create_root_user(root_user_config: &Table, nickname: Option<String>) ->
 }
 
 fn parse_user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
-    let account_type: String = row.get(3)?;
+    let account_type: String = row.get(4)?;
     let created_at: f64 = row.get(6)?;
     let updated_at: f64 = row.get(7)?;
     Ok(User {
@@ -943,7 +989,7 @@ fn parse_user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
         user_id: row.get(1)?,
         username: row.get(2)?,
         account_type: ACCOUNT::try_from(account_type).map_err(FromSqlError::other)?,
-        active_profile: row.get(4)?,
+        active_profile: row.get(3)?,
         root: row.get(5)?,
 
         created_at: created_at as u64,
@@ -952,7 +998,7 @@ fn parse_user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
 }
 /// Gets a user account by its DID
 pub fn get_user_info(conn: &Connection, did: &str) -> Result<User> {
-    let mut fetch_user = conn.prepare("select id, user_id, username, account_type, active_profile, root, created_at, updated_at from users    where user_id = ?1")?;
+    let mut fetch_user = conn.prepare("select id, user_id, username, active_profile,account_type, root, created_at, updated_at from users    where user_id = ?1")?;
 
     match fetch_user.query_one([did], parse_user_from_row) {
         Ok(user) => Ok(user),
@@ -965,7 +1011,7 @@ pub fn get_user_info(conn: &Connection, did: &str) -> Result<User> {
 }
 
 pub fn get_peer_list(db_conn: &Connection) -> Result<Vec<User>> {
-    let mut stmt= db_conn.prepare("select id, user_id, username, account_type, active_profile, root, created_at, updated_at  from users where account_type != \'local\'")?;
+    let mut stmt= db_conn.prepare("select id, user_id, username,active_profile, account_type, root, created_at, updated_at  from users where account_type != \'local\'")?;
 
     let user_rows = stmt
         .query_map([], parse_user_from_row)
@@ -1016,8 +1062,8 @@ pub fn create_dummy_user(conn: &Connection, did: Option<String>) -> User {
     let user = User {
         id,
         user_id,
-        username,
-        account_type: ACCOUNT::PEER,
+        username: Some(username),
+        account_type: ACCOUNT::LOCAL,
         active_profile: true,
         root: true,
         created_at: SystemTime::now()
@@ -1043,6 +1089,94 @@ pub fn create_dummy_user(conn: &Connection, did: Option<String>) -> User {
     )
     .unwrap();
     user
+}
+
+/// Updates a user
+pub fn update_user(conn: &Connection, update_params: UpdatePeerParams) -> Result<User> {
+    let mut final_query: String = String::from("");
+    let base_query = "UPDATE users";
+
+    final_query.push_str(base_query);
+
+    let mut updates: Vec<&str> = vec![];
+    let mut params: Vec<Box<dyn ToSql>> = vec![];
+
+    if let Some(username) = update_params.username {
+        updates.push("username = ?");
+        params.push(Box::new(username));
+    }
+
+    if !updates.is_empty() {
+        final_query.push_str(" SET ");
+        updates.push("updated_at = ?");
+        params.push(Box::new(get_unix_time_now() as f64));
+        final_query.push_str(&updates.join(" , "));
+    } else {
+        return Err(anyhow!("No params given to update"));
+    }
+
+    final_query.push_str(" WHERE user_id = ?");
+    params.push(Box::new(update_params.user_did.clone()));
+
+    let mut stmt = conn.prepare(&final_query)?;
+
+    match stmt.execute(params_from_iter(params)) {
+        Ok(_res) => get_user(conn, &update_params.user_did).and_then(|res| {
+            if let Some(result) = res {
+                Ok(result)
+            } else {
+                Err(anyhow!("User not found"))
+            }
+        }),
+        Err(err) => Err(anyhow!("Err updating user due to {}", err)),
+    }
+}
+
+pub fn fetch_users(conn: &Connection, filter: UserQueryOptions) -> Result<Vec<User>> {
+    let mut final_query: String = String::from("");
+    let base_query = "SELECT id, user_id, username, active_profile, account_type, root, created_at, updated_at FROM users";
+
+    final_query.push_str(base_query);
+
+    let mut clauses: Vec<String> = vec![];
+    let mut params: Vec<String> = vec![];
+    if let Some(issuer_did) = filter.user_id {
+        clauses.push("user_id= ?".to_string());
+        params.push(issuer_did);
+    }
+
+    if let Some(username) = filter.username {
+        clauses.push("username = ?".to_string());
+        params.push(username);
+    }
+
+    if let Some(user_ids) = filter.user_ids
+        && !user_ids.is_empty()
+    {
+        let placeholder = std::iter::repeat_n("?", user_ids.len())
+            .collect::<Vec<&str>>()
+            .join(",");
+        let placeholder_str = format!("user_id in ({})", placeholder);
+        clauses.push(placeholder_str);
+        params = [params.clone(), user_ids].concat();
+    }
+
+    if !clauses.is_empty() {
+        final_query.push_str(" WHERE ");
+        final_query.push_str(&clauses.join(" AND "));
+    }
+
+    final_query.push_str(" ORDER BY updated_at");
+
+    let mut stmt = conn.prepare(&final_query)?;
+    let user_rows = stmt.query_map(params_from_iter(params.iter()), parse_user_from_row)?;
+
+    let mut users: Vec<User> = vec![];
+
+    for user in user_rows {
+        users.push(user?);
+    }
+    Ok(users)
 }
 #[cfg(test)]
 pub mod tests {
@@ -1277,7 +1411,7 @@ pub mod tests {
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
-        username TEXT NOT NULL,
+        username TEXT,
         active_profile INTEGER NOT NULL DEFAULT 0 CHECK (active_profile IN (0,1)),
         account_type TEXT NOT NULL,
         root INTEGER NOT NULL DEFAULT 0 CHECK (root IN (0,1)),
@@ -1311,6 +1445,16 @@ pub mod tests {
             [],
         )
         .unwrap();
+        conn.execute(
+            "CREATE UNIQUE INDEX user_id_unique_idx ON users(user_id);",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "CREATE UNIQUE INDEX user_name_unique_idx ON users(username);",
+            [],
+        )
+        .unwrap();
         conn
     }
 
@@ -1326,7 +1470,7 @@ pub mod tests {
         let user = User {
             id: Uuid::now_v7().to_string(),
             user_id: String::from("did"),
-            username: String::from("nickname"),
+            username: Some(String::from("nickname")),
             account_type: ACCOUNT::LOCAL,
             active_profile: true,
             root: true,
@@ -1405,7 +1549,7 @@ pub mod tests {
         let user = User {
             id: Uuid::now_v7().to_string(),
             user_id: String::from("did"),
-            username: String::from("nickname"),
+            username: Some(String::from("nickname")),
             account_type,
             active_profile: true,
             root: true,
@@ -1476,17 +1620,245 @@ pub mod tests {
     }
 
     #[test]
+    fn test_fetch_users_without_filter() {
+        let conn = setup_db_schema();
+        let local_user = create_user(&conn, ACCOUNT::LOCAL);
+        save_peer_account_db(&conn, "did:jey:varathan", "varathan").unwrap();
+        save_peer_account_db(&conn, "did:jey:another", "another").unwrap();
+
+        let users = fetch_users(&conn, UserQueryOptions::default()).unwrap();
+
+        assert_eq!(users.len(), 3);
+        assert!(users.iter().any(|user| user.user_id == local_user.user_id));
+        assert!(users.iter().any(|user| user.user_id == "did:jey:varathan"));
+        assert!(users.iter().any(|user| user.user_id == "did:jey:another"));
+    }
+
+    #[test]
+    fn test_fetch_users_by_user_id() {
+        let conn = setup_db_schema();
+        save_peer_account_db(&conn, "did:jey:varathan", "varathan").unwrap();
+        save_peer_account_db(&conn, "did:jey:another", "another").unwrap();
+
+        let users = fetch_users(
+            &conn,
+            UserQueryOptions {
+                user_id: Some("did:jey:varathan".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].user_id, "did:jey:varathan");
+        assert_eq!(users[0].username.as_deref(), Some("varathan"));
+    }
+
+    #[test]
+    fn test_fetch_users_by_user_ids() {
+        let conn = setup_db_schema();
+        save_peer_account_db(&conn, "did:jey:varathan", "varathan").unwrap();
+        save_peer_account_db(&conn, "did:jey:another", "another").unwrap();
+        save_peer_account_db(&conn, "did:jey:third", "third").unwrap();
+
+        let users = fetch_users(
+            &conn,
+            UserQueryOptions {
+                user_ids: Some(vec![
+                    "did:jey:varathan".to_owned(),
+                    "did:jey:third".to_owned(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(users.len(), 2);
+        assert!(users.iter().any(|user| user.user_id == "did:jey:varathan"));
+        assert!(users.iter().any(|user| user.user_id == "did:jey:third"));
+        assert!(!users.iter().any(|user| user.user_id == "did:jey:another"));
+    }
+
+    #[test]
+    fn test_fetch_users_by_username() {
+        let conn = setup_db_schema();
+        save_peer_account_db(&conn, "did:jey:varathan", "varathan").unwrap();
+        save_peer_account_db(&conn, "did:jey:another", "another").unwrap();
+
+        let users = fetch_users(
+            &conn,
+            UserQueryOptions {
+                username: Some("varathan".to_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].user_id, "did:jey:varathan");
+        assert_eq!(users[0].username.as_deref(), Some("varathan"));
+    }
+
+    #[test]
+    fn test_update_user_updates_only_requested_user() {
+        let conn = setup_db_schema();
+        save_peer_account_db(&conn, "did:jey:varathan", "varathan").unwrap();
+        save_peer_account_db(&conn, "did:jey:another", "another").unwrap();
+
+        let updated_user = update_user(
+            &conn,
+            UpdatePeerParams {
+                user_did: "did:jey:varathan".to_owned(),
+                username: Some("updated-varathan".to_owned()),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(updated_user.user_id, "did:jey:varathan");
+        assert_eq!(updated_user.username.as_deref(), Some("updated-varathan"));
+        assert_eq!(
+            get_user_info(&conn, "did:jey:another")
+                .unwrap()
+                .username
+                .as_deref(),
+            Some("another")
+        );
+    }
+
+    #[test]
+    fn test_update_user_returns_error_for_missing_user() {
+        let conn = setup_db_schema();
+        save_peer_account_db(&conn, "did:jey:varathan", "varathan").unwrap();
+
+        let result = update_user(
+            &conn,
+            UpdatePeerParams {
+                user_did: "did:jey:missing".to_owned(),
+                username: Some("new-name".to_owned()),
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            get_user_info(&conn, "did:jey:varathan")
+                .unwrap()
+                .username
+                .as_deref(),
+            Some("varathan")
+        );
+    }
+
+    #[test]
     fn test_valid_add_token() {
         let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
 
         let db_conn = setup_db_conn_v2();
-
+        let _user = create_dummy_user(&db_conn.common, None);
         let resp = add_token(token, &db_conn.common, None);
 
         assert!(resp.is_ok());
         let token_struct = resp.unwrap();
         assert_eq!(token_struct.token, token);
-        assert_eq!(token_struct.r#type, TokenType::Linked)
+        assert_eq!(token_struct.r#type, TokenType::Linked);
+
+        let peer = get_user_info(&db_conn.common, &token_struct.aud_did).unwrap();
+        assert_eq!(peer.username, None);
+        assert!(matches!(peer.account_type, ACCOUNT::PEER));
+    }
+
+    #[test]
+    fn test_valid_add_token_but_with_same_name() {
+        let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
+
+        let db_conn = setup_db_conn_v2();
+        let _user = create_dummy_user(
+            &db_conn.common,
+            Some("did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5".to_string()),
+        );
+        let resp = add_token(token, &db_conn.common, Some("bunty"));
+
+        assert!(resp.is_ok());
+        let token_struct = resp.unwrap();
+        assert_eq!(token_struct.token, token);
+        assert_eq!(token_struct.r#type, TokenType::Linked);
+
+        let peer = get_user_info(&db_conn.common, &token_struct.aud_did).unwrap();
+        assert_eq!(peer.username, Some("bunty".to_string()));
+        assert!(matches!(peer.account_type, ACCOUNT::PEER));
+
+        let token = "glhARHCdirxNbF0FacMvSW5Se+eNV5yPkVtq9EliSNX879iYM4bZEQwQsDzl5HFFtX8A+ETBX17dz2u3Ihjdqi6rD6JhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4OGRpZDprZXk6ejZNa3FQbnZwMnhFUWFiRlo4bzF2eEFzOUJGVDJkTXVZM0cyaThXdjNKRHNOUDFNY2NtZGEvY2V4cBpszCIRY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUIkXrgZSswKCMsMtZGovTkQ=";
+        let resp = add_token(token, &db_conn.common, Some("bunty"));
+        let peers = fetch_users(
+            &db_conn.common,
+            UserQueryOptions {
+                user_ids: Some(vec![
+                    "did:plc:mbk6wgmxiatotzy5b3q57naw".to_string(),
+                    "did:key:z6MkqPnvp2xEQabFZ8o1vxAs9BFT2dMuY3G2i8Wv3JDsNP1M".to_string(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            peers
+                .iter()
+                .any(|p| p.username == Some("bunty".to_string()))
+        );
+        assert!(peers.iter().any(|p| p.username.is_none()));
+
+        assert!(resp.is_ok())
+    }
+    #[test]
+    fn test_add_token_with_none_nickname_does_not_upsert_existing_user() {
+        let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
+        let peer_did = "did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5";
+
+        let db_conn = setup_db_conn_v2();
+        let _user = create_dummy_user(&db_conn.common, None);
+        save_peer_account_db(&db_conn.common, peer_did, "existing-nickname").unwrap();
+
+        add_token(token, &db_conn.common, None).unwrap();
+
+        let peer = get_user_info(&db_conn.common, peer_did).unwrap();
+        assert_eq!(peer.username.as_deref(), Some("existing-nickname"));
+    }
+
+    #[test]
+    fn test_revoke_token_deletes_linked_token() {
+        let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
+        let token_bytes = data_encoding::BASE64.decode(token.as_bytes()).unwrap();
+        let delegation: Delegation<Ed25519Signature> =
+            serde_ipld_dagcbor::from_slice(&token_bytes).unwrap();
+        let issuer_did = delegation.issuer().did().to_string();
+
+        let db_conn = setup_db_conn_v2();
+        let user = create_dummy_user(&db_conn.common, Some(issuer_did.clone()));
+        let added_token = add_token(token, &db_conn.common, None).unwrap();
+
+        assert_eq!(
+            fetch_linked_tokens(&db_conn.common, &issuer_did)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        revoke_token(&added_token.aud_did, &user, &db_conn.common).unwrap();
+
+        assert!(
+            fetch_linked_tokens(&db_conn.common, &issuer_did)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_revoke_token_returns_error_when_linked_token_is_missing() {
+        let db_conn = setup_db_conn_v2();
+        let user = create_dummy_user(&db_conn.common, Some("did:plc:missing-issuer".to_owned()));
+
+        let result = revoke_token("did:key:missing-peer", &user, &db_conn.common);
+
+        assert!(result.is_err());
     }
 
     #[test]
@@ -1494,10 +1866,20 @@ pub mod tests {
         let token = "glhAPHPmeDM0le3YVN4oBkDEg6Yz0lqOIRo5HqkUQbbv3Kdh1jvig7YhpfC9fSO8FXaDP1MZXnz+nnuAT/YfwJ/KAqJhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4IGRpZDpwbGM6bWJrNndnbXhpYXRvdHp5NWIzcTU3bmF3Y2NtZGEvY2V4cBp87SFjY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUEHHpLSbdxgpK1QfeHvBxmQ=";
 
         let db_conn = setup_db_conn_v2();
-
+        let _user = create_dummy_user(&db_conn.common, None);
         let resp = add_token(token, &db_conn.common, None);
 
         assert!(resp.is_ok());
+
+        let users = fetch_users(
+            &db_conn.common,
+            UserQueryOptions {
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        println!("{:?}", users);
         let token_struct = resp.unwrap();
         assert_eq!(token_struct.token, token);
         assert_eq!(token_struct.r#type, TokenType::Linked);
@@ -1516,7 +1898,7 @@ pub mod tests {
 
         let did = "did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5";
         let db_conn = setup_db_conn_v2();
-
+        let _user = create_dummy_user(&db_conn.common, None);
         let resp = add_token(token, &db_conn.common, None);
         assert!(resp.is_ok());
 
@@ -1538,7 +1920,7 @@ pub mod tests {
 
         let did = "did:key:z6MkqkPYU3eUSs7Pg4NsSTNbm9hKZ4MU997wKFbBwt9gD5k5";
         let db_conn = setup_db_conn_v2();
-
+        let _user = create_dummy_user(&db_conn.common, None);
         let resp = add_token(token, &db_conn.common, None);
         assert!(resp.is_ok());
 
@@ -1568,6 +1950,7 @@ pub mod tests {
     async fn test_generate_token() {
         let signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
         let db_conn = setup_db_conn_v2();
+        let _user = create_dummy_user(&db_conn.common, None);
         let token = generate_delegation_token(
             signer,
             "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww",
@@ -1614,6 +1997,7 @@ pub mod tests {
         let audience_did = "did:key:z6Mkp1F7iJfUaj8Yp9nBNEvL3pCz42QBHtzaV4JQw3xjn5ww";
         let db = setup_db_conn_v2();
 
+        let _user = create_dummy_user(&db.common, None);
         let token = generate_delegation_token(
             signer,
             audience_did,
@@ -1649,6 +2033,7 @@ pub mod tests {
         let db_conn = setup_db_conn_v2();
         let issued_signer = Ed25519Signer::import(&[80; 32]).await.unwrap();
         let audience_signer = Ed25519Signer::import(&[100; 32]).await.unwrap();
+        let _user = create_dummy_user(&db_conn.common, None);
         let token_delegated = generate_delegation_token(
             issued_signer,
             &audience_signer.ed25519_did().to_string(),
@@ -1682,6 +2067,7 @@ pub mod tests {
             .unwrap();
         let delegation: Delegation<Ed25519Signature> =
             serde_ipld_dagcbor::from_slice(&token_delegated_in_bytes).unwrap();
+        let _user = create_dummy_user(&db_conn.common, None);
         let _ = save_token(&db_conn.common, delegation, None, TokenType::Linked);
         assert!(
             process_invocation_verification(&invocation_token, db_conn.common)

@@ -9,7 +9,7 @@ http:
   body:
     type: json
     data: |-
-      {
+      {      
         "cid": "mAXESIJ9TXRmCvIFqH+12lszWKSEufz454rz2Fs7FPYSCTpzy"
       }
   auth: inherit

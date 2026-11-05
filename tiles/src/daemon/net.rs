@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
-use crate::core::account::local::get_current_user;
+use crate::core::account::local::{UserQueryOptions, fetch_users, get_current_user};
 use crate::core::network::{self as core_network, create_endpoint};
 use crate::core::storage::db::get_db_conn;
 use crate::daemon::{
     ApiJson, ApiResponse, AppError, AppState, SimpleResponse, daemon_client, daemon_url,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 // use axum::extract::Path;
 use axum::{Router, extract::State, response::IntoResponse, routing::post};
 use axum_macros::debug_handler;
@@ -58,7 +58,8 @@ pub struct DeviceLinkParams {
 }
 #[derive(Serialize, Deserialize)]
 pub struct SyncParams {
-    did: String,
+    /// Handle to identify the device. It can be DID (did:key:z6Mk) or AT proto handle (@) or nickname given by user during linking
+    handle: String,
 }
 pub fn network_router() -> Router<Arc<AppState>> {
     Router::new()
@@ -211,6 +212,10 @@ pub async fn sync_with_device(
     State(state): State<Arc<AppState>>,
     ApiJson(params): ApiJson<SyncParams>,
 ) -> Result<impl IntoResponse, AppError> {
+    let common_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
+        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    let did = get_did_from_device_handle(params.handle, &common_db_conn)
+        .map_err(|e| AppError::CannotProcess(e.to_string()))?;
     let net_objs = {
         let network_state = state.network_state.read().await;
 
@@ -220,8 +225,7 @@ pub async fn sync_with_device(
     };
 
     if let Some((endpoint, gossip)) = net_objs {
-        let handle =
-            tokio::spawn(async move { core_network::sync(&params.did, gossip, endpoint).await });
+        let handle = tokio::spawn(async move { core_network::sync(&did, gossip, endpoint).await });
 
         match handle
             .await
@@ -237,6 +241,30 @@ pub async fn sync_with_device(
         Err(AppError::CannotProcess(
             "Failed to get the network state".to_string(),
         ))
+    }
+}
+
+fn get_did_from_device_handle(handle: String, common_db_conn: &Connection) -> Result<String> {
+    if handle.starts_with("did:key") {
+        Ok(handle)
+    } else {
+        // Else we assume the handle is a nickname, and get the peer by the nickname
+        let users = fetch_users(
+            common_db_conn,
+            UserQueryOptions {
+                username: Some(handle.clone()),
+                ..Default::default()
+            },
+        )?;
+
+        if users.is_empty() {
+            Err(anyhow!("No peer found by the nickname {}", &handle))
+        } else {
+            users
+                .first()
+                .map(|u| u.user_id.clone())
+                .ok_or(anyhow!("Failed to fetch the user details"))
+        }
     }
 }
 
@@ -312,11 +340,11 @@ pub async fn fetch_network_status_cli() -> Result<()> {
     Ok(())
 }
 
-pub async fn sync_with_peer_cli(did: String) -> Result<()> {
+pub async fn sync_with_peer_cli(handle: String) -> Result<()> {
     let res = daemon_client()
         .await?
         .post(daemon_url("/v1/tilekit/net/sync-with-device"))
-        .body(json!(SyncParams { did }).to_string())
+        .body(json!(SyncParams { handle }).to_string())
         .header("content-type", "application/json")
         .send()
         .await
