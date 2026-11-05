@@ -112,7 +112,7 @@ const CUDA_13_NATIVE: [(u32, u32); 4] = [(8, 6), (8, 9), (12, 0), (12, 1)];
 
 /// Every engine for this computer
 pub fn choices(hardware: &Hardware, builds: &Builds) -> Vec<Choice> {
-    if hardware.macos {
+    if hardware.os == "macos" {
         return vec![Choice {
             engine: Engine::Metal,
             label: "Metal".to_owned(),
@@ -163,14 +163,15 @@ pub fn auto(hardware: &Hardware, choices: &[Choice]) -> Engine {
         .map_or(Engine::Cpu, |choice| choice.engine)
 }
 
-/// The engine Tiles runs: the one picked by hand while it can run here, otherwise auto
-pub fn wanted(pick: Option<Engine>, hardware: &Hardware, choices: &[Choice]) -> Engine {
-    pick.filter(|pick| {
-        choices
-            .iter()
-            .any(|choice| choice.engine == *pick && choice.unavailable.is_none())
-    })
-    .unwrap_or_else(|| auto(hardware, choices))
+/// The engine Tiles runs: the backend the user set while it can run here, otherwise auto
+pub fn engine_to_run(backend: Option<Engine>, hardware: &Hardware, choices: &[Choice]) -> Engine {
+    backend
+        .filter(|backend| {
+            choices
+                .iter()
+                .any(|choice| choice.engine == *backend && choice.unavailable.is_none())
+        })
+        .unwrap_or_else(|| auto(hardware, choices))
 }
 
 fn label(engine: Engine, build: Option<&Build>) -> String {
@@ -231,7 +232,7 @@ mod tests {
 
     fn linux(gpus: Vec<Gpu>, driver: Option<&str>) -> Hardware {
         Hardware {
-            macos: false,
+            os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
             gpus,
             nvidia_driver: driver.map(str::to_owned),
@@ -399,18 +400,21 @@ mod tests {
     fn a_pick_that_cant_run_here_falls_back_to_auto() {
         let hardware = linux(vec![other(Vendor::Amd)], None);
         let choices = choices(&hardware, &BUILDS);
-        assert_eq!(wanted(Some(Engine::Cpu), &hardware, &choices), Engine::Cpu);
         assert_eq!(
-            wanted(Some(Engine::Cuda13), &hardware, &choices),
+            engine_to_run(Some(Engine::Cpu), &hardware, &choices),
+            Engine::Cpu
+        );
+        assert_eq!(
+            engine_to_run(Some(Engine::Cuda13), &hardware, &choices),
             Engine::Vulkan
         );
-        assert_eq!(wanted(None, &hardware, &choices), Engine::Vulkan);
+        assert_eq!(engine_to_run(None, &hardware, &choices), Engine::Vulkan);
     }
 
     #[test]
     fn macos_has_metal_only() {
         let mac = Hardware {
-            macos: true,
+            os: "macos".to_owned(),
             arch: "aarch64".to_owned(),
             gpus: vec![],
             nvidia_driver: None,

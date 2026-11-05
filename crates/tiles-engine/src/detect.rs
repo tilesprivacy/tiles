@@ -7,7 +7,7 @@ use tokio::process::Command;
 
 #[derive(Debug)]
 pub struct Hardware {
-    pub macos: bool,
+    pub os: String,
     pub arch: String,
     pub gpus: Vec<Gpu>,
     pub nvidia_driver: Option<String>,
@@ -54,10 +54,11 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 /// Asks nvidia-smi first, then the driver's /proc files and libraries for what it couldn't tell
 pub async fn detect() -> Hardware {
+    let os = env::consts::OS.to_owned();
     let arch = env::consts::ARCH.to_owned();
     if cfg!(target_os = "macos") {
         return Hardware {
-            macos: true,
+            os,
             arch,
             gpus: apple_chip().await.into_iter().collect(),
             nvidia_driver: None,
@@ -105,7 +106,7 @@ pub async fn detect() -> Hardware {
     );
 
     Hardware {
-        macos: false,
+        os,
         arch,
         gpus,
         nvidia_driver: nvidia.driver,
