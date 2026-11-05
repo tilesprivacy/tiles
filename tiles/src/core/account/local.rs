@@ -829,16 +829,13 @@ fn save_token<S: Signature>(
                 let token = fetch_token_by_cid(&token_cid, conn)?;
                 Ok(token.expect("Expected token"))
             }
-            Err(err) if err.to_string().contains("UNIQUE constraint") => Err(anyhow!(
-                "Username {} already taken",
-                nickname.expect("Can't unfurl username")
-            )),
             Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
-        };
+        }?;
 
-        let mut stmt2 = txn.prepare("insert into users (id, user_id, username, active_profile, account_type, root, created_at, updated_at) values (?1, ?2, ?3,?4, ?5, ?6, ?7, ?8) on conflict(user_id) do update set username = excluded.username, updated_at = excluded.updated_at WHERE excluded.username IS NOT NULL")?;
+        // We kinda do the unique username check in the query itself, so that we can assign username as None if conflict happens. This is fine as a local user can change this peer's username to whatever they wants ;ater. Usernames are always local and not globally unique unline DIDs
+        let mut stmt2= txn.prepare("INSERT INTO users (id, user_id, username, active_profile, account_type, root, created_at, updated_at) SELECT ?1, ?2, CASE WHEN ?3 IS NOT NULL AND EXISTS (SELECT 1 FROM users WHERE username = ?3 AND user_id IS NOT ?2) THEN NULL ELSE ?3 END, ?4, ?5, ?6, ?7, ?8 ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, updated_at = excluded.updated_at WHERE excluded.username IS NOT NULL")?;
 
-        match stmt2.execute(params![
+        match stmt3.execute(params![
             Uuid::now_v7().to_string(),
             peer_user.to_string(),
             nickname,
@@ -850,13 +847,14 @@ fn save_token<S: Signature>(
         ]) {
             Ok(_res) => {
                 log::info!("New peer updated");
+                Ok(resp)
             }
-            Err(err) => return Err(anyhow!("Err insertin new peer due to {}", err)),
-        };
-        resp
+
+            Err(err) => Err(anyhow!("Err insertin new peer due to {}", err)),
+        }?
     };
     txn.commit()?;
-    resp
+    Ok(resp)
 }
 
 /// Create an invocation token with the delegation tokens
@@ -1806,7 +1804,20 @@ pub mod tests {
 
         let token = "glhARHCdirxNbF0FacMvSW5Se+eNV5yPkVtq9EliSNX879iYM4bZEQwQsDzl5HFFtX8A+ETBX17dz2u3Ihjdqi6rD6JhaEg0Ae0B7QETcXN1Y2FuL2RsZ0AxLjAuMC1yYy4xp2NhdWR4OGRpZDprZXk6ejZNa3FQbnZwMnhFUWFiRlo4bzF2eEFzOUJGVDJkTXVZM0cyaThXdjNKRHNOUDFNY2NtZGEvY2V4cBpszCIRY2lzc3g4ZGlkOmtleTp6Nk1rcWtQWVUzZVVTczdQZzROc1NUTmJtOWhLWjRNVTk5N3dLRmJCd3Q5Z0Q1azVjcG9sgGNzdWJ4OGRpZDprZXk6ejZNa3FrUFlVM2VVU3M3UGc0TnNTVE5ibTloS1o0TVU5OTd3S0ZiQnd0OWdENWs1ZW5vbmNlUIkXrgZSswKCMsMtZGovTkQ=";
         let resp = add_token(token, &db_conn.common, Some("bunty"));
-        assert!(resp.is_err())
+        let peers = fetch_users(
+            &db_conn.common,
+            UserQueryOptions {
+                user_ids: Some(vec![
+                    "did:plc:mbk6wgmxiatotzy5b3q57naw".to_string(),
+                    "did:key:z6MkqPnvp2xEQabFZ8o1vxAs9BFT2dMuY3G2i8Wv3JDsNP1M".to_string(),
+                ]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(peers[0].username, Some("bunty".to_string()));
+        assert_eq!(peers[1].username, None);
+        assert!(resp.is_ok())
     }
     #[test]
     fn test_add_token_with_none_nickname_does_not_upsert_existing_user() {
