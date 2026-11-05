@@ -137,7 +137,7 @@ pub async fn fetch_linked_devices() -> Result<impl IntoResponse, AppError> {
     .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
     if tokens.is_empty() {
-        return Err(AppError::NotFound("No linked devices".to_string()));
+        return Ok(ApiResponse::success(vec![]));
     }
 
     let peer_ids = tokens.into_iter().map(|t| t.did).collect::<Vec<String>>();

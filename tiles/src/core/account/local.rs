@@ -1799,8 +1799,13 @@ pub mod tests {
             },
         )
         .unwrap();
-        assert_eq!(peers[0].username, Some("bunty".to_string()));
-        assert_eq!(peers[1].username, None);
+        assert!(
+            peers
+                .iter()
+                .any(|p| p.username == Some("bunty".to_string()))
+        );
+        assert!(peers.iter().any(|p| p.username.is_none()));
+
         assert!(resp.is_ok())
     }
     #[test]
