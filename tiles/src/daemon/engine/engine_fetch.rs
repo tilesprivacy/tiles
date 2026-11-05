@@ -15,7 +15,7 @@ use crate::daemon::{
     sse::take_events,
 };
 
-/// Asks before downloading. No keeps models on the CPU, by picking it
+/// Asks before downloading. No keeps models on the CPU, by picking it unless the engine was picked by hand
 pub async fn offer() -> Result<()> {
     if !io::stdin().is_terminal() {
         return Ok(());
@@ -61,6 +61,14 @@ pub async fn offer() -> Result<()> {
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
+            // a pick made by hand stays, the next run offers it again
+            if status["pick"] != "auto" {
+                println!(
+                    "Models run on the CPU until {} is downloaded",
+                    label(engine)
+                );
+                return Ok(());
+            }
             let res = client
                 .post(daemon_url("/v1/tilekit/engine/select"))
                 .json(&json!({ "engine": "cpu" }))
@@ -144,7 +152,14 @@ async fn follow(client: &Client, label: &impl Fn(&Value) -> String) -> Result<()
                     );
                     return Ok(());
                 }
-                InstallState::Idle => {}
+                // deleted, or the daemon restarted, before it got going
+                InstallState::Idle => {
+                    eprintln!(
+                        "{} The engine download stopped. Models run on the CPU for now",
+                        "WARNING:".yellow()
+                    );
+                    return Ok(());
+                }
             }
         }
     }

@@ -24,7 +24,7 @@ esac
 
 # Reuse an already-provisioned binary. Set FORCE_LLAMA_FETCH=1 to re-download.
 if [[ -x "${OUT_DIR}/llama-server" && -f "${OUT_DIR}/.llama-backend" \
-  && "$(<"${OUT_DIR}/.llama-backend")" == "${BACKEND} ${LLAMA_CPP_TAG}" \
+  && "$(<"${OUT_DIR}/.llama-backend")" == "${ASSET}" \
   && "${FORCE_LLAMA_FETCH:-}" != "1" ]]; then
   echo "llama-server already present at ${OUT_DIR}/llama-server; skipping fetch (set FORCE_LLAMA_FETCH=1 to force)."
   exit 0
@@ -37,8 +37,10 @@ TMP="$(mktemp -d "${ROOT}/.cache/llama.XXXXXX")"
 trap 'rm -rf "${TMP}"' EXIT
 
 echo "Downloading ${ASSET}"
-curl -fsSL --retry 3 "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_TAG}/${ASSET}" \
-  | tar -xz -C "${TMP}"
+# to a file first, a retry halfway through would repeat bytes already piped into tar
+curl -fsSL --retry 3 -o "${TMP}/${ASSET}" \
+  "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_TAG}/${ASSET}"
+tar -xzf "${TMP}/${ASSET}" -C "${TMP}"
 
 SERVER_BIN="$(find "${TMP}" -type f -name llama-server | head -1)"
 if [[ -z "${SERVER_BIN}" ]]; then
@@ -58,5 +60,6 @@ else
   cp -a "${BIN_DIR}/"*.so* "${OUT_DIR}/"
 fi
 chmod +x "${OUT_DIR}/llama-server"
-printf '%s\n' "${BACKEND} ${LLAMA_CPP_TAG}" > "${OUT_DIR}/.llama-backend"
+# the asset names the platform too, a checkout moved to another machine fetches again
+printf '%s\n' "${ASSET}" > "${OUT_DIR}/.llama-backend"
 echo "Installed ${OUT_DIR}/llama-server (${BACKEND}, ${LLAMA_CPP_TAG})"
