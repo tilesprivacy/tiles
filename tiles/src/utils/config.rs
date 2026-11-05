@@ -111,8 +111,8 @@ pub struct UiConfig {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct EngineConfig {
-    /// The llama.cpp build picked by hand, like "vulkan". Tiles picks one when it's unset
-    pub pick: Option<String>,
+    /// The llama.cpp build replies run on, like "vulkan", or "auto" for Tiles to pick one
+    pub backend: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -684,14 +684,14 @@ pub fn get_llama_config() -> Result<LlamaConfig> {
 
 /// The engine picked by hand, `None` for auto or a name this Tiles doesn't know
 pub fn get_engine_pick() -> Option<Engine> {
-    let pick = get_or_create_root_config().ok()?.engine?.pick?;
-    Engine::from_name(&pick)
+    let backend = get_or_create_root_config().ok()?.engine?.backend?;
+    Engine::from_name(&backend)
 }
 
 pub fn set_engine_pick(pick: Option<Engine>) -> Result<()> {
     let mut root_config = get_or_create_root_config()?;
     root_config.engine = Some(EngineConfig {
-        pick: pick.map(|engine| engine.name().to_owned()),
+        backend: Some(pick.map_or("auto", |engine| engine.name()).to_owned()),
     });
     save_root_config(&root_config)
 }

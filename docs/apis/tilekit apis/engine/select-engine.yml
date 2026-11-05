@@ -23,7 +23,7 @@ settings:
 
 docs:
   content: |-
-    Saves the engine to use, or `auto`. It answers like engine-status. Picking an engine that failed its check tries it again. It doesn't download anything, start-download does.
+    Saves the engine to use, or `auto`, as `[engine] backend` in config.toml. It answers like engine-status. Picking an engine that failed its check tries it again. It doesn't download anything, start-download does.
 
     Replies switch to the new engine once it's installed, no restart needed. 409 while an engine is downloading
   type: text/markdown
