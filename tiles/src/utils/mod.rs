@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod hf_model_downloader;
 pub mod installer;
 pub mod lexicons;
+pub mod shell_path;
 pub mod uninstaller;
 /// Opens `url` in the default browser, if there's one. Needs a tokio runtime
 pub fn open_in_browser(url: &str) {
