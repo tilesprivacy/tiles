@@ -94,6 +94,10 @@ pub struct AppState {
     pub agent_model: Mutex<Option<String>>,
     /// The ATmosphere sign in waiting for the browser, if any
     pub login: AsyncMutex<Option<atproto::LoginTask>>,
+    /// The old chat Pi goes on with, see `session::resume_session`
+    pub resumed_chat: Mutex<Option<session::ResumedChat>>,
+    /// Off in tests, which must never stop a model server the user is running
+    pub can_stop_model_server: bool,
     pub web_ui: web::WebUiState,
     pub models: model::Models,
     pub engines: Arc<engine::Engines>,
@@ -117,6 +121,8 @@ impl AppState {
             agent: None.into(),
             agent_model: Mutex::new(None),
             login: None.into(),
+            resumed_chat: Mutex::new(None),
+            can_stop_model_server: false,
             web_ui: web::WebUiState::Serving {
                 url: format!("http://127.0.0.1:{}", web::UI_PORT),
             },
@@ -512,6 +518,8 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
         agent: None.into(),
         agent_model: Mutex::new(None),
         login: None.into(),
+        resumed_chat: Mutex::new(None),
+        can_stop_model_server: true,
         web_ui: web_ui_state,
         models,
         engines,

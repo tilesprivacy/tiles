@@ -5,7 +5,7 @@ use crate::{
         pi::{self, PiAgent, handle_graceful_exit},
         types::PiResponse,
     },
-    daemon::{ApiJson, ApiResponse, AppError, AppState, model::picked_modelfile},
+    daemon::{ApiJson, ApiResponse, AppError, AppState, model::picked_modelfile, session},
     repl::{get_default_modelfile, model_spec},
     utils::config::{ConfigProvider, DefaultProvider, PY_PORT, get_current_model},
 };
@@ -124,13 +124,25 @@ async fn agent_state(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
         "Failed to get a mutable agent instance".to_string(),
     ))?;
 
-    let state = agent
+    let mut pi_state = agent
         .reader
         .get_pi_state(&mut agent.writer)
         .await
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+    // a resumed chat keeps its own id, Pi's session for it is an inner detail
+    if let Some(resumed) = state
+        .resumed_chat
+        .lock()
+        .expect("resumed chat lock")
+        .as_ref()
+        && resumed.pi_session_id == pi_state.session_id
+    {
+        pi_state.session_id = resumed.chat_id.clone();
+    }
 
-    Ok(ApiResponse::success(serde_json::to_value(state).unwrap()))
+    Ok(ApiResponse::success(
+        serde_json::to_value(pi_state).unwrap(),
+    ))
 }
 
 #[debug_handler]
@@ -152,11 +164,32 @@ async fn process_chat_prompt(
             return;
         };
 
+        let history = t_state
+            .resumed_chat
+            .lock()
+            .expect("resumed chat lock")
+            .as_mut()
+            .and_then(|resumed| resumed.pending_history.take());
+        let message = match &history {
+            Some(history) => session::prompt_with_history(history, &payload.message),
+            None => payload.message,
+        };
         let payload = json!({
             "type": "prompt",
-            "message": payload.message
+            "message": message
         });
         if let Err(err) = agent.writer.send_to_pi(payload).await {
+            // Pi never got it, the next prompt carries the history instead
+            if let (Some(history), Some(resumed)) = (
+                history,
+                t_state
+                    .resumed_chat
+                    .lock()
+                    .expect("resumed chat lock")
+                    .as_mut(),
+            ) {
+                resumed.pending_history = Some(history);
+            }
             let err_str = format!("Failed to send the payload to Pi due to {:?}", err);
             handle_pi_errors(err_str.to_owned(), &tx).await;
             return;
@@ -226,11 +259,13 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
 mod tests {
 
     use crate::core::agent::pi::from_test_command;
-    use crate::daemon::{AppState, agent::agent_router};
+    use crate::daemon::{AppState, agent::agent_router, session::ResumedChat};
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use reqwest::StatusCode;
     use serde_json::json;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
     use tower::ServiceExt;
     #[tokio::test]
@@ -346,5 +381,100 @@ mod tests {
         let sse_events = String::from_utf8(body_bytes.to_vec()).unwrap();
 
         assert!(sse_events.contains("event: error"));
+    }
+
+    #[tokio::test]
+    async fn a_resumed_chat_is_reported_under_its_own_id() {
+        let pi_agent = from_test_command(
+            "sh",
+            &[
+                "-c",
+                r#"read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+printf '{"type": "response", "id": "'"$id"'", "command": "get_state", "success": true, "data": {"sessionId": "pi-2", "model": {"id": "id", "name": "model"}, "thinkingLevel": "high", "isStreaming": false}}\n'"#,
+            ],
+        )
+        .unwrap();
+        let state = AppState {
+            agent: AsyncMutex::new(Some(pi_agent)),
+            resumed_chat: Mutex::new(Some(ResumedChat {
+                pi_session_id: "pi-2".to_owned(),
+                chat_id: "old".to_owned(),
+                pending_history: None,
+            })),
+            ..AppState::for_tests()
+        };
+
+        let response = agent_router()
+            .with_state(state.into())
+            .oneshot(
+                Request::builder()
+                    .uri("/v1/tilekit/agent/state")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains(r#""sessionId":"old""#), "{body}");
+    }
+
+    #[tokio::test]
+    async fn the_first_prompt_after_a_resume_carries_the_chat_so_far() {
+        let dir = tempdir().unwrap();
+        let got = dir.path().join("got");
+        let script = format!(
+            r#"read request; printf '%s' "$request" > '{}'
+printf '{{"type":"agent_settled"}}\n'"#,
+            got.display()
+        );
+        let pi_agent = from_test_command("sh", &["-c", &script]).unwrap();
+        let state = AppState {
+            agent: AsyncMutex::new(Some(pi_agent)),
+            resumed_chat: Mutex::new(Some(ResumedChat {
+                pi_session_id: "pi-2".to_owned(),
+                chat_id: "old".to_owned(),
+                pending_history: Some("User: capital of India?\n\nAssistant: New Delhi".to_owned()),
+            })),
+            ..AppState::for_tests()
+        };
+        let state = std::sync::Arc::new(state);
+        let response = agent_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .uri("/v1/tilekit/agent/prompt")
+                    .body(Body::new(
+                        json!({ "message": "and of France?" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        response.into_body().collect().await.unwrap();
+
+        let sent: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&got).unwrap()).unwrap();
+        let message = sent["message"].as_str().unwrap();
+        assert!(
+            message.starts_with("Here is our conversation so far"),
+            "{message}"
+        );
+        assert!(message.contains("Assistant: New Delhi"));
+        assert!(message.ends_with("and of France?"));
+        // only the first prompt carries it
+        assert!(
+            state
+                .resumed_chat
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .pending_history
+                .is_none()
+        );
     }
 }
