@@ -408,7 +408,7 @@ async fn wrong_method(method: Method, uri: Uri) -> AppError {
     AppError::MethodNotAllowed(format!("{} is not allowed on {}", method, uri.path()))
 }
 
-// the desktop app and the vite dev server are on other origins. DELETE pauses downloads
+// the app's webview and the vite dev server are on other origins
 fn cors_layer() -> CorsLayer {
     let origins = [
         "tauri://localhost",
@@ -420,7 +420,7 @@ fn cors_layer() -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(origins)
-        .allow_methods([Method::GET, Method::POST, Method::DELETE])
+        .allow_methods([Method::GET, Method::POST])
         .allow_headers([CONTENT_TYPE])
 }
 
@@ -1010,10 +1010,7 @@ mod tests {
         body::Body,
         http::{
             Request,
-            header::{
-                ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_REQUEST_METHOD, CONTENT_TYPE, HOST,
-                ORIGIN,
-            },
+            header::{CONTENT_TYPE, HOST},
         },
     };
     use http_body_util::BodyExt;
@@ -1208,27 +1205,6 @@ mod tests {
         let body = res.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["status"], "failed");
-    }
-
-    #[tokio::test]
-    async fn the_desktop_app_may_pause_a_download() {
-        // the app's page has its own origin, the browser asks before a DELETE
-        let req = Request::builder()
-            .method("OPTIONS")
-            .uri("/v1/tilekit/model/download")
-            .header(HOST, "127.0.0.1:1729")
-            .header(ORIGIN, "tauri://localhost")
-            .header(ACCESS_CONTROL_REQUEST_METHOD, "DELETE")
-            .body(Body::empty())
-            .unwrap();
-        let res = router(Arc::new(AppState::for_tests()))
-            .oneshot(req)
-            .await
-            .unwrap();
-        let allowed = res.headers()[ACCESS_CONTROL_ALLOW_METHODS]
-            .to_str()
-            .unwrap();
-        assert!(allowed.contains("DELETE"), "{allowed}");
     }
 
     async fn open_ports(app: Router) -> (tokio::net::TcpListener, Router, String) {
