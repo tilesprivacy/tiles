@@ -29,10 +29,8 @@ pub fn engine_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/engine/status", get(status))
         .route("/v1/tilekit/engine/select", post(select))
-        .route(
-            "/v1/tilekit/engine/download",
-            get(progress).post(start).delete(pause),
-        )
+        .route("/v1/tilekit/engine/download", get(progress).post(start))
+        .route("/v1/tilekit/engine/download/pause", post(pause))
         .route("/v1/tilekit/engine/delete", post(delete))
 }
 

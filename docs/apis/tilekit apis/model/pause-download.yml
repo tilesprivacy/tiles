@@ -4,8 +4,14 @@ info:
   seq: 4
 
 http:
-  method: DELETE
-  url: "{{tilekit_base_url}}/model/download?model=unsloth/gemma-4-12b-it-GGUF:Q4_K_M"
+  method: POST
+  url: "{{tilekit_base_url}}/model/download/pause"
+  body:
+    type: json
+    data: |-
+      {
+        "model": "unsloth/gemma-4-12b-it-GGUF:Q4_K_M"
+      }
   auth: inherit
 
 settings:

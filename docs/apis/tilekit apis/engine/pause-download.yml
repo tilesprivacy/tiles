@@ -4,8 +4,8 @@ info:
   seq: 5
 
 http:
-  method: DELETE
-  url: "{{tilekit_base_url}}/engine/download"
+  method: POST
+  url: "{{tilekit_base_url}}/engine/download/pause"
   auth: inherit
 
 settings:

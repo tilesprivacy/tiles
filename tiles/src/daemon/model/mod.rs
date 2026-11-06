@@ -61,10 +61,8 @@ pub fn model_router() -> Router<Arc<AppState>> {
         .route("/v1/tilekit/model/status", get(status))
         .route("/v1/tilekit/model/downloads", get(downloads))
         .route("/v1/tilekit/model/events", get(events))
-        .route(
-            "/v1/tilekit/model/download",
-            get(progress).post(start).delete(pause),
-        )
+        .route("/v1/tilekit/model/download", get(progress).post(start))
+        .route("/v1/tilekit/model/download/pause", post(pause))
         .route("/v1/tilekit/model/select", post(select))
         .route("/v1/tilekit/model/delete", post(delete))
 }
@@ -317,7 +315,7 @@ async fn start(
 
 async fn pause(
     State(state): State<Arc<AppState>>,
-    Query(which): Query<Which>,
+    ApiJson(which): ApiJson<Which>,
 ) -> Result<impl IntoResponse, AppError> {
     let download = state.models.get(which.model.as_deref())?;
     Ok(ApiResponse::success(download.pause().await?))
