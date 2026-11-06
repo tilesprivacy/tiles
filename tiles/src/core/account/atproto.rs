@@ -20,10 +20,10 @@ use atrium_oauth::{
 };
 use log::info;
 use reqwest::Client;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, sync::Arc, time::Duration};
 use tokio::sync::oneshot;
+use tokio_rusqlite::rusqlite::{Connection, OptionalExtension, params};
 
 use std::error::Error;
 
@@ -488,7 +488,7 @@ fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use tokio_rusqlite::rusqlite::Connection;
 
     #[test]
     fn test_add_a_new_auth_entry() {

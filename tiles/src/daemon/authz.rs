@@ -184,7 +184,7 @@ pub async fn update_peer(
 }
 
 fn update_peer_in_db(
-    common_db_conn: &rusqlite::Connection,
+    common_db_conn: &tokio_rusqlite::rusqlite::Connection,
     update_params: UpdatePeerParams,
 ) -> Result<local::User, AppError> {
     let users = fetch_users(
