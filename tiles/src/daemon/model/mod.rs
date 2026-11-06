@@ -33,6 +33,7 @@ use tokio::sync::broadcast::{self, error::RecvError};
 
 pub use bundled::picked_modelfile;
 pub use download::{DownloadState, ModelChange, ModelDownload};
+pub(crate) use download::{free_space, gb};
 pub use model_fetch::pull;
 
 use crate::{
@@ -53,17 +54,15 @@ const SPARE_ROOM: u64 = 1_000_000_000;
 const CHANGES_KEPT: usize = 64;
 
 // needed for `pause_on_close`, a web page can't send it without a CORS preflight
-pub(super) const CLIENT_HEADER: &str = "x-tiles-client";
+pub(crate) const CLIENT_HEADER: &str = "x-tiles-client";
 
 pub fn model_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/model/status", get(status))
         .route("/v1/tilekit/model/downloads", get(downloads))
         .route("/v1/tilekit/model/events", get(events))
-        .route(
-            "/v1/tilekit/model/download",
-            get(progress).post(start).delete(pause),
-        )
+        .route("/v1/tilekit/model/download", get(progress).post(start))
+        .route("/v1/tilekit/model/download/pause", post(pause))
         .route("/v1/tilekit/model/select", post(select))
         .route("/v1/tilekit/model/delete", post(delete))
 }
@@ -316,7 +315,7 @@ async fn start(
 
 async fn pause(
     State(state): State<Arc<AppState>>,
-    Query(which): Query<Which>,
+    ApiJson(which): ApiJson<Which>,
 ) -> Result<impl IntoResponse, AppError> {
     let download = state.models.get(which.model.as_deref())?;
     Ok(ApiResponse::success(download.pause().await?))

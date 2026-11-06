@@ -317,14 +317,14 @@ fn size_of(path: &Path) -> u64 {
         .sum()
 }
 
-fn free_space(path: &Path) -> nix::Result<u64> {
+pub(crate) fn free_space(path: &Path) -> nix::Result<u64> {
     let stat = statvfs(path)?;
     // the types differ between Linux and macOS
     #[allow(clippy::unnecessary_cast)]
     Ok(stat.blocks_available() as u64 * stat.fragment_size() as u64)
 }
 
-fn gb(bytes: u64) -> String {
+pub(crate) fn gb(bytes: u64) -> String {
     format!("{:.1}", bytes as f64 / 1e9)
 }
 

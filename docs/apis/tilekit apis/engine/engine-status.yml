@@ -1,0 +1,29 @@
+info:
+  name: engine-status
+  type: http
+  seq: 1
+
+http:
+  method: GET
+  url: "{{tilekit_base_url}}/engine/status"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    The GPUs and NVIDIA driver Tiles found, and every engine with its download size in bytes. An engine that can't run here, or failed its check here, has an `unavailable` reason to show the user. The CPU engine ships with Tiles, so its download is 0.
+
+    - `pick` is the engine picked by hand, or `auto`
+    - `auto` is the engine Tiles picks for this computer
+    - `engine` is the one Tiles runs: the pick while it can run here, otherwise auto
+    - `installed` is the engine on disk, null when there's none. Replies run on it until another one is installed
+    - `needs_download` is true when `engine` isn't installed yet
+    - `override` is a llama-server set with TILES_LLAMA_SERVER_BIN, which replies run on whatever is picked
+    - `download` is the install's state, as in download-progress
+  type: text/markdown

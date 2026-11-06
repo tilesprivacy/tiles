@@ -1,0 +1,29 @@
+info:
+  name: select-engine
+  type: http
+  seq: 2
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/engine/select"
+  body:
+    type: json
+    data: |-
+      {
+        "engine": "vulkan"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Saves the engine to use, or `auto`, as `[engine] backend` in config.toml. It answers like engine-status. Picking an engine that failed its check tries it again. It doesn't download anything, start-download does.
+
+    Replies switch to the new engine once it's installed, no restart needed. 409 while an engine is downloading
+  type: text/markdown

@@ -123,6 +123,10 @@ enum Commands {
         #[arg(long)]
         all: bool,
     },
+
+    /// Reads the NVIDIA driver libraries for engine detection, in a process of its own
+    #[command(hide = true)]
+    NvidiaProbe,
 }
 
 #[derive(Debug, Subcommand)]
@@ -492,9 +496,17 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
     build_logger();
     let cli = Cli::parse();
 
-    if let Some(Commands::Uninstall { all }) = &cli.command {
-        commands::uninstall_tiles(*all).await?;
-        return Ok(());
+    // before core::init, which opens the databases
+    match &cli.command {
+        Some(Commands::Uninstall { all }) => {
+            commands::uninstall_tiles(*all).await?;
+            return Ok(());
+        }
+        Some(Commands::NvidiaProbe) => {
+            tiles_engine::nvidia_probe();
+            return Ok(());
+        }
+        _ => {}
     }
 
     let daemon_port = get_or_set_daemon_port();
@@ -666,7 +678,9 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 logout(&db_conn.common)?;
             }
         },
-        Some(Commands::Uninstall { all }) => commands::uninstall_tiles(all).await?,
+        Some(Commands::Uninstall { .. } | Commands::NvidiaProbe) => {
+            unreachable!("run before core::init")
+        }
         Some(Commands::System(SystemCommands::Network(network_args))) => {
             match network_args.command {
                 NetworkCommands::Start => {

@@ -372,6 +372,43 @@ def test_ensure_running_restarts_on_config_change(tmp_path: Path):
     assert stop.call_count == 2
 
 
+def test_ensure_running_restarts_on_engine_change(tmp_path: Path):
+    _reset_process_state()
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+
+    fake_proc = Mock()
+    fake_proc.poll.return_value = None
+
+    with (
+        patch("server.backend.llama_server.process.subprocess.Popen", return_value=fake_proc) as popen,
+        patch("server.backend.llama_server.process.is_server_ready", return_value=True),
+        patch(
+            "server.backend.llama_server.process.resolve_llama_server_binary",
+            side_effect=["/engines/cpu/llama-server", "/engines/vulkan/llama-server"],
+        ),
+        patch("server.backend.llama_server.process.stop"),
+    ):
+        ensure_running(gguf, {})
+        ensure_running(gguf, {})
+
+    assert popen.call_count == 2
+    assert popen.call_args.args[0][0] == "/engines/vulkan/llama-server"
+
+
+def test_env_binary_wins_over_the_daemons_engine(tmp_path: Path, monkeypatch):
+    env_bin = tmp_path / "env-llama-server"
+    engine_bin = tmp_path / "engine-llama-server"
+    env_bin.write_bytes(b"")
+    engine_bin.write_bytes(b"")
+
+    with patch("server.backend.llama_server.process.get_llama_server", return_value=str(engine_bin)):
+        monkeypatch.setenv("TILES_LLAMA_SERVER_BIN", str(env_bin))
+        assert process.resolve_llama_server_binary() == str(env_bin)
+        monkeypatch.delenv("TILES_LLAMA_SERVER_BIN")
+        assert process.resolve_llama_server_binary() == str(engine_bin)
+
+
 def test_model_state_reports_none_loading_and_loaded(tmp_path: Path):
     _reset_process_state()
     assert process.model_state() == ("none", None)

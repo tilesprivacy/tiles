@@ -211,7 +211,7 @@ async fn pausing_keeps_what_was_downloaded() {
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     let (status, paused) = daemon
-        .json("DELETE", "/v1/tilekit/model/download", None)
+        .json("POST", "/v1/tilekit/model/download/pause", Some(json!({})))
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(paused["data"]["state"], "paused");
@@ -219,7 +219,7 @@ async fn pausing_keeps_what_was_downloaded() {
     assert_eq!(paused["data"]["total"], CONFIG.len() + MODEL.len());
 
     let (status, _) = daemon
-        .json("DELETE", "/v1/tilekit/model/download", None)
+        .json("POST", "/v1/tilekit/model/download/pause", Some(json!({})))
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
