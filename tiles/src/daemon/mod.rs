@@ -540,6 +540,7 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
         anyhow::Result::<()>::Ok(())
     });
 
+    crate::utils::shell_path::warm_up();
     listen_for_signals(shared_state.clone());
 
     let web_ui = match web_ui_listener {

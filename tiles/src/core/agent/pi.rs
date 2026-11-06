@@ -3,6 +3,7 @@ use crate::core::agent::types::{CommandType, GetStateData, PiResponse, PiRespons
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, create_pi_provider_config, handle_pi_settings_config,
 };
+use crate::utils::shell_path;
 use anyhow::{Context, Result, anyhow, bail};
 use nix::unistd::setsid;
 use serde_json::{Value, json};
@@ -59,6 +60,7 @@ pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> 
             .arg("--no-session")
             .env("PI_CODING_AGENT_DIR", pi_agent_dir)
             .env("PI_OFFLINE", "true")
+            .env("PATH", shell_path::for_tools())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .pre_exec(|| {
