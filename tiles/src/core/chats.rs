@@ -18,7 +18,7 @@ use tilekit::modelfile::Role;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
 use tokio_rusqlite::rusqlite::types::FromSqlError;
-use tokio_rusqlite::rusqlite::{self, Connection, OptionalExtension, params};
+use tokio_rusqlite::rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 // model the chats table
 
@@ -136,8 +136,8 @@ pub fn get_last_entry_id(conn: &Connection, user_id: &str) -> Result<Option<Uuid
         |row| row.get::<usize, String>(0),
     ) {
         Ok(res) => Uuid::from_str(&res).map_err(Into::into).map(Some),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(err) => Err(<rusqlite::Error as Into<anyhow::Error>>::into(err)),
+        Err(tokio_rusqlite::rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(err) => Err(<tokio_rusqlite::rusqlite::Error as Into<anyhow::Error>>::into(err)),
     }
 }
 
@@ -150,10 +150,10 @@ pub fn get_last_row_counter(conn: &Connection, user_id: &str) -> Result<i64> {
         |row| row.get::<usize, i64>(0),
     ) {
         Ok(res) => Ok(res),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+        Err(tokio_rusqlite::rusqlite::Error::QueryReturnedNoRows) => Ok(0),
         // It returns NULL, if there are now no rows
-        Err(rusqlite::Error::InvalidColumnType(_, _, _)) => Ok(0),
-        Err(err) => Err(<rusqlite::Error as Into<anyhow::Error>>::into(err)),
+        Err(tokio_rusqlite::rusqlite::Error::InvalidColumnType(_, _, _)) => Ok(0),
+        Err(err) => Err(<tokio_rusqlite::rusqlite::Error as Into<anyhow::Error>>::into(err)),
     }
 }
 
@@ -254,7 +254,7 @@ pub fn apply_delta(chat_conn: &mut Connection, delta_chats: DeltaChat) -> Result
                 &chat.session_id,
                 &chat.model_name
             ]) {
-                Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
+                Err(tokio_rusqlite::rusqlite::Error::SqliteFailure(_, Some(reason)))
                     if reason == "UNIQUE constraint failed: chats.id" =>
                 {
                     log::error!(
@@ -288,7 +288,7 @@ pub fn apply_delta(chat_conn: &mut Connection, delta_chats: DeltaChat) -> Result
                 &session.created_at.to_string(),
                 &session.creator_id
             ]) {
-                Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
+                Err(tokio_rusqlite::rusqlite::Error::SqliteFailure(_, Some(reason)))
                     if reason == "UNIQUE constraint failed: sessions.id" =>
                 {
                     log::error!(
@@ -381,7 +381,7 @@ pub fn create_session(conn: &Connection, id: &str, name: &str, user_id: &str) ->
     ]) {
         Ok(_res) => fetch_session(conn, id)?
             .ok_or_else(|| anyhow!("Session {id} is missing after writing it")),
-        Err(rusqlite::Error::SqliteFailure(_, Some(reason)))
+        Err(tokio_rusqlite::rusqlite::Error::SqliteFailure(_, Some(reason)))
             if reason == "UNIQUE constraint failed: sessions.id" =>
         {
             warn!("Session entry already exists, skipping");
