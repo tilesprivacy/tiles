@@ -12,6 +12,7 @@ use std::{
     fmt,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::SystemTime,
 };
 
 use anyhow::{Context, bail};
@@ -115,11 +116,11 @@ pub struct Models {
     default: Option<Spec>,
     downloads: Mutex<HashMap<Spec, Arc<ModelDownload>>>,
     changes: broadcast::Sender<ModelChange>,
-    picked: Picked,
+    current_model: CurrentModel,
 }
 
 // the model chats use, picked in the UI or last run by `tiles run`
-enum Picked {
+enum CurrentModel {
     // saved in config.toml, same as `tiles run`
     Config,
     Memory(Mutex<Option<String>>),
@@ -135,7 +136,7 @@ impl Models {
             default,
             downloads: Mutex::new(HashMap::new()),
             changes: broadcast::Sender::new(CHANGES_KEPT),
-            picked: Picked::Memory(Mutex::default()),
+            current_model: CurrentModel::Memory(Mutex::default()),
         }
     }
 
@@ -145,7 +146,7 @@ impl Models {
             .inspect_err(|err| log::warn!("No default model to download: {err:#}"))
             .ok();
         Ok(Self {
-            picked: Picked::Config,
+            current_model: CurrentModel::Config,
             ..Self::new(
                 Hub::from_env()?,
                 get_or_create_model_download_path()?,
@@ -195,24 +196,49 @@ impl Models {
     }
 
     fn current(&self) -> Option<Spec> {
-        let picked = match &self.picked {
-            Picked::Config => get_current_model(),
-            Picked::Memory(picked) => picked.lock().expect("picked model lock").clone(),
+        let current = match &self.current_model {
+            CurrentModel::Config => get_current_model(),
+            CurrentModel::Memory(current) => current.lock().expect("current model lock").clone(),
         };
         // only Tiles' own models, like agent startup
-        Spec::parse(&picked?)
+        Spec::parse(&current?)
             .ok()
             .filter(|spec| bundled::modelfile_for(&self.modelfiles, spec).is_some())
     }
 
-    fn pick(&self, spec: &Spec) -> anyhow::Result<()> {
-        match &self.picked {
-            Picked::Config => update_current_model(&spec.to_string()),
-            Picked::Memory(picked) => {
-                *picked.lock().expect("picked model lock") = Some(spec.to_string());
+    fn set_current_model(&self, spec: &Spec) -> anyhow::Result<()> {
+        match &self.current_model {
+            CurrentModel::Config => update_current_model(&spec.to_string()),
+            CurrentModel::Memory(current) => {
+                *current.lock().expect("current model lock") = Some(spec.to_string());
                 Ok(())
             }
         }
+    }
+
+    // an empty one reads as none, see `current`
+    fn clear_current_model(&self) -> anyhow::Result<()> {
+        match &self.current_model {
+            CurrentModel::Config => update_current_model(""),
+            CurrentModel::Memory(current) => {
+                *current.lock().expect("current model lock") = None;
+                Ok(())
+            }
+        }
+    }
+
+    /// What chats move to once `deleted` goes, see [`default_or_newest`]
+    fn next_current_model(&self, deleted: &Spec) -> Option<Spec> {
+        let downloaded = bundled::BUNDLED
+            .iter()
+            .filter_map(|(id, _)| modelfile_spec(&self.modelfiles.join(id)).ok())
+            .filter(|spec| spec.repo != deleted.repo)
+            .filter_map(|spec| {
+                let at = self.download(spec.clone()).downloaded_at()?;
+                Some((spec, at))
+            })
+            .collect();
+        default_or_newest(self.default.as_ref(), downloaded)
     }
 
     /// Downloads that are running, paused or failed
@@ -236,6 +262,19 @@ impl Models {
             .collect();
         join_all(downloads.iter().map(|download| download.pause())).await;
     }
+}
+
+/// The default model when it's downloaded, else the one downloaded last
+fn default_or_newest(default: Option<&Spec>, downloaded: Vec<(Spec, SystemTime)>) -> Option<Spec> {
+    if let Some(default) =
+        default.filter(|default| downloaded.iter().any(|(spec, _)| spec == *default))
+    {
+        return Some(default.clone());
+    }
+    downloaded
+        .into_iter()
+        .max_by_key(|(_, at)| *at)
+        .map(|(spec, _)| spec)
 }
 
 fn modelfile_spec(path: &Path) -> anyhow::Result<Spec> {
@@ -341,15 +380,23 @@ async fn select(
     }
     state
         .models
-        .pick(&spec)
+        .set_current_model(&spec)
         .map_err(|err| AppError::InternalServerError(format!("{err:#}")))?;
     Ok(ApiResponse::success(json!({ "model": spec.to_string() })))
 }
 
-// never the model chats use
+#[derive(Deserialize)]
+struct DeleteRequest {
+    model: Option<String>,
+    // the model chats use too, after unloading it
+    #[serde(default)]
+    unload: bool,
+}
+
+// the model chats use only with `unload`, and chats move to `next_current_model`
 async fn delete(
     State(state): State<Arc<AppState>>,
-    ApiJson(which): ApiJson<Which>,
+    ApiJson(which): ApiJson<DeleteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let download = state.models.get(which.model.as_deref())?;
     let spec = download.spec().clone();
@@ -360,14 +407,49 @@ async fn delete(
         .or_else(|| state.models.default.clone())
         && in_use.repo == spec.repo
     {
-        return Err(AppError::Conflict(format!(
-            "Chats use {in_use}, pick another model before deleting {spec}"
-        )));
+        if !which.unload {
+            return Err(AppError::Conflict(format!(
+                "Chats use {in_use}, pick another model or unload it before deleting {spec}"
+            )));
+        }
+        stop_pi_and_model_server(&state).await?;
+        match state.models.next_current_model(&spec) {
+            Some(next) => state.models.set_current_model(&next),
+            None => state.models.clear_current_model(),
+        }
+        .map_err(|err| {
+            AppError::InternalServerError(format!("Couldn't pick another model: {err:#}"))
+        })?;
     }
     let freed = download.delete(&state.models.quants(&spec.repo)).await?;
-    Ok(ApiResponse::success(
-        json!({ "model": spec.to_string(), "freed": freed }),
-    ))
+    Ok(ApiResponse::success(json!({
+        "model": spec.to_string(),
+        "freed": freed,
+        "current": state.models.current().map(|spec| spec.to_string()),
+    })))
+}
+
+/// Stops Pi and the model server, both are set up for the model about to go.
+/// The next chat starts them again on the new pick
+async fn stop_pi_and_model_server(state: &AppState) -> Result<(), AppError> {
+    // a reply holds the agent for as long as it streams
+    let mut agent = state.agent.try_lock().map_err(|_| {
+        AppError::Conflict("A reply is still streaming, wait for it to finish".to_owned())
+    })?;
+    if let Some(mut pi) = agent.take() {
+        let _ = pi.process.kill().await;
+    }
+    *state.agent_model.lock().expect("agent model lock") = None;
+    *state.resumed_chat.lock().expect("resumed chat lock") = None;
+    drop(agent);
+    if state.can_stop_model_server {
+        crate::core::server::stop_server_daemon()
+            .await
+            .map_err(|err| {
+                AppError::InternalServerError(format!("Couldn't stop the model server: {err:#}"))
+            })?;
+    }
+    Ok(())
 }
 
 // closing it only pauses the download with `pause_on_close`
