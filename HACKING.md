@@ -60,7 +60,7 @@ This guide will help you set up a reproducible development environment for Tiles
    ```
 
    - macOS: downloads the official prebuilt Metal release into `server/bin/`.
-   - Linux: builds `llama-server` from source, with CUDA when `nvcc` is available (CPU otherwise).
+   - Linux: downloads the official prebuilt CPU release into `server/bin/`. `tiles run` and the Tiles app offer to download the GPU engine (CUDA or Vulkan) the first time a model runs.
 
    Then symlink the dev assets into `.tiles_dev/tiles/`:
 
