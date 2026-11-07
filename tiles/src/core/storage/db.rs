@@ -7,7 +7,7 @@ use std::{env, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 use log::info;
-use rusqlite::Connection;
+use tokio_rusqlite::rusqlite::Connection;
 
 use crate::{
     core::account::{create_and_save_passkey, get_passkey},
