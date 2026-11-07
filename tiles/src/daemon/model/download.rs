@@ -146,6 +146,16 @@ impl ModelDownload {
             .is_ok()
     }
 
+    /// When its GGUF landed on disk, `None` until it's downloaded
+    pub(super) fn downloaded_at(&self) -> Option<std::time::SystemTime> {
+        let gguf = get_model_cache(&self.spec.repo)
+            .and_then(|dir| resolve_gguf_path(&dir, Some(&self.spec.quant)))
+            .ok()?;
+        std::fs::metadata(gguf)
+            .and_then(|meta| meta.modified())
+            .ok()
+    }
+
     async fn plan(&self) -> Result<DownloadPlan, AppError> {
         let mut cached = self.plan.lock().await;
         if let Some(plan) = cached.as_ref() {

@@ -135,7 +135,7 @@ enum GettingStartedCommands {
     Ui {
         /// Open the web UI in the browser even when the app is installed
         #[arg(long)]
-        browser: bool,
+        web: bool,
     },
 
     /// Run a Modelfile (uses the default model if none is provided)
@@ -567,8 +567,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 .await
                 .inspect_err(|e| eprintln!("Tiles failed to run due to {:?}", e))?;
         }
-        Some(Commands::GettingStarted(GettingStartedCommands::Ui { browser })) => {
-            web::open_cli(browser).await?
+        Some(Commands::GettingStarted(GettingStartedCommands::Ui { web })) => {
+            web::open_cli(web).await?
         }
         Some(Commands::GettingStarted(GettingStartedCommands::Help { command })) => {
             print_help_for_command(&command)?;
