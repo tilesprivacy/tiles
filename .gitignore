@@ -16,6 +16,9 @@ pi-darwin-arm64.tar.gz
 pi-linux-x64.tar.gz
 /ui
 /.ui.*
+/desktop
+/.desktop.*
+pkg/components.plist
 .cursor/hooks/state/continual-learning.json
 .cursor/hooks/state/continual-learning-index.json
 .cache
@@ -24,6 +27,4 @@ server/stack/linux/requirements/
 downloads
 server/stack/macos/requirements/
 
-# menu bar app
 node_modules/
-apps/menubar/src-tauri/gen/

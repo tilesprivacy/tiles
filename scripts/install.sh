@@ -30,6 +30,7 @@ VERSION="0.4.19"
 DEV="false"
 NIGHTLY="false"
 BACKEND=""
+HEADLESS="false"
 INSTALL_DIR_OVERRIDE=""
 LIB_DIR_OVERRIDE=""
 
@@ -46,6 +47,7 @@ usage() {
   echo "  --dev                Install from a local dist/*.tar.gz instead of GitHub"
   echo "  --nightly            Install the latest nightly GitHub release"
   echo "                       (e.g. tiles-v0.4.17-x86_64-linux.tar.gz)"
+  echo "  --headless           Leave out the Tiles app and the web UI, for servers and Tilekit"
   echo "  --install-dir PATH   Override the binary installation directory"
   echo "  --lib-dir PATH       Override the runtime installation directory"
 }
@@ -105,6 +107,9 @@ while [[ $# -gt 0 ]]; do
     --nightly|-nightly)
       NIGHTLY="true"
       ;;
+    --headless|-headless)
+      HEADLESS="true"
+      ;;
     --backend)
       [[ $# -ge 2 ]] || err "--backend requires a value."
       BACKEND="$2"
@@ -163,6 +168,17 @@ SERVER_DIR="${LIB_DIR}/server"         # Python server folder
 MODELFILE_DIR="${LIB_DIR}/modelfiles"  # Modelfile server folder
 PI_DIR="${LIB_DIR}/pi"
 UI_DIR="${LIB_DIR}/ui"                 # web UI the daemon serves on port 1730
+
+# the Tiles app. on Linux its launcher entry and icon go where the desktop looks for them
+MAC_APP="/Applications/Tiles.app"
+DESKTOP_BIN="${LIB_DIR}/tiles-desktop"
+if [[ "$(id -u)" == "0" ]]; then
+  SHARE_DIR="/usr/local/share"
+else
+  SHARE_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}"
+fi
+DESKTOP_ENTRY="${SHARE_DIR}/applications/tiles.desktop"
+DESKTOP_ICON="${SHARE_DIR}/icons/hicolor/256x256/apps/tiles.png"
 
 TMPDIR="$(mktemp -d)"
 RELEASE_TAG="${VERSION}"
@@ -250,11 +266,47 @@ mkdir -p "${PI_DIR}"
 cp -r "${TMPDIR}/pi"/* "${PI_DIR}/"
 
 # releases from before the web UI have no ui folder
-if [[ -d "${TMPDIR}/ui" ]]; then
+if [[ "${HEADLESS}" == "true" ]]; then
+  rm -rf "${UI_DIR}"
+elif [[ -d "${TMPDIR}/ui" ]]; then
   log "Installing the web UI ..."
   rm -rf "${UI_DIR}"
   mkdir -p "${UI_DIR}"
   cp -r "${TMPDIR}/ui"/. "${UI_DIR}/"
+fi
+
+# remembered for `tiles update`, which runs this script again without the flag
+if [[ "${HEADLESS}" == "true" ]]; then
+  touch "${LIB_DIR}/.headless"
+else
+  rm -f "${LIB_DIR}/.headless"
+fi
+
+APP_INSTALLED="false"
+# a headless install also takes away an app an earlier install left
+if [[ "${HEADLESS}" == "true" ]]; then
+  log "Leaving out the Tiles app and the web UI"
+  [[ "${OS}" == "darwin" ]] && rm -rf "${MAC_APP}"
+  rm -f "${DESKTOP_BIN}" "${DESKTOP_ENTRY}" "${DESKTOP_ICON}"
+elif [[ -d "${TMPDIR}/desktop" ]]; then
+  log "Installing the Tiles app ..."
+  if [[ "${OS}" == "darwin" ]]; then
+    rm -rf "${MAC_APP}"
+    cp -R "${TMPDIR}/desktop/Tiles.app" "${MAC_APP}"
+  else
+    install -m 755 "${TMPDIR}/desktop/tiles-desktop" "${DESKTOP_BIN}"
+    mkdir -p "$(dirname "${DESKTOP_ENTRY}")" "$(dirname "${DESKTOP_ICON}")"
+    install -m 644 "${TMPDIR}/desktop/tiles.png" "${DESKTOP_ICON}"
+    sed "s|^Exec=.*|Exec=\"${DESKTOP_BIN}\"|" "${TMPDIR}/desktop/tiles.desktop" > "${DESKTOP_ENTRY}"
+    update-desktop-database "$(dirname "${DESKTOP_ENTRY}")" >/dev/null 2>&1 || true
+    if command -v ldconfig >/dev/null 2>&1 \
+      && ! ldconfig -p 2>/dev/null | grep 'libwebkit2gtk-4\.1\.so\.0' >/dev/null; then
+      warn "⚠️  The Tiles app needs WebKitGTK 4.1, and it isn't installed."
+      warn "    Install libwebkit2gtk-4.1-0 (apt), webkit2gtk4.1 (dnf) or webkit2gtk-4.1 (pacman)."
+      warn "    Until then \`tiles ui\` opens Tiles in your browser."
+    fi
+  fi
+  APP_INSTALLED="true"
 fi
 
 
@@ -283,6 +335,7 @@ rm -rf "${TMPDIR}"
 
 log "✅ Tiles installed successfully!"
 log ""
+[[ "${APP_INSTALLED}" == "true" ]] && echo "🪟 Open Tiles from your apps, or run \"tiles ui\""
 
 case ":$PATH:" in
   *":$INSTALL_DIR:"*)

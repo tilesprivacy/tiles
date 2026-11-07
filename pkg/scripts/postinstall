@@ -35,13 +35,13 @@ install_sleep_guard() {
 	<string>com.tilesprivacy.tiles.sleep-guard</string>
 	<key>AssociatedBundleIdentifiers</key>
 	<array>
-		<string>com.tilesprivacy.tiles.menubar</string>
+		<string>com.tilesprivacy.tiles.desktop</string>
 	</array>
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>for m in /Users/*/Library/"Application Support"/com.tilesprivacy.tiles.menubar/closed-display; do if [ -f "$m" ]; then /usr/bin/pmset -a disablesleep 0 &amp;&amp; rm -f "$m"; fi; done</string>
+		<string>for m in /Users/*/Library/"Application Support"/com.tilesprivacy.tiles.desktop/closed-display; do if [ -f "$m" ]; then /usr/bin/pmset -a disablesleep 0 &amp;&amp; rm -f "$m"; fi; done</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

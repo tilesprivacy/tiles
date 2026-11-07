@@ -18,8 +18,8 @@ use semver::Version;
 use serde::Deserialize;
 
 use crate::utils::config::{
-    ConfigProvider, DefaultProvider, SYSTEM_BIN_DIR, SYSTEM_BIN_PATH, SYSTEM_LIB_DIR,
-    is_tiles_lib_dir,
+    ConfigProvider, DefaultProvider, HEADLESS_MARKER, SYSTEM_BIN_DIR, SYSTEM_BIN_PATH,
+    SYSTEM_LIB_DIR, is_tiles_lib_dir,
 };
 
 const RELEASES_BASE_ENDPOINT: &str = "https://api.github.com";
@@ -158,13 +158,19 @@ pub async fn try_update(update_info: Option<UpdateInfo>) -> Result<String> {
             Command::new("sh")
         };
 
-        let run_sh_cmd_status = install_command
+        // an update keeps a headless install headless
+        let headless = layout.lib_dir.join(HEADLESS_MARKER).is_file();
+        install_command
             .arg("-s")
             .arg("--")
             .arg("--install-dir")
             .arg(layout.install_dir)
             .arg("--lib-dir")
-            .arg(layout.lib_dir)
+            .arg(layout.lib_dir);
+        if headless {
+            install_command.arg("--headless");
+        }
+        let run_sh_cmd_status = install_command
             .stdin(
                 curl_process
                     .stdout

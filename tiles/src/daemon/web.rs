@@ -1,6 +1,13 @@
 //! Serves the web UI and the Tilekit API on port 1730
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    env,
+    os::unix::process::CommandExt,
+    path::PathBuf,
+    process::{Command, Stdio},
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::{Result, bail};
 
@@ -15,6 +22,7 @@ use axum::{
     response::IntoResponse,
     routing::any,
 };
+use nix::unistd::setsid;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,6 +44,11 @@ use crate::{
 };
 
 pub const UI_PORT: u32 = 1730;
+
+/// The desktop app, from tiles-ui. Its bundle id on a Mac, its binary in the lib dir on Linux
+const DESKTOP_BUNDLE_ID: &str = "com.tilesprivacy.tiles.desktop";
+const DESKTOP_BIN: &str = "tiles-desktop";
+const APP_START_CHECK: Duration = Duration::from_millis(500);
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -102,8 +115,12 @@ pub async fn fetch_state(client: &Client) -> Option<WebUiState> {
     serde_json::from_value(body["data"].take()).ok()
 }
 
-/// Opens the web UI once the daemon is up and on this version
-pub async fn open_cli() -> Result<()> {
+/// Opens the desktop app, or the web UI in the browser when there's no app or `browser` is set
+pub async fn open_cli(browser: bool) -> Result<()> {
+    if !browser && open_app() {
+        println!("Opening Tiles");
+        return Ok(());
+    }
     let client = daemon_client().await?;
     match fetch_state(client).await {
         Some(WebUiState::Serving { url }) => {
@@ -115,6 +132,53 @@ pub async fn open_cli() -> Result<()> {
             "The Tiles web UI couldn't start: {reason}. Free the port, then restart Tiles with `tiles daemon stop` and `tiles ui`"
         ),
         None => bail!("Couldn't ask the Tiles daemon about the web UI"),
+    }
+}
+
+/// The desktop app starts the daemon itself. false when there's no app to open here
+fn open_app() -> bool {
+    if cfg!(target_os = "macos") {
+        // found by its bundle id, wherever it's installed
+        return Command::new("open")
+            .args(["-b", DESKTOP_BUNDLE_ID])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+    }
+    let display = env::var_os("WAYLAND_DISPLAY").is_some() || env::var_os("DISPLAY").is_some();
+    let Ok(app) = DefaultProvider
+        .get_lib_dir()
+        .map(|dir| dir.join(DESKTOP_BIN))
+    else {
+        return false;
+    };
+    if !display || !app.is_file() {
+        return false;
+    }
+    let mut command = Command::new(&app);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe. a session of its own keeps the app open after the terminal closes
+    unsafe {
+        command.pre_exec(|| setsid().map(drop).map_err(Into::into));
+    }
+    let Ok(mut child) = command
+        .spawn()
+        .inspect_err(|err| log::warn!("Couldn't open {}: {err}", app.display()))
+    else {
+        return false;
+    };
+    // without WebKitGTK it exits right away, the browser opens instead
+    std::thread::sleep(APP_START_CHECK);
+    match child.try_wait() {
+        Ok(Some(status)) if !status.success() => {
+            log::warn!("The Tiles app exited at start ({status}), opening the browser");
+            false
+        }
+        _ => true,
     }
 }
 
