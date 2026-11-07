@@ -360,7 +360,7 @@ async fn run_model_with_server(
                 eprintln!("Failed to start inference server: {e}");
             });
         }
-        if let Err(err) = crate::daemon::engine::offer().await {
+        if let Err(err) = crate::daemon::engine::offer_gpu_engine().await {
             log::warn!("Couldn't offer the GPU engine: {err:#}");
         }
         match load_model(&modelfile, &default_modelfile, &memory_path, 0).await {

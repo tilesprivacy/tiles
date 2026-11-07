@@ -20,7 +20,7 @@ pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
         .send()
         .await
         .context("Could not reach the Tiles daemon")?;
-    if answer::<DownloadState>(res).await? == DownloadState::Done {
+    if response_data::<DownloadState>(res).await? == DownloadState::Done {
         return Ok(());
     }
 
@@ -48,7 +48,7 @@ pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
                 }
                 DownloadState::Done => {
                     if let Some(bar) = &bar {
-                        finish(bar);
+                        finish_bar(bar);
                     }
                     return Ok(());
                 }
@@ -63,7 +63,7 @@ pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
     bail!("The daemon closed the download before it finished")
 }
 
-pub(crate) async fn answer<T: DeserializeOwned>(res: reqwest::Response) -> Result<T> {
+pub(crate) async fn response_data<T: DeserializeOwned>(res: reqwest::Response) -> Result<T> {
     let ok = res.status().is_success();
     let mut body: Value = res
         .json()
@@ -94,7 +94,7 @@ pub(crate) fn download_bar(total: u64, done: u64) -> ProgressBar {
 }
 
 // the last jump isn't a real speed, so only the size is shown
-pub(crate) fn finish(bar: &ProgressBar) {
+pub(crate) fn finish_bar(bar: &ProgressBar) {
     bar.set_style(bar_style("{decimal_total_bytes:.dim}"));
     bar.finish();
 }

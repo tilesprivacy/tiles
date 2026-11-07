@@ -35,7 +35,7 @@ pub use bundled::picked_modelfile;
 pub use download::{DownloadState, ModelChange, ModelDownload};
 pub(crate) use download::{free_space, gb};
 pub use model_fetch::pull;
-pub(crate) use model_fetch::{answer, download_bar, finish};
+pub(crate) use model_fetch::{download_bar, finish_bar, response_data};
 
 use crate::{
     daemon::{ApiJson, ApiResponse, AppError, AppState},

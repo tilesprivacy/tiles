@@ -11,12 +11,12 @@ use serde_json::{Value, json};
 use super::InstallState;
 use crate::daemon::{
     daemon_client, daemon_url,
-    model::{CLIENT_HEADER, answer, download_bar, finish},
+    model::{CLIENT_HEADER, download_bar, finish_bar, response_data},
     sse::take_events,
 };
 
 /// Asks before downloading. No keeps models on the CPU, by picking it unless the engine was picked by hand
-pub async fn offer() -> Result<()> {
+pub async fn offer_gpu_engine() -> Result<()> {
     if !io::stdin().is_terminal() {
         return Ok(());
     }
@@ -26,19 +26,19 @@ pub async fn offer() -> Result<()> {
         .send()
         .await
         .context("Could not reach the Tiles daemon")?;
-    let status: Value = answer(res).await?;
+    let status: Value = response_data(res).await?;
     if status["override"].is_string() || status["needs_download"] != true {
         return Ok(());
     }
-    let choice = |engine: &Value| {
+    let engine_entry = |engine: &Value| {
         status["engines"]
             .as_array()
-            .and_then(|engines| engines.iter().find(|choice| &choice["engine"] == engine))
+            .and_then(|engines| engines.iter().find(|entry| &entry["engine"] == engine))
             .cloned()
             .unwrap_or_default()
     };
-    let label = |engine: &Value| {
-        choice(engine)["label"]
+    let engine_label = |engine: &Value| {
+        engine_entry(engine)["label"]
             .as_str()
             .unwrap_or("the GPU")
             .to_owned()
@@ -51,10 +51,10 @@ pub async fn offer() -> Result<()> {
     );
     if !installing {
         let engine = &status["engine"];
-        let size = choice(engine)["download"].as_u64().unwrap_or(0);
+        let size = engine_entry(engine)["download"].as_u64().unwrap_or(0);
         print!(
             "Tiles can run models on your GPU with {}, a {} download. Download it now? [y/N] ",
-            label(engine),
+            engine_label(engine),
             DecimalBytes(size)
         );
         io::stdout().flush()?;
@@ -65,7 +65,7 @@ pub async fn offer() -> Result<()> {
             if status["pick"] != "auto" {
                 println!(
                     "Models run on the CPU until {} is downloaded",
-                    label(engine)
+                    engine_label(engine)
                 );
                 return Ok(());
             }
@@ -74,7 +74,7 @@ pub async fn offer() -> Result<()> {
                 .json(&json!({ "engine": "cpu" }))
                 .send()
                 .await?;
-            answer::<Value>(res).await?;
+            response_data::<Value>(res).await?;
             println!("Models run on the CPU. Pick an engine in the Tiles app to change it");
             return Ok(());
         }
@@ -83,15 +83,18 @@ pub async fn offer() -> Result<()> {
             .json(&json!({}))
             .send()
             .await?;
-        if let InstallState::Done { .. } = answer(res).await? {
+        if let InstallState::Done { .. } = response_data(res).await? {
             return Ok(());
         }
     }
-    follow(client, &label).await
+    show_engine_download(client, &engine_label).await
 }
 
 /// Shows the install's progress until it's done, paused or failed
-async fn follow(client: &Client, label: &impl Fn(&Value) -> String) -> Result<()> {
+async fn show_engine_download(
+    client: &Client,
+    engine_label: &impl Fn(&Value) -> String,
+) -> Result<()> {
     let mut res = client
         .get(daemon_url("/v1/tilekit/engine/download"))
         .header(CLIENT_HEADER, "cli")
@@ -116,7 +119,7 @@ async fn follow(client: &Client, label: &impl Fn(&Value) -> String) -> Result<()
                         bar = Some(download_bar(total, done));
                     }
                     if let Some(bar) = &bar {
-                        bar.set_message(label(&json!(engine)));
+                        bar.set_message(engine_label(&json!(engine)));
                         bar.set_position(done);
                     }
                 }
@@ -127,15 +130,18 @@ async fn follow(client: &Client, label: &impl Fn(&Value) -> String) -> Result<()
                 }
                 InstallState::Checking { engine } => {
                     if let Some(bar) = &bar {
-                        bar.set_message(format!("Checking {} runs here…", label(&json!(engine))));
+                        bar.set_message(format!(
+                            "Checking {} runs here…",
+                            engine_label(&json!(engine))
+                        ));
                     }
                 }
                 InstallState::Done { engine } => {
                     if let Some(bar) = &bar {
-                        bar.set_message(label(&json!(engine)));
-                        finish(bar);
+                        bar.set_message(engine_label(&json!(engine)));
+                        finish_bar(bar);
                     }
-                    println!("Models run on {}", label(&json!(engine)));
+                    println!("Models run on {}", engine_label(&json!(engine)));
                     return Ok(());
                 }
                 InstallState::Paused { .. } => {
