@@ -3,7 +3,7 @@
 use crate::{
     core::agent::{
         pi::{self, PiAgent, handle_graceful_exit},
-        types::PiResponse,
+        types::{CommandType, PiResponse, PiResponseMessage},
     },
     daemon::{ApiJson, ApiResponse, AppError, AppState, model::picked_modelfile, session},
     repl::{get_default_modelfile, model_spec},
@@ -55,14 +55,15 @@ pub fn agent_router() -> Router<Arc<AppState>> {
 }
 
 async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    let (modelname, system_prompt) = get_agent_start_params(DefaultProvider, get_current_model())?;
-
     let mut agent = state.agent.lock().await;
     if agent.is_some() {
         Ok(ApiResponse::success(
             json!({"message": "Agent already started"}),
         ))
     } else {
+        // read with the agent locked, so a model being deleted isn't used
+        let (modelname, system_prompt) =
+            get_agent_start_params(DefaultProvider, get_current_model())?;
         let pi_agent = pi::new(&modelname, &system_prompt, PY_PORT)
             .map_err(|e| AppError::InternalServerError(e.to_string()))?;
         *agent = Some(pi_agent);
@@ -180,28 +181,22 @@ async fn process_chat_prompt(
         });
         if let Err(err) = agent.writer.send_to_pi(payload).await {
             // Pi never got it, the next prompt carries the history instead
-            if let (Some(history), Some(resumed)) = (
-                history,
-                t_state
-                    .resumed_chat
-                    .lock()
-                    .expect("resumed chat lock")
-                    .as_mut(),
-            ) {
-                resumed.pending_history = Some(history);
-            }
+            keep_history(&t_state, history);
             let err_str = format!("Failed to send the payload to Pi due to {:?}", err);
             handle_pi_errors(err_str.to_owned(), &tx).await;
             return;
         }
-        tokio::select! {
+        let read = tokio::select! {
                 _ = t_cancel.cancelled() => {
                     log::info!("Will cancel the agent process");
                     let _ = handle_graceful_exit(&mut agent.writer).await;
                     // To read the rest of stdout after aborting the current request
-                    let _ = read_from_pi(agent, &tx).await;
+                    read_from_pi(agent, &tx).await
                  },
-                _ = read_from_pi(agent, &tx) => ()
+                read = read_from_pi(agent, &tx) => read
+        };
+        if read == PiRead::Refused {
+            keep_history(&t_state, history);
         }
     });
 
@@ -229,7 +224,29 @@ async fn handle_pi_errors(err_str: String, tx: &Sender<SseEvent>) {
     let _ = tx.send(event).await.map_err(|e| log::error!("{:?}", e));
 }
 
-async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
+/// Puts back the history a prompt Pi never ran was carrying
+fn keep_history(state: &AppState, history: Option<String>) {
+    if let (Some(history), Some(resumed)) = (
+        history,
+        state
+            .resumed_chat
+            .lock()
+            .expect("resumed chat lock")
+            .as_mut(),
+    ) {
+        resumed.pending_history = Some(history);
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum PiRead {
+    Settled,
+    /// Pi turned the prompt down, it sends no `agent_settled` then
+    Refused,
+    Stopped,
+}
+
+async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> PiRead {
     let mut last_event = String::from("");
     while let Ok(Some(line)) = agent.reader.next_line().await {
         let response = if let Ok(response) = serde_json::from_str::<PiResponse>(&line) {
@@ -238,7 +255,7 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
             let err_str = format!("Failed to parse pi response, response {:?}", &line);
 
             handle_pi_errors(err_str.to_owned(), tx).await;
-            return;
+            return PiRead::Stopped;
         };
 
         let sse_event = SseEvent {
@@ -249,11 +266,25 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) {
         let _ = tx.send(sse_event).await.map_err(|e| log::error!("{:?}", e));
 
         match response {
-            PiResponse::AgentSettled => break,
+            PiResponse::AgentSettled => {
+                log::info!("reading ended with last event {last_event}");
+                return PiRead::Settled;
+            }
+            PiResponse::Response(PiResponseMessage {
+                command: CommandType::Prompt,
+                success: false,
+                error,
+                ..
+            }) => {
+                let reason = error.unwrap_or_else(|| "no reason given".to_owned());
+                handle_pi_errors(format!("Pi didn't take the prompt: {reason}"), tx).await;
+                return PiRead::Refused;
+            }
             _ => continue,
         }
     }
     log::info!("reading ended with last event {}", last_event);
+    PiRead::Stopped
 }
 #[cfg(test)]
 mod tests {
@@ -475,6 +506,60 @@ printf '{{"type":"agent_settled"}}\n'"#,
                 .unwrap()
                 .pending_history
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_pi_turns_down_ends_the_reply_and_keeps_the_history() {
+        // stdout stays open, as a running Pi's does
+        let pi_agent = from_test_command(
+            "sh",
+            &[
+                "-c",
+                r#"read request
+printf '{"type":"response","command":"prompt","success":false,"error":"Agent is already processing"}\n'
+sleep 5"#,
+            ],
+        )
+        .unwrap();
+        let state = std::sync::Arc::new(AppState {
+            agent: AsyncMutex::new(Some(pi_agent)),
+            resumed_chat: Mutex::new(Some(ResumedChat {
+                pi_session_id: "pi-2".to_owned(),
+                chat_id: "old".to_owned(),
+                pending_history: Some("User: hi".to_owned()),
+            })),
+            ..AppState::for_tests()
+        });
+        let started = std::time::Instant::now();
+        let response = agent_router()
+            .with_state(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .uri("/v1/tilekit/agent/prompt")
+                    .body(Body::new(json!({ "message": "hello" }).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let events = String::from_utf8(bytes.to_vec()).unwrap();
+
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        assert!(events.contains("Agent is already processing"), "{events}");
+        assert!(state.agent.try_lock().is_ok());
+        assert_eq!(
+            state
+                .resumed_chat
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .pending_history
+                .as_deref(),
+            Some("User: hi")
         );
     }
 }

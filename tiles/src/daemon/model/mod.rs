@@ -39,6 +39,10 @@ pub use model_fetch::pull;
 pub(crate) use model_fetch::{download_bar, finish_bar, response_data};
 
 use crate::{
+    core::{
+        agent::pi::PiAgent,
+        server::{ServerState, start_server_daemon, stop_server_daemon},
+    },
     daemon::{ApiJson, ApiResponse, AppError, AppState},
     repl::get_default_modelfile,
     utils::{
@@ -393,26 +397,51 @@ struct DeleteRequest {
     unload: bool,
 }
 
-// the model chats use only with `unload`, and chats move to `next_current_model`
+// the model chats use or Pi runs only with `unload`, and chats move to
+// `next_current_model` when the picked one goes
 async fn delete(
     State(state): State<Arc<AppState>>,
     ApiJson(which): ApiJson<DeleteRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let download = state.models.get(which.model.as_deref())?;
     let spec = download.spec().clone();
+    let quants = state.models.quants(&spec.repo);
+    // before anything stops, as a running download refuses the delete
+    let held = download.hold(&quants).await?;
     // quants of one repo share its folder
-    if let Some(in_use) = state
+    let picked = state
         .models
         .current()
         .or_else(|| state.models.default.clone())
-        && in_use.repo == spec.repo
-    {
-        if !which.unload {
-            return Err(AppError::Conflict(format!(
-                "Chats use {in_use}, pick another model or unload it before deleting {spec}"
-            )));
-        }
-        stop_pi_and_model_server(&state).await?;
+        .filter(|picked| picked.repo == spec.repo);
+    let running = state
+        .agent_model
+        .lock()
+        .expect("agent model lock")
+        .as_deref()
+        .and_then(|model| Spec::parse(model).ok())
+        .filter(|running| running.repo == spec.repo);
+    let Some(in_use) = picked.clone().or(running) else {
+        let freed = download.delete(held).await?;
+        return Ok(deleted(&state, &spec, freed));
+    };
+    if !which.unload {
+        let hint = match picked {
+            Some(_) => "pick another model or unload it",
+            None => "unload it",
+        };
+        return Err(AppError::Conflict(format!(
+            "Chats use {in_use}, {hint} before deleting {spec}"
+        )));
+    }
+
+    // a reply holds the agent for as long as it streams. kept until the files
+    // are gone, so no chat starts on this model
+    let mut agent = state.agent.try_lock().map_err(|_| {
+        AppError::Conflict("A reply is still streaming, wait for it to finish".to_owned())
+    })?;
+    let server = stop_pi_and_model_server(&state, &mut agent).await?;
+    if picked.is_some() {
         match state.models.next_current_model(&spec) {
             Some(next) => state.models.set_current_model(&next),
             None => state.models.clear_current_model(),
@@ -421,35 +450,41 @@ async fn delete(
             AppError::InternalServerError(format!("Couldn't pick another model: {err:#}"))
         })?;
     }
-    let freed = download.delete(&state.models.quants(&spec.repo)).await?;
-    Ok(ApiResponse::success(json!({
+    let freed = download.delete(held).await;
+    if server == Some(ServerState::Stopped)
+        && let Err(err) = start_server_daemon().await
+    {
+        log::warn!("Couldn't start the model server again: {err:#}");
+    }
+    drop(agent);
+    Ok(deleted(&state, &spec, freed?))
+}
+
+fn deleted(state: &AppState, spec: &Spec, freed: u64) -> impl IntoResponse + use<> {
+    ApiResponse::success(json!({
         "model": spec.to_string(),
         "freed": freed,
         "current": state.models.current().map(|spec| spec.to_string()),
-    })))
+    }))
 }
 
 /// Stops Pi and the model server, both are set up for the model about to go.
-/// The next chat starts them again on the new pick
-async fn stop_pi_and_model_server(state: &AppState) -> Result<(), AppError> {
-    // a reply holds the agent for as long as it streams
-    let mut agent = state.agent.try_lock().map_err(|_| {
-        AppError::Conflict("A reply is still streaming, wait for it to finish".to_owned())
-    })?;
+/// The model server's state is `None` when this daemon doesn't run it
+async fn stop_pi_and_model_server(
+    state: &AppState,
+    agent: &mut Option<PiAgent>,
+) -> Result<Option<ServerState>, AppError> {
     if let Some(mut pi) = agent.take() {
         let _ = pi.process.kill().await;
     }
     *state.agent_model.lock().expect("agent model lock") = None;
     *state.resumed_chat.lock().expect("resumed chat lock") = None;
-    drop(agent);
-    if state.can_stop_model_server {
-        crate::core::server::stop_server_daemon()
-            .await
-            .map_err(|err| {
-                AppError::InternalServerError(format!("Couldn't stop the model server: {err:#}"))
-            })?;
+    if !state.can_stop_model_server {
+        return Ok(None);
     }
-    Ok(())
+    stop_server_daemon().await.map(Some).map_err(|err| {
+        AppError::InternalServerError(format!("Couldn't stop the model server: {err:#}"))
+    })
 }
 
 // closing it only pauses the download with `pause_on_close`

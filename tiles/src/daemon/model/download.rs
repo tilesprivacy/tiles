@@ -10,14 +10,14 @@ use axum::response::sse::Event;
 use futures_util::Stream;
 use nix::sys::statvfs::statvfs;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex as AsyncMutex, broadcast};
+use tokio::sync::{Mutex as AsyncMutex, MutexGuard, broadcast};
 use tokio_util::sync::CancellationToken;
 
 use super::Spec;
 use crate::{
     daemon::{
         AppError,
-        job::{Job, JobState, Speed, is_live},
+        job::{Job, JobState, Running, Speed, is_live},
     },
     repl::resolve_gguf_path,
     utils::{
@@ -100,6 +100,12 @@ pub struct ModelDownload {
     pub(super) job: Arc<Job<DownloadState>>,
     changes: broadcast::Sender<ModelChange>,
     plan: AsyncMutex<Option<DownloadPlan>>,
+}
+
+/// A repo's downloads, kept from starting while its files go
+pub struct Held<'q> {
+    quants: &'q [Arc<ModelDownload>],
+    _running: Vec<MutexGuard<'q, Running>>,
 }
 
 impl ModelDownload {
@@ -264,19 +270,27 @@ impl ModelDownload {
 
     /// Deletes the repo's folder, shared by all its quants, and returns the bytes freed.
     /// `quants` lists every quant, this one included
-    pub async fn delete(&self, quants: &[Arc<ModelDownload>]) -> Result<u64, AppError> {
-        // blocks their downloads while the files are removed
-        let mut held = Vec::with_capacity(quants.len());
+    /// Blocks the downloads of `quants` until the files are deleted, refused
+    /// while one of them runs
+    pub async fn hold<'q>(&self, quants: &'q [Arc<ModelDownload>]) -> Result<Held<'q>, AppError> {
+        let mut running = Vec::with_capacity(quants.len());
         for quant in quants {
-            let running = quant.job.lock().await;
-            if is_live(&running) {
+            let job = quant.job.lock().await;
+            if is_live(&job) {
                 return Err(AppError::Conflict(format!(
                     "{} is downloading, pause it before deleting {}",
                     quant.spec, self.spec
                 )));
             }
-            held.push(running);
+            running.push(job);
         }
+        Ok(Held {
+            quants,
+            _running: running,
+        })
+    }
+
+    pub async fn delete(&self, held: Held<'_>) -> Result<u64, AppError> {
         let dir = hf::repo_dir(&self.root, &self.spec.repo);
         let freed = tokio::task::spawn_blocking(move || {
             let freed = size_of(&dir);
@@ -290,7 +304,7 @@ impl ModelDownload {
             }
             _ => AppError::InternalServerError(format!("Couldn't delete {}: {err}", self.spec)),
         })?;
-        for quant in quants {
+        for quant in held.quants {
             quant.set(DownloadState::Idle);
         }
         Ok(freed)

@@ -662,6 +662,62 @@ async fn the_model_in_use_is_deleted_after_unloading() {
 }
 
 #[tokio::test]
+async fn the_model_pi_still_runs_is_unloaded_too_but_the_pick_stays() {
+    let server = hub_with_model(Duration::ZERO).await;
+    serve_model(&server, OTHER, Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    let other = json!({ "model": OTHER });
+    daemon.start(other.clone()).await;
+    daemon
+        .call(
+            "GET",
+            &format!("/v1/tilekit/model/download?model={OTHER}"),
+            None,
+        )
+        .await;
+    // a chat started on it before another model was picked
+    *daemon.state.agent.lock().await = Some(from_test_command("sleep", &["30"]).unwrap());
+    *daemon.state.agent_model.lock().unwrap() = Some(format!("{OTHER}:Q4_K_M"));
+    let picked = daemon.state.models.current();
+    let delete = "/v1/tilekit/model/delete";
+
+    let (status, body) = daemon.json("POST", delete, Some(other)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["reason"].as_str().unwrap().contains("unload it"));
+    assert!(repo_dir(daemon.root.path(), OTHER).exists());
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            delete,
+            Some(json!({ "model": OTHER, "unload": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(daemon.state.agent.lock().await.is_none());
+    assert_eq!(daemon.state.models.current(), picked);
+}
+
+#[tokio::test]
+async fn a_download_refuses_the_delete_before_pi_is_stopped() {
+    let server = hub_with_model(Duration::from_millis(500)).await;
+    let daemon = Daemon::new(&server);
+    *daemon.state.agent.lock().await = Some(from_test_command("sleep", &["30"]).unwrap());
+    daemon.start(json!({ "model": REPO })).await;
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            "/v1/tilekit/model/delete",
+            Some(json!({ "model": REPO, "unload": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["reason"].as_str().unwrap().contains("pause it"));
+    assert!(daemon.state.agent.lock().await.is_some());
+}
+
+#[tokio::test]
 async fn deleting_the_model_in_use_waits_for_a_streaming_reply() {
     let server = hub_with_model(Duration::ZERO).await;
     let daemon = Daemon::new(&server);

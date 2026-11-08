@@ -22,7 +22,10 @@ use crate::{
     repl::ChatResponse,
 };
 
-use crate::utils::config::{ConfigProvider, DefaultProvider, get_current_model};
+use crate::utils::config::{
+    ConfigProvider, DEFAULT_CONTEXT_LENGTH, DefaultProvider, get_current_model,
+    get_pi_context_window,
+};
 use crate::{
     daemon::{ApiJson, ApiResponse, AppError, AppState, agent::get_agent_start_params},
     utils::config::PY_PORT,
@@ -56,6 +59,8 @@ struct SaveChatRequest {
     parent_chat_id: Option<String>,
 }
 
+const TURN_BREAK: &str = "\n\n";
+
 // factory type for Pi::new() fn, so that we can write some test
 type CreateNewAgentFn = fn(&str, &str, u32) -> anyhow::Result<PiAgent>;
 
@@ -73,29 +78,31 @@ pub fn session_router() -> Router<Arc<AppState>> {
 
 // Creates a new session or starts the agent
 async fn create_session(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
-    do_create_session(state, pi::new, DefaultProvider, get_current_model()).await
+    do_create_session(state, pi::new, DefaultProvider, get_current_model).await
 }
 
 async fn do_create_session(
     state: Arc<AppState>,
     create_agent_fn: CreateNewAgentFn,
     provider: impl ConfigProvider,
-    picked: Option<String>,
+    picked: impl FnOnce() -> Option<String>,
 ) -> Result<impl IntoResponse, AppError> {
-    let id = start_pi_session(&state, create_agent_fn, provider, picked).await?;
+    let mut agent = state.agent.lock().await;
+    let id = start_pi_session(&state, &mut agent, create_agent_fn, provider, picked()).await?;
     // a new chat ends the old one Pi went on with
     *state.resumed_chat.lock().expect("resumed chat lock") = None;
     Ok(ApiResponse::success(Session { id }))
 }
 
-/// A fresh Pi session, starting Pi when it isn't running. Returns Pi's id for it
+/// A fresh Pi session, starting Pi when it isn't running. Returns Pi's id for it.
+/// `picked` is read with the agent locked, so a model being deleted isn't used
 async fn start_pi_session(
     state: &AppState,
+    agent: &mut Option<PiAgent>,
     create_agent_fn: CreateNewAgentFn,
     provider: impl ConfigProvider,
     picked: Option<String>,
 ) -> Result<String, AppError> {
-    let mut agent = state.agent.lock().await;
     let running = state
         .agent_model
         .lock()
@@ -163,12 +170,13 @@ async fn resume_session(
 ) -> Result<impl IntoResponse, AppError> {
     let chat_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::CHAT)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-    let history = load_chat_history(&chat_db_conn, &resume.session_id)?;
+    let turns = load_chat_turns(&chat_db_conn, &resume.session_id)?;
+    let history = newest_turns(&turns, history_budget(get_pi_context_window()));
     do_resume_session(
         state,
         pi::new,
         DefaultProvider,
-        get_current_model(),
+        get_current_model,
         resume.session_id,
         history,
     )
@@ -179,17 +187,17 @@ async fn do_resume_session(
     state: Arc<AppState>,
     create_agent_fn: CreateNewAgentFn,
     provider: impl ConfigProvider,
-    picked: Option<String>,
+    picked: impl FnOnce() -> Option<String>,
     chat: String,
     history: String,
 ) -> Result<impl IntoResponse, AppError> {
-    // a reply holds the agent for as long as it streams
-    if state.agent.try_lock().is_err() {
-        return Err(AppError::Conflict(
-            "A reply is still streaming, wait for it to finish".to_owned(),
-        ));
-    }
-    let pi_session_id = start_pi_session(&state, create_agent_fn, provider, picked).await?;
+    // a reply holds the agent for as long as it streams. held until the chat is
+    // set, so the next prompt gets its history
+    let mut agent = state.agent.try_lock().map_err(|_| {
+        AppError::Conflict("A reply is still streaming, wait for it to finish".to_owned())
+    })?;
+    let pi_session_id =
+        start_pi_session(&state, &mut agent, create_agent_fn, provider, picked()).await?;
     *state.resumed_chat.lock().expect("resumed chat lock") = Some(ResumedChat {
         pi_session_id,
         chat_id: chat.clone(),
@@ -199,13 +207,13 @@ async fn do_resume_session(
 }
 
 /// The saved chat as `User:` and `Assistant:` turns
-fn load_chat_history(chat_db_conn: &Connection, session_id: &str) -> Result<String, AppError> {
+fn load_chat_turns(chat_db_conn: &Connection, session_id: &str) -> Result<Vec<String>, AppError> {
     sessionChats::fetch_session(chat_db_conn, session_id)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?
         .ok_or_else(|| AppError::NotFound(format!("No session {session_id}")))?;
     let delta = sessionChats::fetch_chats_by_session_id(chat_db_conn, session_id)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-    let turns: Vec<String> = delta
+    let turns = delta
         .chats
         .iter()
         .filter_map(|chat| {
@@ -217,7 +225,31 @@ fn load_chat_history(chat_db_conn: &Connection, session_id: &str) -> Result<Stri
             Some(format!("{speaker}: {}", chat.content))
         })
         .collect();
-    Ok(turns.join("\n\n"))
+    Ok(turns)
+}
+
+/// About half the context window in characters, at a rough 3 per token
+fn history_budget(context_window: Option<u32>) -> usize {
+    context_window.unwrap_or(DEFAULT_CONTEXT_LENGTH) as usize * 3 / 2
+}
+
+/// The newest turns that fit in `budget` characters, joined. Pi's compaction is
+/// off, so a long chat would overflow the model's context
+fn newest_turns(turns: &[String], budget: usize) -> String {
+    let mut used = 0;
+    let first = turns
+        .iter()
+        .rposition(|turn| {
+            used += turn.len() + TURN_BREAK.len();
+            used > budget
+        })
+        .map_or(0, |over| over + 1);
+    let kept = turns[first..].join(TURN_BREAK);
+    if first == 0 {
+        kept
+    } else {
+        format!("(Older messages are left out){TURN_BREAK}{kept}")
+    }
 }
 
 /// The prompt Pi gets for the first message after a resume. The UI shows and
@@ -427,7 +459,8 @@ mod tests {
             File::create(mock_provider.tmp_path.join("modelfiles/gemma-4-12b-gguf")).unwrap();
         f.write_all("FROM llama3.2\nSYSTEM hello\n".as_bytes())
             .unwrap();
-        let res = do_create_session(Arc::new(state), create_test_agent, mock_provider, None).await;
+        let res =
+            do_create_session(Arc::new(state), create_test_agent, mock_provider, || None).await;
 
         assert!(res.is_ok());
         let response = res.into_response();
@@ -467,7 +500,7 @@ printf '%s\n' '{"type":"response","id":"'"$id"'","command":"get_state","success"
             ..AppState::for_tests()
         });
 
-        let res = do_create_session(state.clone(), create_test_agent, mock_provider, None).await;
+        let res = do_create_session(state.clone(), create_test_agent, mock_provider, || None).await;
 
         let body = res
             .into_response()
@@ -697,11 +730,11 @@ printf '{{"type": "response", "id": "'"$id"'", "command": "get_state", "success"
         }
 
         assert_eq!(
-            load_chat_history(&db_conn.chat, "old").unwrap(),
-            "User: capital of India?\n\nAssistant: New Delhi"
+            load_chat_turns(&db_conn.chat, "old").unwrap(),
+            ["User: capital of India?", "Assistant: New Delhi"]
         );
         assert!(matches!(
-            load_chat_history(&db_conn.chat, "gone"),
+            load_chat_turns(&db_conn.chat, "gone"),
             Err(AppError::NotFound(_))
         ));
     }
@@ -719,7 +752,7 @@ printf '{{"type": "response", "id": "'"$id"'", "command": "get_state", "success"
             MockProvider {
                 tmp_path: tempdir().unwrap().path().to_path_buf(),
             },
-            None,
+            || None,
             "old".to_owned(),
             "User: hi".to_owned(),
         )
@@ -742,6 +775,18 @@ printf '{{"type": "response", "id": "'"$id"'", "command": "get_state", "success"
         assert_eq!(resumed.pending_history.as_deref(), Some("User: hi"));
     }
 
+    #[test]
+    fn a_long_chat_resumes_with_its_newest_turns() {
+        let turns =
+            ["User: one", "Assistant: two\n\nin two parts", "User: three"].map(String::from);
+        assert_eq!(newest_turns(&turns, 1000), turns.join(TURN_BREAK));
+        assert_eq!(
+            newest_turns(&turns, 45),
+            "(Older messages are left out)\n\nAssistant: two\n\nin two parts\n\nUser: three"
+        );
+        assert_eq!(newest_turns(&[], 45), "");
+    }
+
     #[tokio::test]
     async fn a_streaming_reply_holds_off_a_resume() {
         let state = Arc::new(AppState::for_tests());
@@ -753,7 +798,7 @@ printf '{{"type": "response", "id": "'"$id"'", "command": "get_state", "success"
             MockProvider {
                 tmp_path: tempdir().unwrap().path().to_path_buf(),
             },
-            None,
+            || None,
             "old".to_owned(),
             "User: hi".to_owned(),
         )
@@ -780,7 +825,7 @@ printf '{{"type": "response", "id": "'"$id"'", "command": "get_state", "success"
             MockProvider {
                 tmp_path: tempdir().unwrap().path().to_path_buf(),
             },
-            None,
+            || None,
         )
         .await;
         assert!(res.is_ok());

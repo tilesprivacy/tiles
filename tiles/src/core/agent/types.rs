@@ -171,6 +171,7 @@ pub struct PiResponseMessage {
     pub command: CommandType,
     pub success: bool,
     pub data: Option<Value>,
+    pub error: Option<String>,
 }
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
 pub enum CommandType {
@@ -196,6 +197,8 @@ pub enum CommandType {
     GetState,
     #[serde(rename = "new_session")]
     NewSession,
+    #[serde(rename = "prompt")]
+    Prompt,
     #[serde(other)]
     Unknown,
 }

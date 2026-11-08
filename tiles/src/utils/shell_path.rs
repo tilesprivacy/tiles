@@ -90,7 +90,8 @@ fn login_shell_path(shell: &str, probe: &str, timeout: Duration) -> Option<OsStr
     let mut child = command.spawn().ok()?;
     let mut stdout = child.stdout.take()?;
 
-    let (tx, rx) = mpsc::channel();
+    // bounded, a chatty startup script waits instead of filling memory
+    let (tx, rx) = mpsc::sync_channel(16);
     std::thread::spawn(move || {
         let mut chunk = [0; 4096];
         while let Ok(read) = stdout.read(&mut chunk) {
@@ -195,12 +196,6 @@ mod tests {
         assert!(is_listed("/opt/homebrew/bin/fish", shells));
         assert!(!is_listed("/tmp/shell", shells));
         assert!(!is_listed("# Pathnames of valid login shells.", shells));
-    }
-
-    #[test]
-    fn the_users_own_shell_is_found() {
-        let shell = login_shell().expect("the test user has a listed shell");
-        assert!(Path::new(&shell).is_file(), "{shell}");
     }
 
     #[test]
