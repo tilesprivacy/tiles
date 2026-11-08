@@ -1,14 +1,6 @@
 #!/usr/bin/env bash
-# Puts tiles-ui in place for the bundle: the web UI in ui/, which the bundle installs as
-# <lib dir>/ui for the daemon to serve on port 1730, and the desktop app in desktop/:
-# Tiles.app on macOS, the tiles-desktop binary with its launcher entry and icon on Linux.
-# Both come in one file of the tiles-ui release that toolchain.toml pins. Platforms
-# without the app get only the web UI.
-#
-# Before that release is out, tiles-ui main is built instead. Its checkout lives in
-# ~/.cache/tiles/tiles-ui, not in this repo, as cargo would take the app for part of its
-# workspace. That needs git and npm, and the app needs Rust and Tauri's build
-# dependencies too.
+# Puts tiles-ui's web UI in ui/ and its desktop app in desktop/, from the release
+# toolchain.toml pins, or built from tiles-ui main until that release is out.
 #
 # Environment variables:
 #   TILES_UI_BUILD  A local folder laid out like the release file, to use instead of it.
@@ -27,11 +19,10 @@ case "${OS}:${ARCH}" in
   *) ASSET="tiles-ui-${VERSION}.tar.gz" APP="" ;;
 esac
 
-# ui/ and desktop/ are replaced only once the new ones are complete
 STAGE="$(mktemp -d "${ROOT}/.tiles-ui.XXXXXX")"
 trap 'rm -rf "${STAGE}"' EXIT
 
-# a missing file means the release isn't out, any other failure stops the bundle
+# 404 means the release isn't out yet
 is_released() {
   local status
   status=$(curl -sL --retry 3 -r 0-0 -o /dev/null -w '%{http_code}' "$1" || true)
@@ -56,8 +47,7 @@ download() {
   rm "${STAGE}/${ASSET}"
 }
 
-# lays out main's build like the release file. one checkout is kept so cargo builds
-# incrementally, and only the latest commit's build next to it
+# outside the repo, or cargo takes the app for part of this workspace
 build_main() {
   local base="${XDG_CACHE_HOME:-${HOME}/.cache}/tiles/tiles-ui" commit
   commit=$(git ls-remote "${REPO}" refs/heads/main | cut -f1)
@@ -92,7 +82,6 @@ build_main() {
           ;;
         *) npm run build ;;
       esac
-      # the Mac menu bar's panel builds next to the UI
       cp -R build "${out}/ui"
       rm -rf "${out}/ui/panel"
     )
@@ -115,7 +104,6 @@ fi
 case "${APP}" in
   Tiles.app) [[ -d "${STAGE}/Tiles.app" ]] || { echo "No Tiles.app in the tiles-ui build" >&2; exit 1; } ;;
   tiles-desktop)
-    # install.sh needs the launcher entry and icon too
     for file in tiles-desktop tiles.desktop tiles.png; do
       [[ -f "${STAGE}/${file}" ]] || { echo "No ${file} in the tiles-ui build" >&2; exit 1; }
     done
@@ -125,7 +113,7 @@ esac
 rm -rf "${ROOT}/ui" "${ROOT}/desktop"
 mv "${STAGE}/ui" "${ROOT}/ui"
 if [[ -n "${APP}" ]]; then
-  # mktemp makes it private, the installed app must be readable by everyone
+  # mktemp makes it private
   chmod 755 "${STAGE}"
   mv "${STAGE}" "${ROOT}/desktop"
 else
