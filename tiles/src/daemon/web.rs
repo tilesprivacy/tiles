@@ -115,9 +115,9 @@ pub async fn fetch_state(client: &Client) -> Option<WebUiState> {
     serde_json::from_value(body["data"].take()).ok()
 }
 
-/// Opens the desktop app, or the web UI in the browser when there's no app or `browser` is set
-pub async fn open_cli(browser: bool) -> Result<()> {
-    if !browser && open_app() {
+/// Opens the desktop app, or the web UI in the browser when there's no app or `web` is set
+pub async fn open_cli(web: bool) -> Result<()> {
+    if !web && open_app() {
         println!("Opening Tiles");
         return Ok(());
     }

@@ -2,7 +2,7 @@
 
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
 use axum::{
@@ -21,11 +21,12 @@ use wiremock::{
 };
 
 use super::{
-    CLIENT_HEADER, DownloadState, ModelDownload, Models, Picked, Spec, bundled::BUNDLED,
-    model_router, modelfile_spec,
+    CLIENT_HEADER, CurrentModel, DownloadState, ModelDownload, Models, Spec, bundled::BUNDLED,
+    default_or_newest, model_router, modelfile_spec,
 };
 use crate::{
-    daemon::AppState,
+    core::agent::pi::from_test_command,
+    daemon::{AppState, session::ResumedChat},
     utils::hf_model_downloader::{Hub, repo_dir},
 };
 
@@ -388,7 +389,8 @@ async fn status_with_no_model_lists_every_bundled_model() {
     serve_model(&server, "org/e2b-GGUF", Duration::ZERO).await;
     serve_model(&server, "org/e4b-GGUF", Duration::ZERO).await;
     let daemon = Daemon::with(&server, tempdir().unwrap(), |models| {
-        models.picked = Picked::Memory(Mutex::new(Some("org/e4b-GGUF:q4_k_m".to_owned())));
+        models.current_model =
+            CurrentModel::Memory(Mutex::new(Some("org/e4b-GGUF:q4_k_m".to_owned())));
     });
     let modelfiles = daemon.root.path().join("modelfiles");
     std::fs::create_dir_all(&modelfiles).unwrap();
@@ -622,11 +624,142 @@ async fn deleting_a_model_frees_its_files_but_never_the_one_chats_use() {
 }
 
 #[tokio::test]
+async fn the_model_in_use_is_deleted_after_unloading() {
+    let server = hub_with_model(Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    let model = json!({ "model": REPO });
+    daemon.start(model.clone()).await;
+    daemon
+        .call(
+            "GET",
+            &format!("/v1/tilekit/model/download?model={REPO}"),
+            None,
+        )
+        .await;
+    let folder = repo_dir(daemon.root.path(), REPO);
+    assert!(folder.exists());
+    // Pi set up for it, going on with an old chat
+    *daemon.state.agent.lock().await = Some(from_test_command("sleep", &["30"]).unwrap());
+    *daemon.state.resumed_chat.lock().unwrap() = Some(ResumedChat {
+        pi_session_id: "pi".to_owned(),
+        chat_id: "chat".to_owned(),
+        pending_history: None,
+    });
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            "/v1/tilekit/model/delete",
+            Some(json!({ "model": REPO, "unload": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!folder.exists());
+    assert!(daemon.state.agent.lock().await.is_none());
+    assert!(daemon.state.resumed_chat.lock().unwrap().is_none());
+    // no other model is downloaded, so none is picked
+    assert_eq!(body["data"]["current"], Value::Null);
+}
+
+#[tokio::test]
+async fn the_model_pi_still_runs_is_unloaded_too_but_the_pick_stays() {
+    let server = hub_with_model(Duration::ZERO).await;
+    serve_model(&server, OTHER, Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    let other = json!({ "model": OTHER });
+    daemon.start(other.clone()).await;
+    daemon
+        .call(
+            "GET",
+            &format!("/v1/tilekit/model/download?model={OTHER}"),
+            None,
+        )
+        .await;
+    // a chat started on it before another model was picked
+    *daemon.state.agent.lock().await = Some(from_test_command("sleep", &["30"]).unwrap());
+    *daemon.state.agent_model.lock().unwrap() = Some(format!("{OTHER}:Q4_K_M"));
+    let picked = daemon.state.models.current();
+    let delete = "/v1/tilekit/model/delete";
+
+    let (status, body) = daemon.json("POST", delete, Some(other)).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["reason"].as_str().unwrap().contains("unload it"));
+    assert!(repo_dir(daemon.root.path(), OTHER).exists());
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            delete,
+            Some(json!({ "model": OTHER, "unload": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(daemon.state.agent.lock().await.is_none());
+    assert_eq!(daemon.state.models.current(), picked);
+}
+
+#[tokio::test]
+async fn a_download_refuses_the_delete_before_pi_is_stopped() {
+    let server = hub_with_model(Duration::from_millis(500)).await;
+    let daemon = Daemon::new(&server);
+    *daemon.state.agent.lock().await = Some(from_test_command("sleep", &["30"]).unwrap());
+    daemon.start(json!({ "model": REPO })).await;
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            "/v1/tilekit/model/delete",
+            Some(json!({ "model": REPO, "unload": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["reason"].as_str().unwrap().contains("pause it"));
+    assert!(daemon.state.agent.lock().await.is_some());
+}
+
+#[tokio::test]
+async fn deleting_the_model_in_use_waits_for_a_streaming_reply() {
+    let server = hub_with_model(Duration::ZERO).await;
+    let daemon = Daemon::new(&server);
+    let _streaming = daemon.state.agent.lock().await;
+
+    let (status, body) = daemon
+        .json(
+            "POST",
+            "/v1/tilekit/model/delete",
+            Some(json!({ "model": REPO, "unload": true })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(body["reason"].as_str().unwrap().contains("streaming"));
+}
+
+#[test]
+fn chats_move_to_the_default_else_the_model_downloaded_last() {
+    let spec = |repo| Spec::parse(repo).unwrap();
+    let at = |secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs);
+    let default = spec(REPO);
+
+    let with_default = vec![(spec(OTHER), at(9)), (default.clone(), at(1))];
+    assert_eq!(
+        default_or_newest(Some(&default), with_default),
+        Some(default.clone())
+    );
+    let without = vec![(spec("org/older-GGUF"), at(1)), (spec(OTHER), at(9))];
+    assert_eq!(
+        default_or_newest(Some(&default), without),
+        Some(spec(OTHER))
+    );
+    assert_eq!(default_or_newest(Some(&default), Vec::new()), None);
+}
+
+#[tokio::test]
 async fn a_picked_model_tiles_doesnt_ship_leaves_the_default_in_use() {
     let server = hub_with_model(Duration::ZERO).await;
     // what `tiles run` saves for a custom Modelfile
     let daemon = Daemon::with(&server, tempdir().unwrap(), |models| {
-        models.picked = Picked::Memory(Mutex::new(Some("org/custom-GGUF:Q4_K_M".to_owned())));
+        models.current_model =
+            CurrentModel::Memory(Mutex::new(Some("org/custom-GGUF:Q4_K_M".to_owned())));
     });
 
     let (status, _) = daemon

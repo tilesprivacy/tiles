@@ -86,7 +86,7 @@ impl LlamaConfig {
     /// Fills what's unset with Tiles' defaults. Without a context length llama.cpp uses
     /// the model's maximum and runs out of memory on most machines
     pub fn with_defaults(mut self) -> Self {
-        self.context_length = self.context_length.or(Some(65536));
+        self.context_length = self.context_length.or(Some(DEFAULT_CONTEXT_LENGTH));
         self.flash_attn = self.flash_attn.or(Some(true));
         self
     }
@@ -146,6 +146,8 @@ pub struct PiProviderModelConfig {
     #[serde(rename = "maxTokens")]
     pub max_tokens: Option<u32>,
 }
+pub const DEFAULT_CONTEXT_LENGTH: u32 = 65536;
+
 const MODEL_SUB_PATH: &str = "models/huggingface/hub";
 pub const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
 pub const SYSTEM_BIN_PATH: &str = "/usr/local/bin/tiles";
@@ -586,7 +588,7 @@ fn do_update_current_model(config: &mut RootConfig, model_name: &str) -> Result<
     Ok(())
 }
 
-fn get_pi_context_window() -> Option<u32> {
+pub fn get_pi_context_window() -> Option<u32> {
     get_llama_config()
         .ok()
         .and_then(|config| config.context_length)
