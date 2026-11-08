@@ -72,12 +72,9 @@ find "${PKG_LIBS_PATH}/pi" -name '*.node' -type f | while read -r node_bin; do
     "$node_bin"
 done
 
-echo "Embedding the web UI"
-./scripts/fetch_ui.sh
+echo "Embedding the web UI and the Tiles app"
+./scripts/fetch_tiles_ui.sh
 cp -r ui "${PKG_LIBS_PATH}/"
-
-echo "Embedding the Tiles app"
-./scripts/fetch_desktop.sh
 codesign --force \
   --sign "$DEVELOPER_ID_APPLICATION" \
   --options runtime \
