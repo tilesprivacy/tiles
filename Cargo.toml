@@ -4,7 +4,6 @@ members = [
     "crates/tiles-engine",
     "tilekit",
     "tiles",
-    "apps/menubar/src-tauri",
 ]
 
 default-members = [

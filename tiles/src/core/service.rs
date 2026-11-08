@@ -1,8 +1,7 @@
 //! The launchd agent that brings the daemon up at login
 //!
-//! This has to be a LaunchAgent rather than a LaunchDaemon: the daemon launches
-//! the menu bar app as a child, and a status item can only be drawn inside the
-//! user's Aqua session. A LaunchDaemon runs in session 0 and could never do it.
+//! This has to be a LaunchAgent rather than a LaunchDaemon: the daemon runs as
+//! the user, in the user's session, with their keychain and data folder.
 
 use std::{
     path::{Path, PathBuf},

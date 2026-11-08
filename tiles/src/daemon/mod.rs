@@ -73,7 +73,6 @@ use crate::{
         network::{self, create_endpoint, share},
         service,
         storage::db::get_db_conn,
-        ui::{self, Ui},
     },
     utils::config::{
         ConfigProvider, DefaultProvider, ModelCacheError, get_config_json, get_model_cache,
@@ -95,7 +94,6 @@ pub struct AppState {
     pub agent_model: Mutex<Option<String>>,
     /// The ATmosphere sign in waiting for the browser, if any
     pub login: AsyncMutex<Option<atproto::LoginTask>>,
-    pub ui: Arc<Ui>,
     pub web_ui: web::WebUiState,
     pub models: model::Models,
     pub engines: Arc<engine::Engines>,
@@ -119,7 +117,6 @@ impl AppState {
             agent: None.into(),
             agent_model: Mutex::new(None),
             login: None.into(),
-            ui: Ui::new(),
             web_ui: web::WebUiState::Serving {
                 url: format!("http://127.0.0.1:{}", web::UI_PORT),
             },
@@ -498,11 +495,10 @@ async fn start_daemon(port: Option<u32>) -> Result<()> {
     wait_until_server_is_up(port).await
 }
 
-pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
+pub async fn start_server(port: Option<u32>) -> Result<()> {
     let dyn_port: u32 = get_port(port);
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let ui = Ui::new();
     let (web_ui_state, web_ui_listener) = web::bind().await;
     let models = model::Models::for_daemon()?;
     let engines = Arc::new(engine::Engines::for_daemon()?);
@@ -516,7 +512,6 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         agent: None.into(),
         agent_model: Mutex::new(None),
         login: None.into(),
-        ui: ui.clone(),
         web_ui: web_ui_state,
         models,
         engines,
@@ -537,9 +532,6 @@ pub async fn start_server(port: Option<u32>, with_ui: bool) -> Result<()> {
         anyhow::Result::<()>::Ok(())
     });
 
-    if with_ui {
-        ui::start(ui);
-    }
     listen_for_signals(shared_state.clone());
 
     let web_ui = match web_ui_listener {
@@ -614,7 +606,6 @@ fn listen_for_signals(state: Arc<AppState>) {
 /// because it runs in its own process group and outlives the rest otherwise
 pub async fn shutdown_all(state: Arc<AppState>) {
     info!("Daemon server shutting down");
-    ui::begin_stop(&state.ui);
     // so they show as paused next time. resuming hashes the part on disk, which can't be cut short
     if tokio::time::timeout(MODEL_PAUSE_TIMEOUT, state.models.pause_all())
         .await
@@ -639,7 +630,6 @@ pub async fn shutdown_all(state: Arc<AppState>) {
         Err(_) => log::warn!("Inference server did not answer the stop in time"),
         Ok(Ok(_)) => {}
     }
-    ui::stop(&state.ui).await;
     let _ = state.shutdown_sender.send(true);
 }
 
@@ -1032,7 +1022,7 @@ mod tests {
     #[serial]
     async fn test_sever_process_and_server_started() -> Result<()> {
         tokio::spawn(async move {
-            let _ = start_server(None, false).await;
+            let _ = start_server(None).await;
         });
         wait_until_server_is_up(None).await?;
         assert!(ping(None).await.is_ok());
