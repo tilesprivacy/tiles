@@ -22,7 +22,7 @@ link_dir() {
 
 link_dir modelfiles
 link_dir server
-# optional in dev, scripts/fetch_ui.sh fetches it
+# optional in dev, scripts/fetch_tiles_ui.sh fetches it
 [[ -d "${ROOT}/ui" ]] && link_dir ui
 
 if [[ ! -d "${DEV_DIR}/pi" ]]; then

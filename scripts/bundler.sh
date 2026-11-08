@@ -121,12 +121,9 @@ rm -rf "${DIST_DIR}/tmp/server/stack"
 
 cp -r "${MODELFILE_DIR}" "${DIST_DIR}/tmp/"
 
-echo "🖥️ Embedding the web UI..."
-./scripts/fetch_ui.sh
+echo "🖥️ Embedding the web UI and the desktop app..."
+./scripts/fetch_tiles_ui.sh
 cp -r ui "${DIST_DIR}/tmp/"
-
-echo "🪟 Embedding the desktop app..."
-./scripts/fetch_desktop.sh
 if [[ -d desktop ]]; then
   if [[ "${OS}" == "darwin" ]]; then
     codesign --force \

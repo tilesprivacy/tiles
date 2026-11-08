@@ -15,9 +15,8 @@ pkgroot_models/
 pi-darwin-arm64.tar.gz
 pi-linux-x64.tar.gz
 /ui
-/.ui.*
 /desktop
-/.desktop.*
+/.tiles-ui.*
 pkg/components.plist
 .cursor/hooks/state/continual-learning.json
 .cursor/hooks/state/continual-learning-index.json
