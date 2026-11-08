@@ -5,6 +5,44 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.5.0] - Unreleased
+
+### Added
+
+- The Tiles desktop app for macOS and Linux: the chat window, with the menu bar on a Mac and a tray on Linux. `tiles ui` opens it, or the web UI in the browser when there's no app or display [#293](https://github.com/tilesprivacy/tiles/pull/293)
+- A web UI the daemon serves at `http://127.0.0.1:1730`, to chat, download and pick models, and switch the llama.cpp engine [#285](https://github.com/tilesprivacy/tiles/pull/285)
+- Link your devices and sync chats between them. A linked device can be dialed by its nickname as well as its DID [#275](https://github.com/tilesprivacy/tiles/pull/275) [#290](https://github.com/tilesprivacy/tiles/pull/290)
+- Sign in with an ATmosphere account. Sign-in shows its progress and gives up after five minutes [#276](https://github.com/tilesprivacy/tiles/pull/276)
+- Old chats can be continued, also after Tiles restarts [#294](https://github.com/tilesprivacy/tiles/pull/294)
+- Tiles finds the GPU and downloads the llama.cpp build for it the first time a model runs. `tiles run` asks once before downloading [#289](https://github.com/tilesprivacy/tiles/pull/289) [#291](https://github.com/tilesprivacy/tiles/pull/291) [#292](https://github.com/tilesprivacy/tiles/pull/292)
+- Model downloads resume after a pause or a crash, and each file's SHA-256 is checked [#281](https://github.com/tilesprivacy/tiles/pull/281)
+- Pick the model chats use, and delete downloaded models, including the one in use after unloading it [#285](https://github.com/tilesprivacy/tiles/pull/285) [#294](https://github.com/tilesprivacy/tiles/pull/294)
+- Gemma 4 E2B, E4B, 26B-A4B and 31B, next to the default Gemma 4 12B [#281](https://github.com/tilesprivacy/tiles/pull/281)
+- Keep the Mac awake, also with the lid closed [#227](https://github.com/tilesprivacy/tiles/pull/227) [#284](https://github.com/tilesprivacy/tiles/pull/284)
+- `tiles service install` starts the daemon at login [#200](https://github.com/tilesprivacy/tiles/pull/200)
+- `install.sh --headless` installs only the daemon, without the app and the web UI, for servers [#293](https://github.com/tilesprivacy/tiles/pull/293)
+- Tilekit, the daemon's HTTP API for accounts, sessions, the agent, the inference server, models and engines [#196](https://github.com/tilesprivacy/tiles/pull/196)
+
+### Changed
+
+- Linux ships one tarball with the CPU build of llama.cpp, instead of one per GPU backend [#292](https://github.com/tilesprivacy/tiles/pull/292)
+- Every platform runs the same upstream llama.cpp release. `load_mode` replaces `no_mmap` in `config.toml` [#286](https://github.com/tilesprivacy/tiles/pull/286)
+- The menu bar is part of the desktop app, and the separate menu bar app is gone [#293](https://github.com/tilesprivacy/tiles/pull/293)
+- Routes that change something are POST and need a JSON content type, so websites can't call the daemon through the browser [#277](https://github.com/tilesprivacy/tiles/pull/277)
+
+### Removed
+
+- The gpt-oss and Qwen Modelfiles [#281](https://github.com/tilesprivacy/tiles/pull/281)
+
+### Fixed
+
+- Starting the inference server waits until it's ready, and stopping it waits until it has exited, so no server is left behind [#272](https://github.com/tilesprivacy/tiles/pull/272)
+- Chats are saved with the right model and account, and a failed save leaves no empty session [#271](https://github.com/tilesprivacy/tiles/pull/271) [#274](https://github.com/tilesprivacy/tiles/pull/274)
+
+### Security
+
+- Updated rustls-webpki, webpki-roots and certifi for the eMudhra CA compromise, plus rustls and h2 advisories [#279](https://github.com/tilesprivacy/tiles/pull/279)
+
 ## [0.4.19] - 2026-08-30
 
 ### Added
