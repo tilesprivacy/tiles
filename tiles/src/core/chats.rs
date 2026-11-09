@@ -7,9 +7,11 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use crate::core::account::local::User;
+use crate::core::agent::types::{PiMsgContent, PiMsgEvent};
 use crate::core::storage::db::get_db_conn;
 use crate::repl::ChatResponse;
 use crate::utils::get_unix_time_now;
+use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Result, anyhow};
 use log::{info, warn};
 use rusqlite::types::FromSqlError;
@@ -467,6 +469,47 @@ pub fn fetch_chats_by_session_id(conn: &Connection, session_id: &str) -> Result<
     fetch_delta_chats(conn, query, params)
 }
 
+/// What a share publishes: the snapshot the REPL keeps, else one made from the saved
+/// chats, a turn per prompt. `None` when there's no such session
+pub fn session_snapshot(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<SessionSnapshotRecord>> {
+    let delta = fetch_chats_by_session_id(conn, session_id)?;
+    let Some(session) = delta.sessions.first() else {
+        return Ok(None);
+    };
+    if let Some(snapshot) = &session.snapshot {
+        return Ok(Some(serde_json::from_str(snapshot)?));
+    }
+    let mut record = SessionSnapshotRecord::new(&session.name, &session.id);
+    for chat in delta.chats {
+        let message = PiMsgEvent {
+            role: chat.role,
+            content: vec![PiMsgContent {
+                r#type: "text".to_owned(),
+                text: Some(chat.content),
+                thinking: None,
+                arguments: None,
+                name: None,
+            }],
+            stop_reason: None,
+            timestamp: chat.created_at,
+            tool_name: None,
+        };
+        match record.turns.last_mut() {
+            Some(turn) if chat.role != Role::User => turn.messages.push(message),
+            _ => record.turns.push(Turn {
+                api: Some("open-responses".to_owned()),
+                provider: Some("tiles".to_owned()),
+                model: chat.model_name,
+                messages: vec![message],
+            }),
+        }
+    }
+    Ok(Some(record))
+}
+
 pub fn update_snapshot(conn: &Connection, id: &str, snapshot: String) -> Result<Session> {
     let mut stmt = conn.prepare("update sessions set snapshot = ?1 where id = ?2")?;
     match stmt.execute(params![snapshot, id.to_owned(),]) {
@@ -490,11 +533,11 @@ pub mod tests {
             chats::{
                 apply_delta, create_session, decode_delta_from_bytes, encode_delta_to_bytes,
                 fetch_models_used_by_session, fetch_session, get_delta, get_last_row_counter,
-                save_chat, save_first_chat,
+                save_chat, save_first_chat, session_snapshot, update_snapshot,
             },
         },
         repl::ChatResponse,
-        utils::{get_unix_time_now, test_logger},
+        utils::{get_unix_time_now, lexicons::SessionSnapshotRecord, test_logger},
     };
 
     #[test]
@@ -831,6 +874,86 @@ pub mod tests {
         let session = fetch_session(&conn, "session_abc").unwrap().unwrap();
         assert_eq!(session.name, "2+2");
         assert_eq!(chat.session_id, "session_abc");
+    }
+
+    #[test]
+    fn a_chat_without_a_snapshot_is_shared_as_a_turn_per_prompt() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let turn = |input: &str, role, parent: Option<String>| ChatResponse {
+            input: input.to_owned(),
+            session_id: String::from("session_abc"),
+            role,
+            parent_chat_id: parent,
+            metrics: None,
+            model_used: "gemma".to_owned(),
+        };
+        let mut parent = save_first_chat(
+            &conn,
+            &user,
+            "capital of India?",
+            turn("capital of India?", Role::User, None),
+        )
+        .unwrap()
+        .id;
+        for (input, role) in [
+            ("New Delhi", Role::Assistant),
+            ("and of France?", Role::User),
+            ("Paris", Role::Assistant),
+        ] {
+            parent = save_chat(&conn, &user, turn(input, role, Some(parent)))
+                .unwrap()
+                .id;
+        }
+
+        let snapshot = session_snapshot(&conn, "session_abc").unwrap().unwrap();
+        assert_eq!(snapshot.name, "capital of India?");
+        let turns: Vec<Vec<(Role, String)>> = snapshot
+            .turns
+            .iter()
+            .map(|turn| {
+                turn.messages
+                    .iter()
+                    .map(|message| (message.role, message.content[0].text.clone().unwrap()))
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            turns,
+            [
+                vec![
+                    (Role::User, "capital of India?".to_owned()),
+                    (Role::Assistant, "New Delhi".to_owned())
+                ],
+                vec![
+                    (Role::User, "and of France?".to_owned()),
+                    (Role::Assistant, "Paris".to_owned())
+                ],
+            ]
+        );
+        assert!(snapshot.turns.iter().all(|turn| turn.model == "gemma"));
+        assert!(session_snapshot(&conn, "gone").unwrap().is_none());
+    }
+
+    #[test]
+    fn a_chat_the_repl_kept_a_snapshot_for_is_shared_as_it_is() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let prompt = ChatResponse {
+            input: "hi".to_owned(),
+            session_id: String::from("session_abc"),
+            role: Role::User,
+            parent_chat_id: None,
+            metrics: None,
+            model_used: "gemma".to_owned(),
+        };
+        save_first_chat(&conn, &user, "hi", prompt).unwrap();
+        let kept = SessionSnapshotRecord::new("kept by the REPL", "session_abc");
+        update_snapshot(&conn, "session_abc", serde_json::to_string(&kept).unwrap()).unwrap();
+
+        let snapshot = session_snapshot(&conn, "session_abc").unwrap().unwrap();
+        assert_eq!(snapshot.name, "kept by the REPL");
+        assert!(snapshot.turns.is_empty());
     }
 
     #[test]

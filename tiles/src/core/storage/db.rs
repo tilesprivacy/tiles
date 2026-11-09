@@ -173,6 +173,19 @@ pub fn get_db_conn(db_type: &DBTYPE) -> Result<Connection> {
     Ok(conn)
 }
 
+/// The database [`get_db_conn`] opens, as a handle that can be held across awaits
+pub fn get_async_db_conn(db_type: &DBTYPE) -> Result<tokio_rusqlite::Connection> {
+    Ok(tokio_rusqlite::Connection::from(get_db_conn(db_type)?))
+}
+
+/// What a [`tokio_rusqlite::Connection::call`] closure returned, or that the connection is gone
+pub fn call_error(err: tokio_rusqlite::Error<anyhow::Error>) -> anyhow::Error {
+    match err {
+        tokio_rusqlite::Error::Error(err) => err,
+        err => anyhow!("{err}"),
+    }
+}
+
 fn apply_migrations(common_conn: &mut Connection, chat_conn: &mut Connection) -> Result<()> {
     COMMON_MIGRATIONS
         .to_latest(common_conn)

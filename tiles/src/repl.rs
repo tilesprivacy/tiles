@@ -12,7 +12,7 @@ use crate::core::chats::{
 };
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
-use crate::core::storage::db::Dbconn;
+use crate::core::storage::db::{DBTYPE, Dbconn, get_async_db_conn};
 use crate::daemon::{atproto::sign_in, model::picked_modelfile};
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
@@ -798,7 +798,8 @@ async fn process_share_session(
     let clean_input = input.trim();
     let is_private = clean_input.is_empty() || clean_input.to_lowercase() == "y";
 
-    match share_session(&conn.common, &shared_session, is_private).await {
+    let common = get_async_db_conn(&DBTYPE::COMMON)?;
+    match share_session(&common, &shared_session, is_private).await {
         Err(err) if &err.to_string() == "NOT_LOGGED_IN" => {
             let login_prompt = format!("{}", "Sharing a chat session requires logging in, as the data is stored on your ATmosphere PDS.\nDo you want to proceed with the login flow? (Y/n)".yellow());
 
@@ -814,7 +815,10 @@ async fn process_share_session(
                 stdin.read_line(&mut input)?;
                 // a bad handle is reported, it does not end the session
                 match sign_in(input.trim()).await {
-                    Ok(_) => share_session(&conn.common, &shared_session, is_private).await?,
+                    Ok(_) => {
+                        let url = share_session(&common, &shared_session, is_private).await?;
+                        println!("successfully posted at {url}");
+                    }
                     Err(err) => eprintln!("Could not sign in: {err}"),
                 }
             }
@@ -822,8 +826,8 @@ async fn process_share_session(
         Err(err) => {
             eprintln!("Failed to share session due to {:?}", err)
         }
-        Ok(_) => {
-            info!("Session shared successfully")
+        Ok(url) => {
+            println!("successfully posted at {url}");
         }
     }
     Ok(())
