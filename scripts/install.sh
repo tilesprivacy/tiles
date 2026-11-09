@@ -319,6 +319,10 @@ elif [[ -d "${TMPDIR}/desktop" ]]; then
     install -m 755 "${TMPDIR}/desktop/tiles-desktop" "${DESKTOP_BIN}"
     mkdir -p "$(dirname "${DESKTOP_ENTRY}")" "$(dirname "${DESKTOP_ICON}")"
     install -m 644 "${TMPDIR}/desktop/tiles.png" "${DESKTOP_ICON}"
+    # an icon cache another app left would hide the new icon
+    HICOLOR_DIR="${SHARE_DIR}/icons/hicolor"
+    touch "${HICOLOR_DIR}"
+    gtk-update-icon-cache -q -f -t "${HICOLOR_DIR}" >/dev/null 2>&1 || true
     sed "s|^Exec=.*|Exec=\"${DESKTOP_BIN}\"|" "${TMPDIR}/desktop/tiles.desktop" > "${DESKTOP_ENTRY}"
     update-desktop-database "$(dirname "${DESKTOP_ENTRY}")" >/dev/null 2>&1 || true
     if command -v ldconfig >/dev/null 2>&1 \
