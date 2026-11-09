@@ -18,7 +18,7 @@ use atrium_oauth::{
         state::{InternalStateData, MemoryStateStore},
     },
 };
-use log::info;
+use log::{info, warn};
 use reqwest::Client;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -446,9 +446,14 @@ pub async fn share_session(
             handle: auth_data.handle,
         };
 
-        conn.call(move |conn| upsert_auth_data(conn, &auth_data))
+        // the record is published by now, its link is returned either way
+        if let Err(err) = conn
+            .call(move |conn| upsert_auth_data(conn, &auth_data))
             .await
-            .map_err(call_error)?;
+            .map_err(call_error)
+        {
+            warn!("Couldn't save the refreshed ATmosphere session: {err:#}");
+        }
         Ok(shareable_url)
     } else {
         info!("No logged-in user, please login");

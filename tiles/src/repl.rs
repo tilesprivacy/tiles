@@ -815,10 +815,10 @@ async fn process_share_session(
                 stdin.read_line(&mut input)?;
                 // a bad handle is reported, it does not end the session
                 match sign_in(input.trim()).await {
-                    Ok(_) => {
-                        let url = share_session(&common, &shared_session, is_private).await?;
-                        println!("successfully posted at {url}");
-                    }
+                    Ok(_) => match share_session(&common, &shared_session, is_private).await {
+                        Ok(url) => println!("successfully posted at {url}"),
+                        Err(err) => eprintln!("Failed to share session due to {:?}", err),
+                    },
                     Err(err) => eprintln!("Could not sign in: {err}"),
                 }
             }

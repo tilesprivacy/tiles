@@ -498,7 +498,13 @@ pub fn session_snapshot(
             tool_name: None,
         };
         match record.turns.last_mut() {
-            Some(turn) if chat.role != Role::User => turn.messages.push(message),
+            Some(turn) if chat.role != Role::User => {
+                // a turn is credited to the model that answered
+                if chat.role == Role::Assistant {
+                    turn.model = chat.model_name;
+                }
+                turn.messages.push(message);
+            }
             _ => record.turns.push(Turn {
                 api: Some("open-responses".to_owned()),
                 provider: Some("tiles".to_owned()),
@@ -880,28 +886,29 @@ pub mod tests {
     fn a_chat_without_a_snapshot_is_shared_as_a_turn_per_prompt() {
         let conn = setup_db_schema();
         let user = create_user();
-        let turn = |input: &str, role, parent: Option<String>| ChatResponse {
+        let turn = |input: &str, role, parent: Option<String>, model: &str| ChatResponse {
             input: input.to_owned(),
             session_id: String::from("session_abc"),
             role,
             parent_chat_id: parent,
             metrics: None,
-            model_used: "gemma".to_owned(),
+            model_used: model.to_owned(),
         };
         let mut parent = save_first_chat(
             &conn,
             &user,
             "capital of India?",
-            turn("capital of India?", Role::User, None),
+            turn("capital of India?", Role::User, None, "gemma"),
         )
         .unwrap()
         .id;
-        for (input, role) in [
-            ("New Delhi", Role::Assistant),
-            ("and of France?", Role::User),
-            ("Paris", Role::Assistant),
+        // the last reply came from another model, picked after the prompt was saved
+        for (input, role, model) in [
+            ("New Delhi", Role::Assistant, "gemma"),
+            ("and of France?", Role::User, "gemma"),
+            ("Paris", Role::Assistant, "qwen"),
         ] {
-            parent = save_chat(&conn, &user, turn(input, role, Some(parent)))
+            parent = save_chat(&conn, &user, turn(input, role, Some(parent), model))
                 .unwrap()
                 .id;
         }
@@ -931,7 +938,12 @@ pub mod tests {
                 ],
             ]
         );
-        assert!(snapshot.turns.iter().all(|turn| turn.model == "gemma"));
+        let models: Vec<&str> = snapshot
+            .turns
+            .iter()
+            .map(|turn| turn.model.as_str())
+            .collect();
+        assert_eq!(models, ["gemma", "qwen"]);
         assert!(session_snapshot(&conn, "gone").unwrap().is_none());
     }
 
