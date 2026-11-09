@@ -18,8 +18,8 @@ indicatif = "0.17"
 rustyline = "18.0"
 toml = "1.0.3"
 semver = "1.0"
-rusqlite = { version = "0.40.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 rusqlite_migration = "2.4.1"
+tokio-rusqlite = { version = "0.8.0", features = ["bundled-sqlcipher-vendored-openssl"] }
 uuid = {version = "1.21.0", features = ["v7"]}
 axum = "0.8.8"
 iroh = {version = "1.0.0"}

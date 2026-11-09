@@ -7,7 +7,7 @@ use std::{env, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 use log::info;
-use rusqlite::Connection;
+use tokio_rusqlite::rusqlite::Connection;
 
 use crate::{
     core::account::{create_and_save_passkey, get_passkey},
@@ -171,6 +171,19 @@ pub fn get_db_conn(db_type: &DBTYPE) -> Result<Connection> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     info!("DB {:?} Opened", db_type);
     Ok(conn)
+}
+
+/// The database [`get_db_conn`] opens, as a handle that can be held across awaits
+pub fn get_async_db_conn(db_type: &DBTYPE) -> Result<tokio_rusqlite::Connection> {
+    Ok(tokio_rusqlite::Connection::from(get_db_conn(db_type)?))
+}
+
+/// What a [`tokio_rusqlite::Connection::call`] closure returned, or that the connection is gone
+pub fn call_error(err: tokio_rusqlite::Error<anyhow::Error>) -> anyhow::Error {
+    match err {
+        tokio_rusqlite::Error::Error(err) => err,
+        err => anyhow!("{err}"),
+    }
 }
 
 fn apply_migrations(common_conn: &mut Connection, chat_conn: &mut Connection) -> Result<()> {

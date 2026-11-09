@@ -3,7 +3,7 @@ use std::{convert::Infallible, sync::Arc};
 use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
-    extract::State,
+    extract::{Path, State},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive},
@@ -21,7 +21,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     core::{
         account::atproto::{self, AtprotoAccount, HandleNotFound, LOGIN_TIMEOUT},
-        storage::db::get_db_conn,
+        chats::session_snapshot,
+        storage::db::{DBTYPE, call_error, get_async_db_conn, get_db_conn},
     },
     daemon::{
         ApiJson, ApiResponse, AppError, AppState, daemon_client, daemon_url, sse::take_events,
@@ -47,10 +48,50 @@ pub fn atproto_router() -> Router<Arc<AppState>> {
         .route("/v1/tilekit/atproto/login", post(login))
         .route("/v1/tilekit/atproto/logout", post(logout))
         .route("/v1/tilekit/atproto/status", get(status))
-    // .route(
-    //     "/v1/tilekit/atproto/share-session/{session-id}",
-    //     get(share_session),
-    // )
+        .route(
+            "/v1/tilekit/atproto/share-session/{session_id}",
+            post(share_session),
+        )
+}
+
+#[derive(Deserialize)]
+struct ShareRequest {
+    // encrypted, with the key only in the link
+    #[serde(default)]
+    is_private: bool,
+}
+
+/// Publishes a chat to the user's PDS and answers with its link
+#[debug_handler]
+async fn share_session(
+    Path(session_id): Path<String>,
+    ApiJson(request): ApiJson<ShareRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let internal = |err: anyhow::Error| AppError::InternalServerError(format!("{err:#}"));
+    let chats = get_async_db_conn(&DBTYPE::CHAT).map_err(internal)?;
+    let id = session_id.clone();
+    let snapshot = chats
+        .call(move |conn| session_snapshot(conn, &id))
+        .await
+        .map_err(|err| internal(call_error(err)))?
+        .ok_or_else(|| AppError::NotFound(format!("No chat {session_id}")))?;
+
+    let common = get_async_db_conn(&DBTYPE::COMMON).map_err(internal)?;
+    let url = atproto::share_session(&common, &snapshot, request.is_private)
+        .await
+        .map_err(|err| {
+            if err.to_string() == "NOT_LOGGED_IN" {
+                AppError::Forbidden(
+                    "Sign in to an ATmosphere account to share, the chat is stored there"
+                        .to_owned(),
+                )
+            } else {
+                internal(err)
+            }
+        })?;
+    Ok(ApiResponse::success(
+        json!({ "url": url, "is_private": request.is_private }),
+    ))
 }
 
 #[debug_handler]

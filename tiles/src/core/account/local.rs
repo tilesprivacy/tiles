@@ -14,10 +14,6 @@ use dialog_varsig::{Did, Principal, Signature, eddsa::Ed25519Signature};
 // use dialog
 use iroh::SecretKey;
 use log::{info, warn};
-use rusqlite::{
-    Connection, OptionalExtension, Row, ToSql, params, params_from_iter,
-    types::{FromSql, FromSqlError},
-};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -25,6 +21,10 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio_rusqlite::rusqlite::{
+    self, Connection, OptionalExtension, Row, ToSql, params, params_from_iter,
+    types::{FromSql, FromSqlError},
 };
 use toml::Table;
 use uuid::Uuid;
@@ -1185,8 +1185,8 @@ pub mod tests {
         RootUser, create_root_account, get_current_user, get_root_user_details, set_nickname,
     };
     use anyhow::Result;
-    use rusqlite::Connection;
     use serde_json::json;
+    use tokio_rusqlite::rusqlite::Connection;
     use toml::Table;
 
     fn use_sample_keyring_store() -> Result<()> {

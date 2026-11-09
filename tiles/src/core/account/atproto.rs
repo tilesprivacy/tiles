@@ -18,19 +18,19 @@ use atrium_oauth::{
         state::{InternalStateData, MemoryStateStore},
     },
 };
-use log::info;
+use log::{info, warn};
 use reqwest::Client;
-use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::{fmt::Debug, sync::Arc, time::Duration};
 use tokio::sync::oneshot;
+use tokio_rusqlite::rusqlite::{Connection, OptionalExtension, params};
 
 use std::error::Error;
 
 use hickory_resolver::TokioResolver;
 
 use crate::{
-    core::storage::db::get_db_conn,
+    core::storage::db::{call_error, get_db_conn},
     daemon::start_internal_server,
     utils::{crypto::encrypt_to_base64, get_unix_time_now, lexicons::SessionSnapshotRecord},
 };
@@ -343,12 +343,18 @@ pub fn fetch_logged_in_data(conn: &Connection) -> Result<Option<AtprotoAuthData>
 
 //TODO: Move the login check to common fn
 // TODO: Add tests for share session plss
+/// Publishes the session to the user's PDS and returns its link. A private share is
+/// encrypted, and its key is only in the link
 pub async fn share_session(
-    conn: &Connection,
+    conn: &tokio_rusqlite::Connection,
     shared_session: &SessionSnapshotRecord,
     is_private: bool,
-) -> Result<()> {
-    if let Some(auth_data) = fetch_logged_in_data(conn)? {
+) -> Result<String> {
+    let logged_in = conn
+        .call(|conn| fetch_logged_in_data(conn))
+        .await
+        .map_err(call_error)?;
+    if let Some(auth_data) = logged_in {
         let (client, mem_session_store) = create_oauth_client()?;
         let session: Session = serde_json::from_str(&auth_data.session)?;
         let did_struct =
@@ -361,7 +367,7 @@ pub async fn share_session(
         } else {
             "Writing to PDS and generating link..."
         };
-        println!("{}", write_info);
+        info!("{}", write_info);
         let oauth_session = client
             .restore(&did_struct)
             .await
@@ -423,8 +429,6 @@ pub async fn share_session(
             shareable_base_url
         };
 
-        println!("successfully posted at {}", shareable_url);
-
         // Updating the session token
         let session = mem_session_store
             .get(&did_struct)
@@ -442,12 +446,19 @@ pub async fn share_session(
             handle: auth_data.handle,
         };
 
-        upsert_auth_data(conn, &auth_data)?;
+        // the record is published by now, its link is returned either way
+        if let Err(err) = conn
+            .call(move |conn| upsert_auth_data(conn, &auth_data))
+            .await
+            .map_err(call_error)
+        {
+            warn!("Couldn't save the refreshed ATmosphere session: {err:#}");
+        }
+        Ok(shareable_url)
     } else {
         info!("No logged-in user, please login");
-        return Err(anyhow!("NOT_LOGGED_IN"));
+        Err(anyhow!("NOT_LOGGED_IN"))
     }
-    Ok(())
 }
 
 fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
@@ -488,7 +499,7 @@ fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use tokio_rusqlite::rusqlite::Connection;
 
     #[test]
     fn test_add_a_new_auth_entry() {
