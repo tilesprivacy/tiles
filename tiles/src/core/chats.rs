@@ -14,11 +14,11 @@ use crate::utils::get_unix_time_now;
 use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Result, anyhow};
 use log::{info, warn};
-use rusqlite::types::FromSqlError;
-use rusqlite::{Connection, OptionalExtension, params};
 use tilekit::modelfile::Role;
 use tokio::sync::mpsc::{self, Sender};
 use tokio::sync::oneshot;
+use tokio_rusqlite::rusqlite::types::FromSqlError;
+use tokio_rusqlite::rusqlite::{self, Connection, OptionalExtension, params};
 use uuid::Uuid;
 // model the chats table
 
@@ -529,8 +529,8 @@ pub mod tests {
 
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use rusqlite::Connection;
     use tilekit::modelfile::Role;
+    use tokio_rusqlite::rusqlite::Connection;
     use uuid::Uuid;
 
     use crate::{

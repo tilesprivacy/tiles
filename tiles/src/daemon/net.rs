@@ -14,10 +14,10 @@ use axum::{Router, extract::State, response::IntoResponse, routing::post};
 use axum_macros::debug_handler;
 use iroh::Endpoint;
 use iroh_gossip::Gossip;
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc::{self, Sender};
+use tokio_rusqlite::rusqlite::Connection;
 
 pub const API_TIMEOUT: u16 = 60;
 #[derive(Debug, Clone)]

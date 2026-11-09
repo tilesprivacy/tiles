@@ -1332,7 +1332,7 @@ mod tests {
     };
     use crate::core::chats::create_session;
     use crate::core::chats::tests::create_user;
-    use rusqlite::Connection;
+    use tokio_rusqlite::rusqlite::Connection;
 
     #[test]
     fn default_modelfile_uses_platform_default() {

@@ -8,9 +8,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tilekit::modelfile::Role;
+use tokio_rusqlite::rusqlite::{self, Connection};
 
 use crate::{
     core::{
