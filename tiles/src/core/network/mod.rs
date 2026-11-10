@@ -1,7 +1,7 @@
 //! The main module for networking
 
 pub mod ticket;
-use std::{str::FromStr, time::Duration};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use axum::body::Bytes;
@@ -45,12 +45,15 @@ use crate::{
         storage::db::{DBTYPE, get_db_conn},
     },
     daemon::net::{API_TIMEOUT, NetworkApiEvent},
+    utils::get_unix_time_now,
 };
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
 // 50 mb
 const MAX_DOWNLOADED_BYTES: usize = 50 * 1024 * 1024;
+const MAX_MESSAGE_AGE_SECS: u64 = 5 * 60;
+const MAX_REPLAY_CACHE_ENTRIES: usize = 10_000;
 
 const ALPN: &[u8] = b"remote-link/v1";
 
@@ -64,6 +67,8 @@ struct NetworkMessage {
     body: MessageBody,
     // to prevent iroh's deduplication on same msg
     nonce: [u8; 16],
+    // unix seconds, signed together with the message
+    timestamp: u64,
     msg_type: NetworkMessageType,
 }
 
@@ -81,6 +86,7 @@ impl NetworkMessage {
             is_online,
             body,
             nonce: get_random_bytes(),
+            timestamp: get_unix_time_now(),
             msg_type,
             to_did,
         }
@@ -129,6 +135,40 @@ impl SignedNetworkMessage {
     fn verify_with_public_key(&self, public_key: &PublicKey) -> Result<()> {
         public_key.verify(&self.msg.to_bytes(), &self.signature)?;
         Ok(())
+    }
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct ReplayKey {
+    from_did: String,
+    nonce: [u8; 16],
+}
+
+struct ReplayCache {
+    seen: HashMap<ReplayKey, u64>,
+}
+
+impl ReplayCache {
+    fn new() -> Self {
+        Self {
+            seen: HashMap::new(),
+        }
+    }
+
+    fn accept(&mut self, from_did: &str, nonce: [u8; 16], now: u64) -> bool {
+        self.seen.retain(|_, expires_at| *expires_at > now);
+
+        let key = ReplayKey {
+            from_did: from_did.to_owned(),
+            nonce,
+        };
+
+        if self.seen.contains_key(&key) || self.seen.len() >= MAX_REPLAY_CACHE_ENTRIES {
+            return false;
+        }
+
+        self.seen.insert(key, now + MAX_MESSAGE_AGE_SECS);
+        true
     }
 }
 
@@ -191,12 +231,6 @@ enum DeviceLinkSelector {
     Error(String),
     Joined(GossipTopic),
 }
-//TODO: event signing to be done
-// Current idea: Sign every event message with the private key
-// Validate it on the other end
-// In addition to this every request events must have ucan token authz
-// with a header field like auth_token
-
 /// Handles the iroh gossip events
 async fn process_gossip_network_events(
     mut msg_receiver: GossipReceiver,
@@ -206,6 +240,8 @@ async fn process_gossip_network_events(
     caller_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
     process_type: GossipProcessType,
 ) -> Result<()> {
+    let mut replay_cache = ReplayCache::new();
+
     while let Some(event) = msg_receiver.try_next().await? {
         info!(
             "Gossip Loop: Received by {:?}:, event {:?}",
@@ -229,6 +265,32 @@ async fn process_gossip_network_events(
                 continue;
             }
 
+            let now = get_unix_time_now();
+            if signed_msg.msg.timestamp.abs_diff(now) > MAX_MESSAGE_AGE_SECS {
+                log::warn!(
+                    "Rejected stale network message from {}",
+                    signed_msg.msg.from_did
+                );
+                continue;
+            }
+
+            if signed_msg.msg.to_did != user.user_id {
+                log::debug!(
+                    "Ignoring network message intended for {} instead of {}",
+                    signed_msg.msg.to_did,
+                    user.user_id
+                );
+                continue;
+            }
+
+            if !replay_cache.accept(&signed_msg.msg.from_did, signed_msg.msg.nonce, now) {
+                log::warn!(
+                    "Rejected replayed network message from {}",
+                    signed_msg.msg.from_did
+                );
+                continue;
+            }
+
             let sender_public_key = match signed_msg.sender_public_key() {
                 Ok(public_key) => public_key,
                 Err(err) => {
@@ -240,15 +302,6 @@ async fn process_gossip_network_events(
                     continue;
                 }
             };
-
-            if signed_msg.msg.to_did != user.user_id {
-                log::debug!(
-                    "Ignoring network message intended for {} instead of {}",
-                    signed_msg.msg.to_did,
-                    user.user_id
-                );
-                continue;
-            }
 
             let msg = signed_msg.msg;
 
@@ -1292,10 +1345,11 @@ mod tests {
     use crate::core::{
         chats::SyncOp,
         network::{
-            MessageBody, NetworkMessage, NetworkMessageType, SignedNetworkMessage,
+            MessageBody, NetworkMessage, NetworkMessageType, ReplayCache, SignedNetworkMessage,
             fetch_last_row_counter, get_did_from_public_key,
         },
     };
+    use crate::utils::get_unix_time_now;
 
     fn signed_test_message(secret_key: &SecretKey) -> SignedNetworkMessage {
         let from_did = get_did_from_public_key(secret_key.public().as_bytes()).unwrap();
@@ -1306,6 +1360,7 @@ mod tests {
             is_online: true,
             body: MessageBody::LinkAccepted,
             nonce: [7; 16],
+            timestamp: get_unix_time_now(),
             msg_type: NetworkMessageType::Link,
         };
 
@@ -1356,6 +1411,29 @@ mod tests {
             signed_message.sender_public_key().unwrap(),
             endpoint_key.public()
         );
+    }
+
+    #[test]
+    fn replay_cache_rejects_duplicate_nonce_until_expiry() {
+        let mut cache = ReplayCache::new();
+        let nonce = [11; 16];
+
+        assert!(cache.accept("did:key:sender", nonce, 100));
+        assert!(!cache.accept("did:key:sender", nonce, 101));
+        assert!(cache.accept(
+            "did:key:sender",
+            nonce,
+            100 + super::MAX_MESSAGE_AGE_SECS + 1
+        ));
+    }
+
+    #[test]
+    fn replay_cache_scopes_nonces_to_sender() {
+        let mut cache = ReplayCache::new();
+        let nonce = [12; 16];
+
+        assert!(cache.accept("did:key:sender-a", nonce, 100));
+        assert!(cache.accept("did:key:sender-b", nonce, 100));
     }
 
     #[tokio::test]
@@ -1427,6 +1505,7 @@ mod tests {
                 nickname: Some("sender".to_string()),
             },
             nonce: [9; 16],
+            timestamp: get_unix_time_now(),
             msg_type: NetworkMessageType::Link,
         };
         let signed_message =
