@@ -1051,8 +1051,7 @@ pub fn unlink(db_conn: &Connection, user_id: &str) -> Result<()> {
 
 pub fn get_app_secret_key(did: &str) -> Result<SecretKey> {
     let app_name = get_app_name();
-    let signing_key = get_secret_key(&app_name, did)?;
-    Ok(SecretKey::from_bytes(&signing_key))
+    get_secret_key(&app_name, did)
 }
 
 pub fn create_dummy_user(conn: &Connection, did: Option<String>) -> User {

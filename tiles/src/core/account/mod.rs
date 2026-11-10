@@ -10,6 +10,7 @@ use dialog_credentials::{
     native::{SigningKey, VerifyingKey},
 };
 use dialog_varsig::Principal;
+use iroh::SecretKey;
 use keyring_core::Entry;
 use log::info;
 
@@ -67,15 +68,14 @@ pub async fn create_identity(app: &str) -> Result<Identity> {
 ///
 /// - `app`- The service for which Identity is made (for ex: tiles)
 /// - `did` - The `Identity` of the service
-pub fn get_secret_key(app: &str, did: &str) -> Result<[u8; 32]> {
+pub fn get_secret_key(app: &str, did: &str) -> Result<SecretKey> {
     let entry = keyring_entry(app, did)?;
     let mut bytes: [u8; 64] = [0u8; 64];
     let secret_pair = entry.get_secret()?;
 
     bytes[..64].copy_from_slice(secret_pair.as_slice());
-
     let signing_key = SigningKey::from_keypair_bytes(&bytes)?;
-    Ok(signing_key.to_bytes())
+    Ok(SecretKey::from_bytes(&signing_key.to_bytes()))
 }
 
 /// Returns the `SigningKey` (ed25519_dalek SigningKey)
