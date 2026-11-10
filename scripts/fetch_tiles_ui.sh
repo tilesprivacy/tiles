@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Puts tiles-ui's web UI in ui/ and its desktop app in desktop/, from the release
-# toolchain.toml pins, or built from tiles-ui main until that release is out.
+# toolchain.toml names, or built from tiles-ui main until that release is out.
+# `latest` there follows tiles-ui's newest release.
 #
 # Environment variables:
 #   TILES_UI_BUILD  A local folder laid out like the release file, to use instead of it.
@@ -11,6 +12,13 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 REPO="https://github.com/tilesprivacy/tiles-ui"
 VERSION=$(grep '^tiles-ui' "${ROOT}/toolchain.toml" | head -1 | awk -F'"' '{print $2}')
+if [[ "${VERSION}" == "latest" ]]; then
+  # GitHub's latest link lands on the newest release's tag
+  if LANDED=$(curl -fsSLI --retry 3 -o /dev/null -w '%{url_effective}' "${REPO}/releases/latest") \
+    && [[ "${LANDED}" == */releases/tag/* ]]; then
+    VERSION="${LANDED##*/}"
+  fi
+fi
 RELEASE="${REPO}/releases/download/${VERSION}"
 
 case "${OS}:${ARCH}" in
