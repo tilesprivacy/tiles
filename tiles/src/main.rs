@@ -447,7 +447,7 @@ enum LinkCommands {
         nickname: Option<String>,
     },
     /// List the linked peers
-    LinkedDevices,
+    Devices,
 
     /// Revokes the given linked peer
     Revoke {
@@ -646,7 +646,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             LinkCommands::Revoke { did } => {
                 revoke_peers_cli(&did).await?;
             }
-            LinkCommands::LinkedDevices => {
+            LinkCommands::Devices => {
                 list_linked_devices_cli().await?;
             }
             LinkCommands::Create { peer_did } => {
