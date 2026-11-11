@@ -22,7 +22,7 @@ use wiremock::{
 
 use super::{
     CLIENT_HEADER, CurrentModel, DownloadState, ModelDownload, Models, Spec, bundled::BUNDLED,
-    default_or_newest, model_router, modelfile_spec,
+    default_or_newest, download::with_draft_head, model_router, modelfile_spec,
 };
 use crate::{
     core::agent::pi::from_test_command,
@@ -815,4 +815,19 @@ async fn quants_of_one_repo_share_a_folder() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT, "another quant is downloading");
     assert!(body["reason"].as_str().unwrap().contains("pause it"));
+}
+
+#[test]
+fn a_downloaded_model_counts_its_gguf_and_draft_head() {
+    let dir = tempdir().unwrap();
+    for (name, bytes) in [
+        ("model-Q4_K_M.gguf", 5),
+        ("mtp-model.gguf", 3),
+        ("mmproj-model.gguf", 7),
+        ("README.md", 2),
+    ] {
+        std::fs::write(dir.path().join(name), vec![0; bytes]).unwrap();
+    }
+
+    assert_eq!(with_draft_head(&dir.path().join("model-Q4_K_M.gguf")), 8);
 }

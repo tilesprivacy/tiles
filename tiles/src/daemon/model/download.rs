@@ -152,6 +152,14 @@ impl ModelDownload {
             .is_ok()
     }
 
+    // size of model on disk
+    fn size_on_disk(&self) -> Option<u64> {
+        let gguf = get_model_cache(&self.spec.repo)
+            .and_then(|dir| resolve_gguf_path(&dir, Some(&self.spec.quant)))
+            .ok()?;
+        Some(with_draft_head(&gguf))
+    }
+
     /// When its GGUF landed on disk, `None` until it's downloaded
     pub(super) fn downloaded_at(&self) -> Option<std::time::SystemTime> {
         let gguf = get_model_cache(&self.spec.repo)
@@ -190,7 +198,7 @@ impl ModelDownload {
             return Ok(ModelStatus {
                 model: self.spec.to_string(),
                 total: None,
-                on_disk: None,
+                on_disk: self.size_on_disk(),
                 free_disk,
                 download: DownloadState::Done,
             });
@@ -339,6 +347,27 @@ fn size_of(path: &Path) -> u64 {
             _ => 0,
         })
         .sum()
+}
+
+// GGUF and the MTP draft head in downloaded model's folder
+pub(super) fn with_draft_head(gguf: &Path) -> u64 {
+    let len = |path: &Path| std::fs::metadata(path).map_or(0, |meta| meta.len());
+    let heads: u64 = gguf
+        .parent()
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy().to_lowercase();
+                name.ends_with(".gguf") && name.contains("mtp")
+            })
+        })
+        .map(|path| len(&path))
+        .sum();
+    len(gguf) + heads
 }
 
 pub(crate) fn free_space(path: &Path) -> nix::Result<u64> {
