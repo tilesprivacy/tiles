@@ -120,6 +120,7 @@ while [[ $# -gt 0 ]]; do
     --version)
       [[ $# -ge 2 && -n "$2" ]] || err "--version requires a value."
       VERSION="${2#v}"
+      [[ -n "${VERSION}" ]] || err "--version requires a value."
       shift
       ;;
     --headless|-headless)
