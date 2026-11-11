@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tilekit::modelfile::Role;
-use tokio_rusqlite::rusqlite::{self, Connection};
+use tokio_rusqlite::rusqlite::Connection;
 
 use crate::{
     core::{
@@ -296,13 +296,14 @@ fn do_save_chat(
     chat_db_conn: &Connection,
     user_db_conn: &Connection,
 ) -> Result<Chats, AppError> {
-    let current_user =
-        get_current_user(user_db_conn).map_err(|e| match e.downcast_ref::<rusqlite::Error>() {
-            Some(rusqlite::Error::QueryReturnedNoRows) => {
+    let current_user = get_current_user(user_db_conn).map_err(|e| {
+        match e.downcast_ref::<tokio_rusqlite::rusqlite::Error>() {
+            Some(tokio_rusqlite::rusqlite::Error::QueryReturnedNoRows) => {
                 AppError::NotFound("No local account, create one first".to_owned())
             }
             _ => AppError::InternalServerError(e.to_string()),
-        })?;
+        }
+    })?;
 
     let session = sessionChats::fetch_session(chat_db_conn, &save_request.session_id)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;

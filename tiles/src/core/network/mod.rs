@@ -1,13 +1,13 @@
 //! The main module for networking
 
 pub mod ticket;
-use std::{str::FromStr, time::Duration};
+use std::{collections::HashMap, str::FromStr, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use axum::body::Bytes;
 use futures_util::{StreamExt, TryStreamExt};
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, NET_REPORT_TIMEOUT, PublicKey,
+    Endpoint, EndpointAddr, EndpointId, NET_REPORT_TIMEOUT, PublicKey, Signature,
     endpoint::{BindError, presets},
     endpoint_info::UserData,
     protocol::Router,
@@ -45,12 +45,15 @@ use crate::{
         storage::db::{DBTYPE, get_db_conn},
     },
     daemon::net::{API_TIMEOUT, NetworkApiEvent},
+    utils::get_unix_time_now,
 };
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
 
 // 50 mb
 const MAX_DOWNLOADED_BYTES: usize = 50 * 1024 * 1024;
+const MAX_MESSAGE_AGE_MILLI_SECS: u64 = 5 * 60 * 1000;
+const MAX_REPLAY_CACHE_ENTRIES: usize = 10_000;
 
 const ALPN: &[u8] = b"remote-link/v1";
 
@@ -59,24 +62,23 @@ const ALPN: &[u8] = b"remote-link/v1";
 struct NetworkMessage {
     from_did: String,
     from_nickname: String,
+    to_did: String,
     is_online: bool,
     body: MessageBody,
     // to prevent iroh's deduplication on same msg
     nonce: [u8; 16],
+    // unix milliseconds, signed together with the message
+    timestamp: u64,
     msg_type: NetworkMessageType,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Debug)]
-pub enum NetworkMessageType {
-    Link,
-    Sync,
-}
 impl NetworkMessage {
     fn new(
         user: &account::local::User,
         is_online: bool,
         body: MessageBody,
         msg_type: NetworkMessageType,
+        to_did: String,
     ) -> Self {
         Self {
             from_did: user.user_id.clone(),
@@ -84,15 +86,96 @@ impl NetworkMessage {
             is_online,
             body,
             nonce: get_random_bytes(),
+            timestamp: get_unix_time_now(),
             msg_type,
+            to_did,
         }
-    }
-    fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        postcard::from_bytes(bytes).map_err(Into::into)
     }
     fn to_bytes(&self) -> Vec<u8> {
         postcard::to_stdvec(&self).expect("Failed to convert to bytes w postcard")
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+struct SignedNetworkMessage {
+    msg: NetworkMessage,
+    signature: Signature,
+}
+
+impl SignedNetworkMessage {
+    fn sign(msg: NetworkMessage) -> Result<Self> {
+        let secret_key = get_app_secret_key(&msg.from_did)?;
+        Ok(Self::sign_with_secret_key(msg, &secret_key))
+    }
+
+    fn sign_with_secret_key(msg: NetworkMessage, secret_key: &iroh::SecretKey) -> Self {
+        let signature = secret_key.sign(&msg.to_bytes());
+
+        Self { msg, signature }
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        postcard::from_bytes(bytes).map_err(Into::into)
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("Failed to convert signed message to bytes w postcard")
+    }
+
+    fn verify(&self) -> Result<()> {
+        let public_key = self.sender_public_key()?;
+        self.verify_with_public_key(&public_key)
+    }
+
+    fn sender_public_key(&self) -> Result<PublicKey> {
+        let public_key_bytes = get_public_key_from_did(&self.msg.from_did)?;
+        Ok(PublicKey::from_bytes(&public_key_bytes)?)
+    }
+
+    fn verify_with_public_key(&self, public_key: &PublicKey) -> Result<()> {
+        public_key.verify(&self.msg.to_bytes(), &self.signature)?;
+        Ok(())
+    }
+}
+
+#[derive(Hash, Eq, PartialEq)]
+struct ReplayKey {
+    from_did: String,
+    nonce: [u8; 16],
+}
+
+struct ReplayCache {
+    seen: HashMap<ReplayKey, u64>,
+}
+
+impl ReplayCache {
+    fn new() -> Self {
+        Self {
+            seen: HashMap::new(),
+        }
+    }
+
+    fn accept(&mut self, from_did: &str, nonce: [u8; 16], now: u64) -> bool {
+        self.seen.retain(|_, expires_at| *expires_at > now);
+
+        let key = ReplayKey {
+            from_did: from_did.to_owned(),
+            nonce,
+        };
+
+        if self.seen.contains_key(&key) || self.seen.len() >= MAX_REPLAY_CACHE_ENTRIES {
+            return false;
+        }
+
+        self.seen.insert(key, now + MAX_MESSAGE_AGE_MILLI_SECS);
+        true
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug)]
+pub enum NetworkMessageType {
+    Link,
+    Sync,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -148,12 +231,6 @@ enum DeviceLinkSelector {
     Error(String),
     Joined(GossipTopic),
 }
-//TODO: event signing to be done
-// Current idea: Sign every event message with the private key
-// Validate it on the other end
-// In addition to this every request events must have ucan token authz
-// with a header field like auth_token
-
 /// Handles the iroh gossip events
 async fn process_gossip_network_events(
     mut msg_receiver: GossipReceiver,
@@ -163,14 +240,15 @@ async fn process_gossip_network_events(
     caller_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
     process_type: GossipProcessType,
 ) -> Result<()> {
+    let mut replay_cache = ReplayCache::new();
+
     while let Some(event) = msg_receiver.try_next().await? {
         info!(
             "Gossip Loop: Received by {:?}:, event {:?}",
             user.username, event
         );
         if let Event::Received(msg) = event {
-            let pub_key = msg.delivered_from;
-            let msg = match NetworkMessage::from_bytes(&msg.content) {
+            let signed_msg = match SignedNetworkMessage::from_bytes(&msg.content) {
                 Ok(msg) => msg,
                 Err(err) => {
                     log::error!("Failed to decode msg due to {:?}", err);
@@ -178,26 +256,54 @@ async fn process_gossip_network_events(
                 }
             };
 
-            // TODO: signature validation should happen here
+            if let Err(err) = signed_msg.verify() {
+                log::warn!(
+                    "Rejected network message from {}: {:?}",
+                    signed_msg.msg.from_did,
+                    err
+                );
+                continue;
+            }
 
-            match is_did_valid(&msg.from_did, pub_key) {
-                Ok(false) => {
-                    log::warn!(
-                        "Incoming peer DID {} invalid, blocking request",
-                        msg.from_did
-                    );
-                    continue;
-                }
+            let now = get_unix_time_now();
+            if signed_msg.msg.timestamp.abs_diff(now) > MAX_MESSAGE_AGE_MILLI_SECS {
+                log::warn!(
+                    "Rejected stale network message from {}",
+                    signed_msg.msg.from_did
+                );
+                continue;
+            }
+
+            if signed_msg.msg.to_did != user.user_id {
+                log::debug!(
+                    "Ignoring network message intended for {} instead of {}",
+                    signed_msg.msg.to_did,
+                    user.user_id
+                );
+                continue;
+            }
+
+            if !replay_cache.accept(&signed_msg.msg.from_did, signed_msg.msg.nonce, now) {
+                log::warn!(
+                    "Rejected replayed network message from {}",
+                    signed_msg.msg.from_did
+                );
+                continue;
+            }
+
+            let sender_public_key = match signed_msg.sender_public_key() {
+                Ok(public_key) => public_key,
                 Err(err) => {
-                    log::error!(
-                        "Failed to validate incoming DID {} due to {:?}",
-                        msg.from_did,
+                    log::warn!(
+                        "Rejected network message from {} due to invalid sender identity: {:?}",
+                        signed_msg.msg.from_did,
                         err
                     );
                     continue;
                 }
-                _ => (),
-            }
+            };
+
+            let msg = signed_msg.msg;
 
             let loop_code = match msg.msg_type {
                 NetworkMessageType::Link => {
@@ -223,7 +329,7 @@ async fn process_gossip_network_events(
                             msg,
                             sync_helpers,
                             &caller_sender,
-                            pub_key,
+                            sender_public_key,
                             &msg_sender,
                             &process_type,
                         )
@@ -279,6 +385,7 @@ async fn handle_device_link_events(
                     user,
                     msg.is_online,
                     msg_sender,
+                    msg.from_did,
                 )
                 .await;
             }
@@ -293,6 +400,7 @@ async fn handle_device_link_events(
                     user,
                     msg.is_online,
                     msg_sender,
+                    msg.from_did,
                 )
                 .await;
             }
@@ -302,11 +410,11 @@ async fn handle_device_link_events(
                 msg.is_online,
                 MessageBody::LinkAccepted,
                 NetworkMessageType::Link,
+                msg.from_did,
             );
 
+            let link_resp = SignedNetworkMessage::sign(link_resp)?;
             msg_sender.broadcast(link_resp.to_bytes().into()).await?;
-            // Adding a delay to prevent the risk of closing the endpoint before we send the msg via the above broadcast
-            // sleep(Duration::from_secs(5)).await;
         }
         MessageBody::LinkAccepted => {
             log::info!("On link accepted");
@@ -343,7 +451,7 @@ async fn handle_sync_events(
     msg: NetworkMessage,
     sync_helpers: SyncAcceptLoopData,
     caller_sender: &tokio::sync::mpsc::Sender<NetworkApiEvent>,
-    pub_key: PublicKey,
+    sender_endpoint: PublicKey,
     msg_sender: &GossipSender,
     process_type: &GossipProcessType,
 ) -> Result<GossipLoopCode> {
@@ -361,7 +469,7 @@ async fn handle_sync_events(
                 &tokio::sync::mpsc::Sender<SyncOp>,
                 &tokio::sync::mpsc::Sender<NetworkApiEvent>,
             ) = (&sync_helpers.db_channel_sender, caller_sender);
-            on_sync_start_event(msg_sender, &sync_helpers, &msg, pub_key, senders).await
+            on_sync_start_event(msg_sender, &sync_helpers, &msg, sender_endpoint, senders).await
         }
         MessageBody::SyncSendDeltaInfo {
             blob_ticket: _,
@@ -373,7 +481,7 @@ async fn handle_sync_events(
                 &tokio::sync::mpsc::Sender<SyncOp>,
                 &tokio::sync::mpsc::Sender<NetworkApiEvent>,
             ) = (&sync_helpers.db_channel_sender, caller_sender);
-            on_sync_send_delta_info(msg_sender, &sync_helpers, &msg, pub_key, senders).await
+            on_sync_send_delta_info(msg_sender, &sync_helpers, &msg, sender_endpoint, senders).await
         }
         MessageBody::SyncEnd => {
             // SyncEnd is received by the initiator
@@ -589,7 +697,9 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
                     nickname: user.username.clone(),
                 },
                 NetworkMessageType::Link,
+                delegation_token.did.to_string(),
             );
+            let link_req_msg = SignedNetworkMessage::sign(link_req_msg)?;
             gossip_network_sender
                 .broadcast(link_req_msg.to_bytes().into())
                 .await
@@ -681,7 +791,9 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
                     auth_token: invocation_token,
                 },
                 NetworkMessageType::Sync,
+                did.to_string(),
             );
+            let sync_start_msg = SignedNetworkMessage::sign(sync_start_msg)?;
             gossip_network_sender
                 .broadcast(sync_start_msg.to_bytes().into())
                 .await
@@ -777,16 +889,6 @@ async fn _find_offline_bootstrap_peers(
     Ok((bootstrap_ids, user_data))
 }
 
-fn is_did_valid(did: &str, pub_key: PublicKey) -> Result<bool> {
-    // on debug mode, we skip the auth check, since we will be testing
-    // with random endpoitns but w DID from config atp
-    if cfg!(debug_assertions) {
-        Ok(true)
-    } else {
-        Ok(get_did_from_public_key(&pub_key)? == did)
-    }
-}
-
 async fn fetch_last_row_counter(
     user_id: &str,
     sender: &tokio::sync::mpsc::Sender<SyncOp>,
@@ -807,7 +909,7 @@ async fn fetch_encoded_delta_ticket(
     sender: &tokio::sync::mpsc::Sender<SyncOp>,
     lrc: i64,
     store: &MemStore,
-    delivered_from: PublicKey,
+    sender_endpoint: PublicKey,
 ) -> Result<BlobTicket> {
     let (sendx, recvx) = oneshot::channel();
 
@@ -825,7 +927,11 @@ async fn fetch_encoded_delta_ticket(
         .add_bytes(Into::<Bytes>::into(encoded_data_result))
         .await?;
 
-    Ok(BlobTicket::new(delivered_from.into(), tag.hash, tag.format))
+    Ok(BlobTicket::new(
+        sender_endpoint.into(),
+        tag.hash,
+        tag.format,
+    ))
 }
 
 /// Process the `SyncStart` event. This is processed by the bg network listener
@@ -833,7 +939,7 @@ async fn on_sync_start_event(
     msg_sender: &GossipSender,
     sync_helpers: &SyncAcceptLoopData,
     msg: &NetworkMessage,
-    delivered_from: PublicKey,
+    sender_endpoint: PublicKey,
     senders: (
         &tokio::sync::mpsc::Sender<SyncOp>,
         &tokio::sync::mpsc::Sender<NetworkApiEvent>,
@@ -853,17 +959,18 @@ async fn on_sync_start_event(
                 msg.is_online,
                 msg_sender,
                 GossipLoopCode::Continue,
+                msg.from_did.clone(),
             )
             .await;
         }
 
-        let sender_did = get_did_from_public_key(delivered_from.as_bytes())?;
+        let sender_did = msg.from_did.clone();
         let ticket = fetch_encoded_delta_ticket(
             &sync_helpers.user.user_id,
             sync_db_channel_sender,
             lrc.context("lrc failed")?,
             &sync_helpers.store,
-            delivered_from,
+            sender_endpoint,
         )
         .await?;
 
@@ -878,7 +985,9 @@ async fn on_sync_start_event(
                 last_row_counter: Some(receiver_last_row_counter),
             },
             NetworkMessageType::Sync,
+            msg.from_did.to_string(),
         );
+        let delta_info = SignedNetworkMessage::sign(delta_info)?;
         msg_sender.broadcast(delta_info.to_bytes().into()).await?;
         info!("Sent blob ticket {} to {}", ticket, sender_did);
     }
@@ -890,6 +999,7 @@ async fn handle_device_link_rejection_by_listener(
     user: &User,
     is_online: bool,
     network_sender: &GossipSender,
+    to_did: String,
 ) -> Result<GossipLoopCode> {
     log::error!("{}", err);
 
@@ -900,7 +1010,9 @@ async fn handle_device_link_rejection_by_listener(
             reason: err.to_string(),
         },
         NetworkMessageType::Link,
+        to_did,
     );
+    let link_reject_resp = SignedNetworkMessage::sign(link_reject_resp)?;
     network_sender
         .broadcast(link_reject_resp.to_bytes().into())
         .await?;
@@ -916,6 +1028,7 @@ async fn handle_sync_rejection_by_listener(
     is_online: bool,
     msg_sender: &GossipSender,
     loop_code: GossipLoopCode,
+    to_did: String,
 ) -> Result<GossipLoopCode> {
     log::error!("{}", err);
 
@@ -926,7 +1039,9 @@ async fn handle_sync_rejection_by_listener(
             reason: err.to_string(),
         },
         NetworkMessageType::Sync,
+        to_did,
     );
+    let sync_reject_request = SignedNetworkMessage::sign(sync_reject_request)?;
     msg_sender
         .broadcast(sync_reject_request.to_bytes().into())
         .await?;
@@ -941,7 +1056,7 @@ async fn on_sync_send_delta_info(
     msg_sender: &GossipSender,
     sync_helpers: &SyncAcceptLoopData,
     msg: &NetworkMessage,
-    delivered_from: PublicKey,
+    sender_endpoint: PublicKey,
     senders: (
         &tokio::sync::mpsc::Sender<SyncOp>,
         &tokio::sync::mpsc::Sender<NetworkApiEvent>,
@@ -956,7 +1071,7 @@ async fn on_sync_send_delta_info(
         let ticket: BlobTicket = blob_ticket.parse()?;
         let downloader = &sync_helpers.store.downloader(&sync_helpers.endpoint);
         downloader
-            .download(ticket.hash(), Some(delivered_from))
+            .download(ticket.hash(), Some(sender_endpoint))
             .await?;
 
         let data = &sync_helpers.store.blobs().get_bytes(ticket.hash()).await?;
@@ -980,6 +1095,7 @@ async fn on_sync_send_delta_info(
                 msg.is_online,
                 msg_sender,
                 loop_code,
+                msg.from_did.clone(),
             )
             .await;
         }
@@ -1002,7 +1118,7 @@ async fn on_sync_send_delta_info(
                 sync_db_channel_sender,
                 *row_counter,
                 &sync_helpers.store,
-                delivered_from,
+                sender_endpoint,
             )
             .await?;
             let delta_info = NetworkMessage::new(
@@ -1013,16 +1129,21 @@ async fn on_sync_send_delta_info(
                     last_row_counter: None,
                 },
                 NetworkMessageType::Sync,
+                msg.from_did.clone(),
             );
+
+            let delta_info = SignedNetworkMessage::sign(delta_info)?;
             msg_sender.broadcast(delta_info.to_bytes().into()).await?;
-            info!("Sent blob ticket {} to {}", ticket, delivered_from);
+            info!("Sent blob ticket {} to {}", ticket, msg.from_did);
         } else {
             let stop_req = NetworkMessage::new(
                 &sync_helpers.user,
                 msg.is_online,
                 MessageBody::SyncEnd,
                 NetworkMessageType::Sync,
+                msg.from_did.clone(),
             );
+            let stop_req = SignedNetworkMessage::sign(stop_req)?;
             msg_sender.broadcast(stop_req.to_bytes().into()).await?;
             info!("sync ended");
             println!("\nSync completed....");
@@ -1212,68 +1333,108 @@ pub async fn connect(ticket: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
 
+    use std::time::Duration;
+
+    use futures_util::StreamExt;
+    use iroh::endpoint::presets;
+    use iroh::protocol::Router;
+    use iroh::{Endpoint, SecretKey, address_lookup::memory::MemoryLookup};
+    use iroh_gossip::{Gossip, TopicId, api::Event};
     use tokio::sync::mpsc;
 
-    use crate::core::{chats::SyncOp, network::fetch_last_row_counter};
+    use crate::core::{
+        chats::SyncOp,
+        network::{
+            MessageBody, NetworkMessage, NetworkMessageType, ReplayCache, SignedNetworkMessage,
+            fetch_last_row_counter, get_did_from_public_key,
+        },
+    };
+    use crate::utils::get_unix_time_now;
 
-    // #[tokio::test]
-    // async fn test_valid_parse_link_ticket_online() {
-    //     let topic_id = create_topic_id("test");
-    //     let db_conn = setup_db_conn_v2();
-    //     let user = create_dummy_user(&db_conn.common, None);
-    //     let usr_data = EndpointUserData::new(&user.user_id, &user.username);
-    //     let endpoint = Endpoint::builder(presets::N0)
-    //         .user_data_for_address_lookup(UserData::try_from(usr_data.to_string()).unwrap())
-    //         .bind()
-    //         .await
-    //         .unwrap();
+    fn signed_test_message(secret_key: &SecretKey) -> SignedNetworkMessage {
+        let from_did = get_did_from_public_key(secret_key.public().as_bytes()).unwrap();
+        let message = NetworkMessage {
+            from_did,
+            from_nickname: "sender".to_string(),
+            to_did: "did:key:test-recipient".to_string(),
+            is_online: true,
+            body: MessageBody::LinkAccepted,
+            nonce: [7; 16],
+            timestamp: get_unix_time_now(),
+            msg_type: NetworkMessageType::Link,
+        };
 
-    //     let ticket = LinkTicket::new(
-    //         topic_id,
-    //         endpoint.addr(),
-    //         user.user_id.clone(),
-    //         user.username.clone(),
-    //     );
+        SignedNetworkMessage::sign_with_secret_key(message, secret_key)
+    }
 
-    //     assert!(parse_link_ticket(&ticket.to_string()).is_ok())
-    // }
+    #[test]
+    fn signed_network_message_verifies_with_signing_key() {
+        let secret_key = SecretKey::generate();
+        let signed_message = signed_test_message(&secret_key);
 
-    // #[tokio::test]
-    // async fn test_invalid_parse_link_ticket_online() {
-    //     let topic_id = create_topic_id("test");
-    //     let db_conn = setup_db_conn_v2();
-    //     let user = create_dummy_user(&db_conn.common, None);
-    //     let usr_data = EndpointUserData::new(&user.user_id, &user.username);
-    //     let endpoint = Endpoint::builder(presets::N0)
-    //         .user_data_for_address_lookup(UserData::try_from(usr_data.to_string()).unwrap())
-    //         .bind()
-    //         .await
-    //         .unwrap();
+        signed_message
+            .verify_with_public_key(&secret_key.public())
+            .unwrap();
+    }
 
-    //     let ticket = LinkTicket::new(
-    //         topic_id,
-    //         endpoint.addr(),
-    //         user.user_id.clone(),
-    //         user.username.clone(),
-    //     );
+    #[test]
+    fn signed_network_message_rejects_tampered_message() {
+        let secret_key = SecretKey::generate();
+        let mut signed_message = signed_test_message(&secret_key);
+        signed_message.msg.nonce[0] ^= 1;
 
-    //     let invalid_ticket = format!("{}xx", ticket);
-    //     assert!(parse_link_ticket(&invalid_ticket).is_err())
-    // }
+        assert!(
+            signed_message
+                .verify_with_public_key(&secret_key.public())
+                .is_err()
+        );
+    }
 
-    // #[test]
-    // fn test_invalid_parse_link_ticket_offline() {
-    //     let ticket = "kjadkjada";
+    #[test]
+    fn signed_network_message_round_trips_through_wire_encoding() {
+        let secret_key = SecretKey::generate();
+        let signed_message = signed_test_message(&secret_key);
+        let encoded = signed_message.to_bytes();
+        let decoded = SignedNetworkMessage::from_bytes(&encoded).unwrap();
 
-    //     assert!(parse_link_ticket(ticket).is_err())
-    // }
+        decoded
+            .verify_with_public_key(&secret_key.public())
+            .unwrap();
+    }
 
-    // #[test]
-    // fn test_valid_parse_link_ticket_offline() {
-    //     let ticket = "kjadkja2";
+    #[test]
+    fn sender_public_key_is_derived_from_signed_did() {
+        let endpoint_key = SecretKey::generate();
+        let signed_message = signed_test_message(&endpoint_key);
 
-    //     assert!(parse_link_ticket(ticket).is_ok())
-    // }
+        assert_eq!(
+            signed_message.sender_public_key().unwrap(),
+            endpoint_key.public()
+        );
+    }
+
+    #[test]
+    fn replay_cache_rejects_duplicate_nonce_until_expiry() {
+        let mut cache = ReplayCache::new();
+        let nonce = [11; 16];
+
+        assert!(cache.accept("did:key:sender", nonce, 100));
+        assert!(!cache.accept("did:key:sender", nonce, 101));
+        assert!(cache.accept(
+            "did:key:sender",
+            nonce,
+            100 + super::MAX_MESSAGE_AGE_MILLI_SECS + 1
+        ));
+    }
+
+    #[test]
+    fn replay_cache_scopes_nonces_to_sender() {
+        let mut cache = ReplayCache::new();
+        let nonce = [12; 16];
+
+        assert!(cache.accept("did:key:sender-a", nonce, 100));
+        assert!(cache.accept("did:key:sender-b", nonce, 100));
+    }
 
     #[tokio::test]
     async fn test_fetch_last_row_counter() {
@@ -1289,5 +1450,95 @@ mod tests {
             });
             assert_eq!(fetch_last_row_counter("did:key:xx", &tx).await.unwrap(), 1);
         }
+    }
+
+    #[tokio::test]
+    async fn signed_link_request_is_delivered_over_gossip() {
+        let sender_secret_key = SecretKey::generate();
+        let sender_did = get_did_from_public_key(sender_secret_key.public().as_bytes()).unwrap();
+
+        let sender_endpoint = Endpoint::builder(presets::Minimal)
+            .secret_key(sender_secret_key.clone())
+            .bind()
+            .await
+            .unwrap();
+        let receiver_endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+
+        let address_lookup = MemoryLookup::new();
+        address_lookup.add_endpoint_info(sender_endpoint.addr());
+        address_lookup.add_endpoint_info(receiver_endpoint.addr());
+        sender_endpoint
+            .address_lookup()
+            .unwrap()
+            .add(address_lookup.clone());
+        receiver_endpoint
+            .address_lookup()
+            .unwrap()
+            .add(address_lookup);
+
+        let sender_gossip = Gossip::builder().spawn(sender_endpoint.clone());
+        let receiver_gossip = Gossip::builder().spawn(receiver_endpoint.clone());
+        let sender_router = Router::builder(sender_endpoint.clone())
+            .accept(iroh_gossip::ALPN, sender_gossip.clone())
+            .spawn();
+        let receiver_router = Router::builder(receiver_endpoint.clone())
+            .accept(iroh_gossip::ALPN, receiver_gossip.clone())
+            .spawn();
+
+        let topic_id = TopicId::from_bytes([42; 32]);
+        let (sender_topic, receiver_topic) = tokio::try_join!(
+            sender_gossip.subscribe_and_join(topic_id, vec![]),
+            receiver_gossip.subscribe_and_join(topic_id, vec![sender_endpoint.id()]),
+        )
+        .unwrap();
+        let (sender, _sender_receiver) = sender_topic.split();
+        let (_receiver_sender, mut receiver) = receiver_topic.split();
+
+        let message = NetworkMessage {
+            from_did: sender_did,
+            from_nickname: "sender".to_string(),
+            to_did: "did:key:receiver".to_string(),
+            is_online: true,
+            body: MessageBody::LinkRequest {
+                auth_token: "invocation-token".to_string(),
+                peer_delegation_token: "delegation-token".to_string(),
+                nickname: Some("sender".to_string()),
+            },
+            nonce: [9; 16],
+            timestamp: get_unix_time_now(),
+            msg_type: NetworkMessageType::Link,
+        };
+        let signed_message =
+            SignedNetworkMessage::sign_with_secret_key(message, &sender_secret_key);
+        sender
+            .broadcast(signed_message.to_bytes().into())
+            .await
+            .unwrap();
+
+        let received_message = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(Ok(Event::Received(message))) = receiver.next().await {
+                    break message;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for gossip link request");
+
+        let received_message = SignedNetworkMessage::from_bytes(&received_message.content).unwrap();
+        received_message.verify().unwrap();
+        assert!(matches!(
+            received_message.msg.body,
+            MessageBody::LinkRequest { .. }
+        ));
+        assert_eq!(
+            received_message.msg.msg_type as u8,
+            NetworkMessageType::Link as u8
+        );
+
+        sender_router.shutdown().await.unwrap();
+        receiver_router.shutdown().await.unwrap();
+        sender_endpoint.close().await;
+        receiver_endpoint.close().await;
     }
 }

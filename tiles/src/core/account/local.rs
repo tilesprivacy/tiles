@@ -23,7 +23,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio_rusqlite::rusqlite::{
-    self, Connection, OptionalExtension, Row, ToSql, params, params_from_iter,
+    Connection, OptionalExtension, Row, ToSql, params, params_from_iter,
     types::{FromSql, FromSqlError},
 };
 use toml::Table;
@@ -228,7 +228,9 @@ pub enum RemoteInferenceCapsCommand {
 }
 
 impl FromSql for TokenType {
-    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+    fn column_result(
+        value: tokio_rusqlite::rusqlite::types::ValueRef<'_>,
+    ) -> tokio_rusqlite::rusqlite::types::FromSqlResult<Self> {
         match value.as_str()? {
             "linked" => Ok(Self::Linked),
             "peer" => Ok(Self::Peer),
@@ -237,13 +239,15 @@ impl FromSql for TokenType {
     }
 }
 impl ToSql for TokenType {
-    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+    fn to_sql(
+        &self,
+    ) -> tokio_rusqlite::rusqlite::Result<tokio_rusqlite::rusqlite::types::ToSqlOutput<'_>> {
         match self {
-            TokenType::Linked => Ok(rusqlite::types::ToSqlOutput::Owned(
-                rusqlite::types::Value::Text(String::from("linked")),
+            TokenType::Linked => Ok(tokio_rusqlite::rusqlite::types::ToSqlOutput::Owned(
+                tokio_rusqlite::rusqlite::types::Value::Text(String::from("linked")),
             )),
-            TokenType::Peer => Ok(rusqlite::types::ToSqlOutput::Owned(
-                rusqlite::types::Value::Text(String::from("peer")),
+            TokenType::Peer => Ok(tokio_rusqlite::rusqlite::types::ToSqlOutput::Owned(
+                tokio_rusqlite::rusqlite::types::Value::Text(String::from("peer")),
             )),
         }
     }
@@ -429,7 +433,7 @@ pub fn get_current_user(conn: &Connection) -> Result<User> {
                 updated_at: updated_at as u64,
             })
         })
-        .map_err(<rusqlite::Error as Into<anyhow::Error>>::into)
+        .map_err(<tokio_rusqlite::rusqlite::Error as Into<anyhow::Error>>::into)
 }
 
 pub fn get_user(conn: &Connection, did: &str) -> Result<Option<User>> {
@@ -453,7 +457,7 @@ pub fn get_user(conn: &Connection, did: &str) -> Result<Option<User>> {
             })
         })
         .optional()
-        .map_err(<rusqlite::Error as Into<anyhow::Error>>::into)
+        .map_err(<tokio_rusqlite::rusqlite::Error as Into<anyhow::Error>>::into)
 }
 
 pub fn save_root_account_db(db_conn: &Dbconn) -> Result<()> {
@@ -481,7 +485,7 @@ pub fn save_root_account_db(db_conn: &Dbconn) -> Result<()> {
         .prepare("select id from users where root = true")?;
 
     match fetch_root_user.query_one([], |_row| Ok(())) {
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
+        Err(tokio_rusqlite::rusqlite::Error::QueryReturnedNoRows) => {
             db_conn.common.execute("insert into users (id, user_id, username, active_profile, account_type, root) values
                 (?1, ?2, ?3,?4, ?5, ?6)", (&user.id.to_string(), &user.user_id, &user.username, &user.active_profile,
                     user.account_type.to_string(),  &user.root))?;
@@ -541,7 +545,7 @@ pub async fn create_token(
         .map_err(|_| anyhow!("Failed to convert the key to Ed25519"))?;
     info!("issuer did {}", issuer.ed25519_did());
     // TODO: Getting a db conn again here, cuz the await above could move a
-    // db reference to another thread. Used tokio-rusqlite
+    // db reference to another thread. Used tokio-tokio_rusqlite::rusqlite
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
 
     let token = generate_delegation_token(issuer, aud_did, nickname, capability, db_conn).await?;
@@ -665,7 +669,7 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
     );
     match fetch_resp {
         Ok(token) => Ok(Some(token)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(tokio_rusqlite::rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(err) => Err(Into::into(err)),
     }
 }
@@ -980,7 +984,7 @@ async fn create_root_user(root_user_config: &Table, nickname: Option<String>) ->
     }
 }
 
-fn parse_user_from_row(row: &Row<'_>) -> Result<User, rusqlite::Error> {
+fn parse_user_from_row(row: &Row<'_>) -> Result<User, tokio_rusqlite::rusqlite::Error> {
     let account_type: String = row.get(4)?;
     let created_at: f64 = row.get(6)?;
     let updated_at: f64 = row.get(7)?;
@@ -1002,7 +1006,9 @@ pub fn get_user_info(conn: &Connection, did: &str) -> Result<User> {
 
     match fetch_user.query_one([did], parse_user_from_row) {
         Ok(user) => Ok(user),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Err(anyhow!("Peer doesnt exist")),
+        Err(tokio_rusqlite::rusqlite::Error::QueryReturnedNoRows) => {
+            Err(anyhow!("Peer doesnt exist"))
+        }
         Err(err) => {
             log::error!("{:?}", err);
             Err(anyhow!("Fetching user from db failed due to {:?}", err))
@@ -1015,7 +1021,7 @@ pub fn get_peer_list(db_conn: &Connection) -> Result<Vec<User>> {
 
     let user_rows = stmt
         .query_map([], parse_user_from_row)
-        .map_err(<rusqlite::Error as Into<anyhow::Error>>::into)?;
+        .map_err(<tokio_rusqlite::rusqlite::Error as Into<anyhow::Error>>::into)?;
 
     let mut peer_list: Vec<User> = vec![];
 
@@ -1045,8 +1051,7 @@ pub fn unlink(db_conn: &Connection, user_id: &str) -> Result<()> {
 
 pub fn get_app_secret_key(did: &str) -> Result<SecretKey> {
     let app_name = get_app_name();
-    let signing_key = get_secret_key(&app_name, did)?;
-    Ok(SecretKey::from_bytes(&signing_key))
+    get_secret_key(&app_name, did)
 }
 
 pub fn create_dummy_user(conn: &Connection, did: Option<String>) -> User {
@@ -1489,7 +1494,7 @@ pub mod tests {
             .unwrap();
 
         match fetch_root_user.query_one([], |_row| Ok(())) {
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
+            Err(tokio_rusqlite::rusqlite::Error::QueryReturnedNoRows) => {
                 conn.execute("insert into users (id, user_id, username, active_profile, account_type, root) values
                 (?1, ?2, ?3,?4, ?5, ?6)", (&user.id.to_string(), &user.user_id, &user.username, &user.active_profile,
                     user.account_type.to_string(),  &user.root)).unwrap();
