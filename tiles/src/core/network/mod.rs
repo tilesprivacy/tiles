@@ -52,7 +52,7 @@ use sha2::{Digest, Sha256};
 
 // 50 mb
 const MAX_DOWNLOADED_BYTES: usize = 50 * 1024 * 1024;
-const MAX_MESSAGE_AGE_SECS: u64 = 5 * 60;
+const MAX_MESSAGE_AGE_MILLI_SECS: u64 = 5 * 60 * 1000;
 const MAX_REPLAY_CACHE_ENTRIES: usize = 10_000;
 
 const ALPN: &[u8] = b"remote-link/v1";
@@ -67,7 +67,7 @@ struct NetworkMessage {
     body: MessageBody,
     // to prevent iroh's deduplication on same msg
     nonce: [u8; 16],
-    // unix seconds, signed together with the message
+    // unix milliseconds, signed together with the message
     timestamp: u64,
     msg_type: NetworkMessageType,
 }
@@ -167,7 +167,7 @@ impl ReplayCache {
             return false;
         }
 
-        self.seen.insert(key, now + MAX_MESSAGE_AGE_SECS);
+        self.seen.insert(key, now + MAX_MESSAGE_AGE_MILLI_SECS);
         true
     }
 }
@@ -266,7 +266,7 @@ async fn process_gossip_network_events(
             }
 
             let now = get_unix_time_now();
-            if signed_msg.msg.timestamp.abs_diff(now) > MAX_MESSAGE_AGE_SECS {
+            if signed_msg.msg.timestamp.abs_diff(now) > MAX_MESSAGE_AGE_MILLI_SECS {
                 log::warn!(
                     "Rejected stale network message from {}",
                     signed_msg.msg.from_did
@@ -1423,7 +1423,7 @@ mod tests {
         assert!(cache.accept(
             "did:key:sender",
             nonce,
-            100 + super::MAX_MESSAGE_AGE_SECS + 1
+            100 + super::MAX_MESSAGE_AGE_MILLI_SECS + 1
         ));
     }
 
