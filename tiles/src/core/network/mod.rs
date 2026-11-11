@@ -295,7 +295,7 @@ async fn process_gossip_network_events(
                 continue;
             }
 
-            let sender_public_key = match signed_msg.sender_public_key() {
+            match signed_msg.sender_public_key() {
                 Ok(public_key) => public_key,
                 Err(err) => {
                     log::warn!(
@@ -333,7 +333,6 @@ async fn process_gossip_network_events(
                             msg,
                             sync_helpers,
                             &caller_sender,
-                            sender_public_key,
                             &msg_sender,
                             &process_type,
                         )
@@ -453,7 +452,6 @@ async fn handle_sync_events(
     msg: NetworkMessage,
     sync_helpers: SyncAcceptLoopData,
     caller_sender: &tokio::sync::mpsc::Sender<NetworkApiEvent>,
-    sender_endpoint: PublicKey,
     msg_sender: &GossipSender,
     process_type: &GossipProcessType,
 ) -> Result<GossipLoopCode> {
@@ -468,7 +466,7 @@ async fn handle_sync_events(
                 &tokio::sync::mpsc::Sender<SyncOp>,
                 &tokio::sync::mpsc::Sender<NetworkApiEvent>,
             ) = (&sync_helpers.db_channel_sender, caller_sender);
-            on_sync_start_event(msg_sender, &sync_helpers, &msg, sender_endpoint, senders).await
+            on_sync_start_event(msg_sender, &sync_helpers, &msg, senders).await
         }
         MessageBody::SyncSendDeltaInfo { .. } => {
             info!("on syncSendDeltaInfo");
@@ -477,7 +475,7 @@ async fn handle_sync_events(
                 &tokio::sync::mpsc::Sender<SyncOp>,
                 &tokio::sync::mpsc::Sender<NetworkApiEvent>,
             ) = (&sync_helpers.db_channel_sender, caller_sender);
-            on_sync_send_delta_info(msg_sender, &sync_helpers, &msg, sender_endpoint, senders).await
+            on_sync_send_delta_info(msg_sender, &sync_helpers, &msg, senders).await
         }
         MessageBody::SyncEnd { ref auth_token } => {
             // SyncEnd is received by the initiator
@@ -848,7 +846,9 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
 }
 
 /// Router with gossip and blob protocol
-async fn create_tiles_gossip_endpoint(endpoint: &Endpoint) -> Result<(Gossip, Router, MemStore)> {
+pub(crate) async fn create_tiles_gossip_endpoint(
+    endpoint: &Endpoint,
+) -> Result<(Gossip, Router, MemStore)> {
     let gossip = Gossip::builder().spawn(endpoint.clone());
     let store = MemStore::new();
     let blobs = BlobsProtocol::new(&store, None);
@@ -937,7 +937,7 @@ async fn fetch_encoded_delta_ticket(
     sender: &tokio::sync::mpsc::Sender<SyncOp>,
     lrc: i64,
     store: &MemStore,
-    sender_endpoint: PublicKey,
+    addr: &EndpointAddr,
 ) -> Result<BlobTicket> {
     let (sendx, recvx) = oneshot::channel();
 
@@ -955,11 +955,7 @@ async fn fetch_encoded_delta_ticket(
         .add_bytes(Into::<Bytes>::into(encoded_data_result))
         .await?;
 
-    Ok(BlobTicket::new(
-        sender_endpoint.into(),
-        tag.hash,
-        tag.format,
-    ))
+    Ok(BlobTicket::new(addr.clone(), tag.hash, tag.format))
 }
 
 /// Process the `SyncStart` event. This is processed by the bg network listener
@@ -967,7 +963,6 @@ async fn on_sync_start_event(
     msg_sender: &GossipSender,
     sync_helpers: &SyncAcceptLoopData,
     msg: &NetworkMessage,
-    sender_endpoint: PublicKey,
     senders: (
         &tokio::sync::mpsc::Sender<SyncOp>,
         &tokio::sync::mpsc::Sender<NetworkApiEvent>,
@@ -997,7 +992,7 @@ async fn on_sync_start_event(
             sync_db_channel_sender,
             lrc.context("lrc failed")?,
             &sync_helpers.store,
-            sender_endpoint,
+            &sync_helpers.endpoint.addr(),
         )
         .await?;
 
@@ -1082,7 +1077,6 @@ async fn on_sync_send_delta_info(
     msg_sender: &GossipSender,
     sync_helpers: &SyncAcceptLoopData,
     msg: &NetworkMessage,
-    sender_endpoint: PublicKey,
     senders: (
         &tokio::sync::mpsc::Sender<SyncOp>,
         &tokio::sync::mpsc::Sender<NetworkApiEvent>,
@@ -1110,7 +1104,7 @@ async fn on_sync_send_delta_info(
         let ticket: BlobTicket = blob_ticket.parse()?;
         let downloader = &sync_helpers.store.downloader(&sync_helpers.endpoint);
         downloader
-            .download(ticket.hash(), Some(sender_endpoint))
+            .download(ticket.hash(), Some(ticket.addr().id))
             .await?;
 
         let data = &sync_helpers.store.blobs().get_bytes(ticket.hash()).await?;
@@ -1157,7 +1151,7 @@ async fn on_sync_send_delta_info(
                 sync_db_channel_sender,
                 *row_counter,
                 &sync_helpers.store,
-                sender_endpoint,
+                &sync_helpers.endpoint.addr(),
             )
             .await?;
             let delta_info = NetworkMessage::new(
@@ -1381,6 +1375,7 @@ mod tests {
     use iroh::endpoint::presets;
     use iroh::protocol::Router;
     use iroh::{Endpoint, SecretKey, address_lookup::memory::MemoryLookup};
+    use iroh_blobs::ticket::BlobTicket;
     use iroh_gossip::{Gossip, TopicId, api::Event};
     use tokio::sync::mpsc;
 
@@ -1582,5 +1577,58 @@ mod tests {
         receiver_router.shutdown().await.unwrap();
         sender_endpoint.close().await;
         receiver_endpoint.close().await;
+    }
+
+    #[tokio::test]
+    async fn blob_ticket_downloads_from_the_endpoint_that_stores_the_blob() {
+        let provider_endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+        let downloader_endpoint = Endpoint::bind(presets::Minimal).await.unwrap();
+
+        let address_lookup = MemoryLookup::new();
+        address_lookup.add_endpoint_info(provider_endpoint.addr());
+        address_lookup.add_endpoint_info(downloader_endpoint.addr());
+        provider_endpoint
+            .address_lookup()
+            .unwrap()
+            .add(address_lookup.clone());
+        downloader_endpoint
+            .address_lookup()
+            .unwrap()
+            .add(address_lookup);
+
+        let (_provider_gossip, provider_router, provider_store) =
+            super::create_tiles_gossip_endpoint(&provider_endpoint)
+                .await
+                .unwrap();
+        let (_downloader_gossip, downloader_router, downloader_store) =
+            super::create_tiles_gossip_endpoint(&downloader_endpoint)
+                .await
+                .unwrap();
+
+        let payload = b"sync delta payload".to_vec();
+        let tag = provider_store
+            .blobs()
+            .add_bytes(payload.clone())
+            .await
+            .unwrap();
+        let ticket = BlobTicket::new(provider_endpoint.addr(), tag.hash, tag.format);
+
+        let downloader = downloader_store.downloader(&downloader_endpoint);
+        downloader
+            .download(ticket.hash(), Some(ticket.addr().id))
+            .await
+            .unwrap();
+
+        let downloaded = downloader_store
+            .blobs()
+            .get_bytes(ticket.hash())
+            .await
+            .unwrap();
+        assert_eq!(downloaded.as_ref(), payload.as_slice());
+
+        downloader_router.shutdown().await.unwrap();
+        provider_router.shutdown().await.unwrap();
+        downloader_endpoint.close().await;
+        provider_endpoint.close().await;
     }
 }
