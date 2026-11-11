@@ -918,21 +918,25 @@ async fn generate_invocation_token(
     Ok(invocation_token)
 }
 
-pub async fn verify_invocation(invocation_token: &str) -> Result<()> {
+pub async fn verify_invocation(invocation: Invocation<Ed25519Signature>) -> Result<()> {
     let db_conn: Connection = get_db_conn(&DBTYPE::COMMON)?;
 
-    process_invocation_verification(invocation_token, db_conn).await
+    process_invocation_verification(invocation, db_conn).await
 }
 
-async fn process_invocation_verification(
-    invocation_token: &str,
-    db_conn: Connection,
-) -> Result<()> {
+pub fn parse_invocation_token(invocation_token: &str) -> Result<Invocation<Ed25519Signature>> {
     let invocation_token_bytes = data_encoding::BASE64.decode(invocation_token.as_bytes())?;
 
     let invocation: Invocation<Ed25519Signature> =
         serde_ipld_dagcbor::from_slice(&invocation_token_bytes)?;
 
+    Ok(invocation)
+}
+
+async fn process_invocation_verification(
+    invocation: Invocation<Ed25519Signature>,
+    db_conn: Connection,
+) -> Result<()> {
     let hash_store: HashMap<Cid, Arc<Delegation<Ed25519Signature>>> = HashMap::new();
 
     let delegation_store: Arc<Mutex<HashMap<Cid, Arc<Delegation<Ed25519Signature>>>>> =
@@ -2074,8 +2078,9 @@ pub mod tests {
             serde_ipld_dagcbor::from_slice(&token_delegated_in_bytes).unwrap();
         let _user = create_dummy_user(&db_conn.common, None);
         let _ = save_token(&db_conn.common, delegation, None, TokenType::Linked);
+        let inv = parse_invocation_token(&invocation_token).unwrap();
         assert!(
-            process_invocation_verification(&invocation_token, db_conn.common)
+            process_invocation_verification(inv, db_conn.common)
                 .await
                 .is_ok()
         );
