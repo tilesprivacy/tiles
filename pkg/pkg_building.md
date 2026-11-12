@@ -10,7 +10,7 @@ a user should be able to download from its peers locally too).
 just bundle_pkg
 ```
 
-Creates tiles.pkg, signs and notarize it
+Creates pkg/tiles-VERSION-signed.pkg, like tiles-0.5.0-signed.pkg, signs and notarize it
 
 
 ### Offline Installer

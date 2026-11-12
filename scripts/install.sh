@@ -26,7 +26,8 @@ set -euo pipefail
 
 REPO="tilesprivacy/tiles"
 
-VERSION="0.4.19"
+# the latest release unless --version picks one
+VERSION=""
 DEV="false"
 NIGHTLY="false"
 BACKEND=""
@@ -45,11 +46,20 @@ usage() {
   echo "   or: scripts/install.sh [OPTIONS]"
   echo ""
   echo "  --dev                Install from a local dist/*.tar.gz instead of GitHub"
+  echo "  --version VERSION    Install that release, like an rc (default: the latest release)"
   echo "  --nightly            Install the latest nightly GitHub release"
   echo "                       (e.g. tiles-v0.4.17-x86_64-linux.tar.gz)"
   echo "  --headless           Leave out the Tiles app and the web UI, for servers and Tilekit"
   echo "  --install-dir PATH   Override the binary installation directory"
   echo "  --lib-dir PATH       Override the runtime installation directory"
+}
+
+# github.com redirects /releases/latest to the newest release that isn't a pre-release
+latest_version() {
+  local location
+  location="$(curl -fsSI "https://github.com/${REPO}/releases/latest" | tr -d '\r' | grep -i '^location:' || true)"
+  [[ "${location}" == */releases/tag/* ]] || err "Couldn't find the latest Tiles release on GitHub."
+  echo "${location##*/}"
 }
 
 # Resolve the newest GitHub nightly release that has a tarball for this platform.
@@ -107,6 +117,12 @@ while [[ $# -gt 0 ]]; do
     --nightly|-nightly)
       NIGHTLY="true"
       ;;
+    --version)
+      [[ $# -ge 2 && -n "$2" ]] || err "--version requires a value."
+      VERSION="${2#v}"
+      [[ -n "${VERSION}" ]] || err "--version requires a value."
+      shift
+      ;;
     --headless|-headless)
       HEADLESS="true"
       ;;
@@ -142,6 +158,9 @@ done
 
 if [[ "${DEV}" == "true" && "${NIGHTLY}" == "true" ]]; then
   err "--dev and --nightly cannot be used together."
+fi
+if [[ -n "${VERSION}" && ( "${DEV}" == "true" || "${NIGHTLY}" == "true" ) ]]; then
+  err "--version cannot be used with --dev or --nightly."
 fi
 
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -180,6 +199,10 @@ fi
 DESKTOP_ENTRY="${SHARE_DIR}/applications/tiles.desktop"
 DESKTOP_ICON="${SHARE_DIR}/icons/hicolor/256x256/apps/tiles.png"
 
+if [[ "${DEV}" == "false" && "${NIGHTLY}" == "false" && -z "${VERSION}" ]]; then
+  VERSION="$(latest_version)"
+fi
+
 TMPDIR="$(mktemp -d)"
 RELEASE_TAG="${VERSION}"
 RELEASE_ASSET="tiles-v${VERSION}-${ARCH}-${OS}.tar.gz"
@@ -195,7 +218,7 @@ fi
 
 if [[ "${DEV}" == "false" ]]; then
   # Stable (default) and --nightly both download from GitHub.
-  # Unflagged install always uses the hardcoded VERSION above (never nightly).
+  # Unflagged install gets the latest release, or the one --version picks.
   # Nightly uses RELEASE_ASSET from resolve_nightly_version (may differ from tag).
   TAR_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/${RELEASE_ASSET}"
   curl -fL -o "${TMPDIR}/tiles.tar.gz" "$TAR_URL"
@@ -297,6 +320,10 @@ elif [[ -d "${TMPDIR}/desktop" ]]; then
     install -m 755 "${TMPDIR}/desktop/tiles-desktop" "${DESKTOP_BIN}"
     mkdir -p "$(dirname "${DESKTOP_ENTRY}")" "$(dirname "${DESKTOP_ICON}")"
     install -m 644 "${TMPDIR}/desktop/tiles.png" "${DESKTOP_ICON}"
+    # an icon cache another app left would hide the new icon
+    HICOLOR_DIR="${SHARE_DIR}/icons/hicolor"
+    touch "${HICOLOR_DIR}"
+    gtk-update-icon-cache -q -f -t "${HICOLOR_DIR}" >/dev/null 2>&1 || true
     sed "s|^Exec=.*|Exec=\"${DESKTOP_BIN}\"|" "${TMPDIR}/desktop/tiles.desktop" > "${DESKTOP_ENTRY}"
     update-desktop-database "$(dirname "${DESKTOP_ENTRY}")" >/dev/null 2>&1 || true
     if command -v ldconfig >/dev/null 2>&1 \

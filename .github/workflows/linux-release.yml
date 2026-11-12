@@ -110,6 +110,8 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}
+          # an rc or nightly tag never becomes the latest release
+          prerelease: ${{ contains(inputs.release_tag || github.ref_name, '-') }}
           files: |
             dist/tiles-v*.tar.gz
             dist/checksums.txt

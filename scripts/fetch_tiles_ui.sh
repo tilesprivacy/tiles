@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Puts tiles-ui's web UI in ui/ and its desktop app in desktop/, from the release
-# toolchain.toml pins, or built from tiles-ui main until that release is out.
+# toolchain.toml names, or built from tiles-ui main until that release is out.
+# `latest` there follows tiles-ui's newest release, and never builds main.
 #
 # Environment variables:
 #   TILES_UI_BUILD  A local folder laid out like the release file, to use instead of it.
@@ -11,6 +12,18 @@ OS=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m)
 REPO="https://github.com/tilesprivacy/tiles-ui"
 VERSION=$(grep '^tiles-ui' "${ROOT}/toolchain.toml" | head -1 | awk -F'"' '{print $2}')
+LATEST="false"
+# a local build needs no lookup
+if [[ "${VERSION}" == "latest" && -z "${TILES_UI_BUILD:-}" ]]; then
+  # GitHub's latest link lands on the newest release's tag
+  LANDED=$(curl -fsSLI --retry 3 -o /dev/null -w '%{url_effective}' "${REPO}/releases/latest" || true)
+  if [[ "${LANDED}" != */releases/tag/* ]]; then
+    echo "Couldn't find tiles-ui's latest release" >&2
+    exit 1
+  fi
+  VERSION="${LANDED##*/}"
+  LATEST="true"
+fi
 RELEASE="${REPO}/releases/download/${VERSION}"
 
 case "${OS}:${ARCH}" in
@@ -95,6 +108,10 @@ if [[ -n "${TILES_UI_BUILD:-}" ]]; then
   cp -R "${TILES_UI_BUILD}"/. "${STAGE}/"
 elif is_released "${RELEASE}/${ASSET}"; then
   download
+elif [[ "${LATEST}" == "true" ]]; then
+  # the release exists before its desktop files are uploaded
+  echo "tiles-ui ${VERSION} has no ${ASSET} yet, try again in a few minutes" >&2
+  exit 1
 else
   echo "tiles-ui ${VERSION} isn't released yet, building its main branch"
   build_main
