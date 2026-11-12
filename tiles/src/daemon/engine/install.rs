@@ -171,10 +171,7 @@ impl Engines {
         if is_live(&running) {
             return Ok(self.state());
         }
-        let current = self.store.installed().is_some_and(|installed| {
-            installed.engine == wanted && installed.tag == self.builds.tag
-        });
-        if wanted.is_bundled() || current {
+        if !self.needs_download(wanted) {
             self.set(InstallState::Done { engine: wanted });
             return Ok(self.state());
         }
