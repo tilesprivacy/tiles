@@ -11,7 +11,9 @@ use axum::response::sse::Event;
 use futures_util::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tiles_engine::{BUILDS, Builds, Choice, Engine, Hardware, Installed, Store, check, choices};
+use tiles_engine::{
+    BUILDS, Builds, Choice, Engine, Hardware, Installed, Store, auto, check, choices,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -119,6 +121,26 @@ impl Engines {
 
     pub fn installed(&self) -> Option<Installed> {
         self.store.installed()
+    }
+
+    pub fn needs_download(&self, engine: Engine) -> bool {
+        !engine.is_bundled()
+            && !self.store.installed().is_some_and(|installed| {
+                installed.engine == engine && installed.tag == self.builds.tag
+            })
+    }
+
+    /// Installs the engine auto picks for `hardware`. `None` when it's on this computer already
+    pub async fn start_if_missing(
+        self: &Arc<Self>,
+        hardware: &Hardware,
+    ) -> Result<Option<InstallState>, AppError> {
+        let choices = self.choices(hardware);
+        let engine = auto(hardware, &choices);
+        if !self.needs_download(engine) {
+            return Ok(None);
+        }
+        self.start(engine, &choices).await.map(Some)
     }
 
     /// The llama-server replies run on, `None` for the one that comes with Tiles
@@ -403,7 +425,7 @@ async fn file_len(path: &Path) -> u64 {
 mod tests {
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
-    use tiles_engine::{Build, BuildFile};
+    use tiles_engine::{Build, BuildFile, Gpu, Vendor};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
     use super::*;
@@ -612,5 +634,45 @@ mod tests {
                 engine: Engine::Vulkan
             }
         );
+    }
+
+    #[tokio::test]
+    async fn the_auto_pick_is_downloaded_once() {
+        let (_server, _dir, engines) = setup(NO_LIBCUDA, LISTS_VULKAN, Duration::ZERO).await;
+        // auto picks CUDA 13 for it
+        let hardware = Hardware {
+            os: "linux".to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            gpus: vec![Gpu {
+                vendor: Vendor::Nvidia,
+                name: Some("NVIDIA GPU".to_owned()),
+                compute_capability: Some((12, 0)),
+                vram: None,
+            }],
+            nvidia_driver: Some("999.0".to_owned()),
+            nvidia_cuda: None,
+            vulkan_loader: true,
+        };
+
+        let started = engines.start_if_missing(&hardware).await.unwrap();
+        assert!(matches!(
+            started,
+            Some(InstallState::Downloading {
+                engine: Engine::Cuda13,
+                ..
+            })
+        ));
+        // CUDA 13 fails its check here, Vulkan is next
+        assert_eq!(
+            finished(&engines).await,
+            InstallState::Done {
+                engine: Engine::Vulkan
+            }
+        );
+
+        // Vulkan is the auto pick now, and it's installed
+        assert_eq!(engines.start_if_missing(&hardware).await.unwrap(), None);
+        assert!(!engines.needs_download(Engine::Vulkan));
+        assert!(engines.needs_download(Engine::Cuda13));
     }
 }
