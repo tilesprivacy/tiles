@@ -121,6 +121,13 @@ impl Engines {
         self.store.installed()
     }
 
+    pub fn needs_download(&self, engine: Engine) -> bool {
+        !engine.is_bundled()
+            && !self.store.installed().is_some_and(|installed| {
+                installed.engine == engine && installed.tag == self.builds.tag
+            })
+    }
+
     /// The llama-server replies run on, `None` for the one that comes with Tiles
     pub fn server(&self) -> Option<PathBuf> {
         if get_engine_pick() == Some(Engine::Cpu) {
@@ -164,10 +171,7 @@ impl Engines {
         if is_live(&running) {
             return Ok(self.state());
         }
-        let current = self.store.installed().is_some_and(|installed| {
-            installed.engine == wanted && installed.tag == self.builds.tag
-        });
-        if wanted.is_bundled() || current {
+        if !self.needs_download(wanted) {
             self.set(InstallState::Done { engine: wanted });
             return Ok(self.state());
         }
@@ -403,7 +407,7 @@ async fn file_len(path: &Path) -> u64 {
 mod tests {
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
-    use tiles_engine::{Build, BuildFile};
+    use tiles_engine::{Build, BuildFile, Gpu, Vendor, auto};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
     use super::*;
@@ -612,5 +616,43 @@ mod tests {
                 engine: Engine::Vulkan
             }
         );
+    }
+
+    #[tokio::test]
+    async fn an_installed_engine_needs_no_download() {
+        let (_server, _dir, engines) = setup(NO_LIBCUDA, LISTS_VULKAN, Duration::ZERO).await;
+        // auto picks CUDA 13 for it
+        let hardware = Hardware {
+            os: "linux".to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            gpus: vec![Gpu {
+                vendor: Vendor::Nvidia,
+                name: Some("NVIDIA GPU".to_owned()),
+                compute_capability: Some((12, 0)),
+                vram: None,
+            }],
+            nvidia_driver: Some("999.0".to_owned()),
+            nvidia_cuda: None,
+            vulkan_loader: true,
+        };
+
+        let choices = engines.choices(&hardware);
+        let picked = auto(&hardware, &choices);
+        assert_eq!(picked, Engine::Cuda13);
+        assert!(engines.needs_download(picked));
+
+        engines.start(picked, &choices).await.unwrap();
+        // CUDA 13 fails its check here, Vulkan is next
+        assert_eq!(
+            finished(&engines).await,
+            InstallState::Done {
+                engine: Engine::Vulkan
+            }
+        );
+
+        // Vulkan is the auto pick now, and it's installed
+        let picked = auto(&hardware, &engines.choices(&hardware));
+        assert_eq!(picked, Engine::Vulkan);
+        assert!(!engines.needs_download(picked));
     }
 }

@@ -540,6 +540,8 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
         anyhow::Result::<()>::Ok(())
     });
 
+    tokio::spawn(engine::on_daemon_start(shared_state.engines.clone()));
+
     crate::utils::shell_path::warm_up();
     listen_for_signals(shared_state.clone());
 

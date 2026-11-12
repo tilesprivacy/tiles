@@ -23,8 +23,9 @@ pub use engine_fetch::offer_gpu_engine;
 pub use install::{Engines, InstallState};
 
 use crate::{
+    core::account::local::get_root_user_details,
     daemon::{ApiJson, ApiResponse, AppError, AppState, model::CLIENT_HEADER},
-    utils::config::{get_engine_pick, set_engine_pick},
+    utils::config::{DefaultProvider, get_engine_pick, get_or_create_config, set_engine_pick},
 };
 
 pub fn engine_router() -> Router<Arc<AppState>> {
@@ -46,10 +47,6 @@ fn describe(engines: &Engines, hardware: &Hardware) -> Value {
     let pick = get_engine_pick();
     let engine = engine_to_run(pick, hardware, &choices);
     let installed = engines.installed();
-    let needs_download = !engine.is_bundled()
-        && !installed
-            .as_ref()
-            .is_some_and(|installed| installed.engine == engine && installed.tag == BUILDS.tag);
     json!({
         "llama_cpp": BUILDS.tag,
         "pick": pick.map_or("auto", Engine::name),
@@ -59,14 +56,48 @@ fn describe(engines: &Engines, hardware: &Hardware) -> Value {
             "engine": installed.engine,
             "llama_cpp": installed.tag,
         })),
-        "needs_download": needs_download,
-        // set by hand, replies run on it whatever is picked
-        "override": env::var("TILES_LLAMA_SERVER_BIN").ok().filter(|path| !path.is_empty()),
+        "needs_download": engines.needs_download(engine),
+        "override": server_override(),
         "download": engines.state(),
         "gpus": hardware.gpus,
         "nvidia_driver": hardware.nvidia_driver,
         "engines": choices,
     })
+}
+
+// set by hand, replies run on it whatever is picked
+fn server_override() -> Option<String> {
+    env::var("TILES_LLAMA_SERVER_BIN")
+        .ok()
+        .filter(|path| !path.is_empty())
+}
+
+fn account_exists() -> bool {
+    get_or_create_config(DefaultProvider)
+        .and_then(|config| get_root_user_details(&config))
+        .is_ok_and(|user| !user.id.is_empty())
+}
+
+/// On auto, downloads the picked engine when it isn't on this computer
+async fn download_missing_engine(engines: &Arc<Engines>, hardware: &Hardware) {
+    // first-run setup offers the engine until there's an account
+    if get_engine_pick().is_some() || server_override().is_some() || !account_exists() {
+        return;
+    }
+    let choices = engines.choices(hardware);
+    let engine = auto(hardware, &choices);
+    if !engines.needs_download(engine) {
+        return;
+    }
+    if let Err(err) = engines.start(engine, &choices).await {
+        log::warn!("Couldn't download the {} engine: {err:?}", engine.name());
+    }
+}
+
+pub async fn on_daemon_start(engines: Arc<Engines>) {
+    let hardware = detect().await;
+    let _picking = engines.picking.lock().await;
+    download_missing_engine(&engines, &hardware).await;
 }
 
 #[derive(Deserialize)]
@@ -109,6 +140,7 @@ async fn select(
     }
     set_engine_pick(pick)
         .map_err(|err| AppError::InternalServerError(format!("Couldn't save the engine: {err}")))?;
+    download_missing_engine(&state.engines, &hardware).await;
     Ok(ApiResponse::success(describe(&state.engines, &hardware)))
 }
 
