@@ -58,7 +58,7 @@ jobs:
           # venvstacks 0.8.0 final was never uploaded to PyPI; install from the git tag
           pipx install "venvstacks @ git+https://github.com/lmstudio-ai/venvstacks.git@0.8.0"
           # unearth 0.19 breaks the pdm this venvstacks needs
-          pipx inject venvstacks "unearth<0.19"
+          pipx runpip venvstacks install "unearth<0.19"
 
       - name: Install just
         run: command -v just || cargo install just
