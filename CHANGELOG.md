@@ -5,6 +5,19 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-12
+
+### Changed
+
+- On Automatic, Tiles downloads the llama.cpp build for the GPU by itself when it isn't on the computer, also after a reinstall [#302](https://github.com/tilesprivacy/tiles/pull/302)
+
+### Fixed
+
+- On a Mac the traffic lights no longer sit over dialogs, and the window no longer bounces when scrolled past its edge [tiles-ui#9](https://github.com/tilesprivacy/tiles-ui/pull/9)
+- Back and forward are dimmed when there's no history [tiles-ui#9](https://github.com/tilesprivacy/tiles-ui/pull/9)
+- The account menu is as wide as its content on a Mac [tiles-ui#7](https://github.com/tilesprivacy/tiles-ui/pull/7)
+- The menu bar's info tooltips look like the app's [tiles-ui#8](https://github.com/tilesprivacy/tiles-ui/pull/8)
+
 ## [0.5.0] - 2026-11-11
 
 ### Added
