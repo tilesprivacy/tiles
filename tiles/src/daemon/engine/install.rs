@@ -11,9 +11,7 @@ use axum::response::sse::Event;
 use futures_util::Stream;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tiles_engine::{
-    BUILDS, Builds, Choice, Engine, Hardware, Installed, Store, auto, check, choices,
-};
+use tiles_engine::{BUILDS, Builds, Choice, Engine, Hardware, Installed, Store, check, choices};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -128,19 +126,6 @@ impl Engines {
             && !self.store.installed().is_some_and(|installed| {
                 installed.engine == engine && installed.tag == self.builds.tag
             })
-    }
-
-    /// Installs the engine auto picks for `hardware`. `None` when it's on this computer already
-    pub async fn start_if_missing(
-        self: &Arc<Self>,
-        hardware: &Hardware,
-    ) -> Result<Option<InstallState>, AppError> {
-        let choices = self.choices(hardware);
-        let engine = auto(hardware, &choices);
-        if !self.needs_download(engine) {
-            return Ok(None);
-        }
-        self.start(engine, &choices).await.map(Some)
     }
 
     /// The llama-server replies run on, `None` for the one that comes with Tiles
@@ -425,7 +410,7 @@ async fn file_len(path: &Path) -> u64 {
 mod tests {
     use flate2::{Compression, write::GzEncoder};
     use sha2::{Digest, Sha256};
-    use tiles_engine::{Build, BuildFile, Gpu, Vendor};
+    use tiles_engine::{Build, BuildFile, Gpu, Vendor, auto};
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 
     use super::*;
@@ -637,7 +622,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_auto_pick_is_downloaded_once() {
+    async fn an_installed_engine_needs_no_download() {
         let (_server, _dir, engines) = setup(NO_LIBCUDA, LISTS_VULKAN, Duration::ZERO).await;
         // auto picks CUDA 13 for it
         let hardware = Hardware {
@@ -654,14 +639,12 @@ mod tests {
             vulkan_loader: true,
         };
 
-        let started = engines.start_if_missing(&hardware).await.unwrap();
-        assert!(matches!(
-            started,
-            Some(InstallState::Downloading {
-                engine: Engine::Cuda13,
-                ..
-            })
-        ));
+        let choices = engines.choices(&hardware);
+        let picked = auto(&hardware, &choices);
+        assert_eq!(picked, Engine::Cuda13);
+        assert!(engines.needs_download(picked));
+
+        engines.start(picked, &choices).await.unwrap();
         // CUDA 13 fails its check here, Vulkan is next
         assert_eq!(
             finished(&engines).await,
@@ -671,8 +654,8 @@ mod tests {
         );
 
         // Vulkan is the auto pick now, and it's installed
-        assert_eq!(engines.start_if_missing(&hardware).await.unwrap(), None);
-        assert!(!engines.needs_download(Engine::Vulkan));
-        assert!(engines.needs_download(Engine::Cuda13));
+        let picked = auto(&hardware, &engines.choices(&hardware));
+        assert_eq!(picked, Engine::Vulkan);
+        assert!(!engines.needs_download(picked));
     }
 }

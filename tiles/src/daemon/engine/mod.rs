@@ -84,8 +84,13 @@ async fn download_missing_engine(engines: &Arc<Engines>, hardware: &Hardware) {
     if get_engine_pick().is_some() || server_override().is_some() || !account_exists() {
         return;
     }
-    if let Err(err) = engines.start_if_missing(hardware).await {
-        log::warn!("Couldn't download the engine: {err:?}");
+    let choices = engines.choices(hardware);
+    let engine = auto(hardware, &choices);
+    if !engines.needs_download(engine) {
+        return;
+    }
+    if let Err(err) = engines.start(engine, &choices).await {
+        log::warn!("Couldn't download the {} engine: {err:?}", engine.name());
     }
 }
 
