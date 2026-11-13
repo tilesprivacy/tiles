@@ -496,7 +496,8 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
                 PiResponse::Response(response_msg) => {
                     if response_msg.success {
                         match response_msg.command {
-                            CommandType::Unknown => {
+                            // Pi took the prompt, the reply follows
+                            CommandType::Unknown | CommandType::Prompt => {
                                 continue;
                             }
                             CommandType::Abort => {
