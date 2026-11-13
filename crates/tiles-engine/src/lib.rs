@@ -431,7 +431,7 @@ mod tests {
         let hardware = linux(vec![nvidia(Some((12, 0)))], Some("580.82.07"));
         let choices = choices(&hardware, &BUILDS);
         let cuda = &choices[0];
-        assert_eq!(cuda.label, "CUDA 13.4");
+        assert_eq!(cuda.label, "CUDA 13.5");
         // the build and its runtime
         assert!(cuda.download > 500_000_000);
         assert_eq!(choices.last().unwrap().download, 0);
