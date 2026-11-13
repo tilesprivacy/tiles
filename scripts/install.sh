@@ -199,6 +199,83 @@ fi
 DESKTOP_ENTRY="${SHARE_DIR}/applications/tiles.desktop"
 DESKTOP_ICON="${SHARE_DIR}/icons/hicolor/256x256/apps/tiles.png"
 
+# the account, chats, models and settings
+DATA_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/tiles"
+CONFIG_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/tiles"
+
+# the version of the Tiles this install replaces, empty when there is none
+installed_version() {
+  local bin="${INSTALL_DIR}/tiles"
+  [[ -x "${bin}" ]] || return 0
+  "${bin}" --version 2>/dev/null | awk 'NR == 1 { print $NF }' || true
+}
+
+# a data folder the user picked themselves, outside DATA_DIR
+custom_data_dir() {
+  local path
+  path="$(awk -F'"' '
+    /^\[/ { in_data = ($0 == "[data]") }
+    in_data && /^path[[:space:]]*=/ { print $2; exit }
+  ' "${CONFIG_DIR}/config.toml" 2>/dev/null || true)"
+  if [[ -n "${path}" && "${path}" != "${DATA_DIR}" && "${path}" != "${DATA_DIR}"/* ]]; then
+    echo "${path}"
+  fi
+}
+
+# Tiles 0.5 doesn't work on top of a 0.4 install, so the old one is removed first
+confirm_remove_old() {
+  local new="${VERSION:-0.5}" reply dir custom
+  # `curl | sh` leaves stdin on the pipe, so the answer comes from the terminal
+  if ! { true < /dev/tty; } 2>/dev/null; then
+    err "Tiles ${OLD_VERSION} is installed, and Tiles ${new} can't be installed over it. Run this installer in a terminal to remove the old install first."
+  fi
+
+  custom="$(custom_data_dir)"
+  {
+    printf "\n\033[1;33m⚠️  Tiles %s is installed on this computer.\033[0m\n\n" "${OLD_VERSION}"
+    echo "Tiles ${new} has breaking changes and doesn't work on top of a 0.4 install,"
+    echo "so the old install has to be removed completely first."
+    echo ""
+    echo "That deletes everything Tiles has saved in these folders, including your"
+    echo "account, chats, settings and downloaded models:"
+    echo ""
+    for dir in "${OLD_DIRS[@]}"; do
+      echo "  ${dir}"
+    done
+    echo ""
+    if [[ -n "${custom}" ]]; then
+      echo "Your data folder at ${custom} is left as it is."
+      echo ""
+    fi
+    echo "Back up anything you want to keep before you continue."
+    echo ""
+    printf "Remove Tiles %s and install %s? [Y/n] " "${OLD_VERSION}" "${new}"
+  } > /dev/tty
+
+  read -r reply < /dev/tty || reply="n"
+  case "${reply}" in
+    ""|y|Y|yes|Yes|YES) ;;
+    *)
+      echo "Nothing was changed. Tiles ${OLD_VERSION} is still installed." > /dev/tty
+      exit 1
+      ;;
+  esac
+}
+
+remove_old_install() {
+  local dir
+  log "🧹 Removing Tiles ${OLD_VERSION}..."
+  rm -f "${INSTALL_DIR}/tiles" "${DESKTOP_ENTRY}" "${DESKTOP_ICON}"
+  for dir in "${OLD_DIRS[@]}"; do
+    # only a folder named tiles, whatever --lib-dir or the environment points at
+    if [[ "${dir}" != */tiles ]]; then
+      warn "⚠️  Left ${dir} as it is."
+      continue
+    fi
+    rm -rf "${dir}"
+  done
+}
+
 if [[ "${DEV}" == "false" && "${NIGHTLY}" == "false" && -z "${VERSION}" ]]; then
   VERSION="$(latest_version)"
 fi
@@ -214,6 +291,15 @@ elif [[ "${DEV}" == "true" ]]; then
   log "⬇️  Installing local Tiles build for ${ARCH}-${OS}..."
 else
   log "⬇️  Downloading Tiles (${VERSION}) for ${ARCH}-${OS}..."
+fi
+
+OLD_VERSION="$(installed_version)"
+OLD_DIRS=("${DATA_DIR}" "${CONFIG_DIR}")
+[[ "${LIB_DIR}" != "${DATA_DIR}" ]] && OLD_DIRS+=("${LIB_DIR}")
+REMOVE_OLD="false"
+if [[ "${OLD_VERSION}" == 0.4.* && "${VERSION}" != 0.4.* ]]; then
+  confirm_remove_old
+  REMOVE_OLD="true"
 fi
 
 if [[ "${DEV}" == "false" ]]; then
@@ -263,6 +349,8 @@ stop_running_daemon() {
 }
 
 stop_running_daemon
+
+[[ "${REMOVE_OLD}" == "true" ]] && remove_old_install
 
 echo "⬇️ Installing tiles..."
 # Lets point to tile repo
