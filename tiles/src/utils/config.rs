@@ -313,27 +313,13 @@ pub fn set_user_data_path(path: &str) -> Result<String> {
 }
 
 pub fn get_memory_path() -> Result<String> {
-    let root_config = get_or_create_config(DefaultProvider)?;
-    let memory_config = root_config
-        .get("data")
-        .ok_or_else(|| anyhow!("memory section doesnt exist"))?
-        .as_table()
-        .expect("Failed to parse to table (data)");
-
-    let path = memory_config
-        .get("path")
-        .ok_or_else(|| anyhow!("path doesnt exist (data)"))?
-        .as_str()
-        .expect("parse failed (memory)");
-    if path.is_empty() {
-        Err(anyhow::anyhow!(format!("NOT SET")))
-    } else {
-        Ok(PathBuf::from_str(path)?
-            .join("memory")
-            .to_str()
-            .ok_or_else(|| anyhow!("failed to convert path to str"))?
-            .to_owned())
-    }
+    // an empty path in the config means the default data folder
+    DefaultProvider
+        .get_user_data_dir()?
+        .join("memory")
+        .to_str()
+        .map(str::to_owned)
+        .ok_or_else(|| anyhow!("failed to convert path to str"))
 }
 
 pub fn get_default_memory_path() -> Result<PathBuf> {
