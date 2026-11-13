@@ -697,8 +697,8 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
     }
 }
 
-/// Revokes the peer by deleting the related delegations
-pub fn revoke_token(peer_did: &str, user: &User, conn: &Connection) -> Result<()> {
+/// Revokes the peer by deleting the related delegations and the peer itself
+pub fn revoke_peer(peer_did: &str, user: &User, conn: &Connection) -> Result<()> {
     let tokens = fetch_linked_tokens(conn, &user.user_id)?;
 
     let link_token = tokens.iter().find(|t| t.aud_did == peer_did);
@@ -728,9 +728,8 @@ pub fn revoke_token(peer_did: &str, user: &User, conn: &Connection) -> Result<()
         };
     } else {
         log::error!("Delegation token from the peer not found")
-    }
-
-    Ok(())
+    };
+    delete_user(conn, peer_did)
 }
 
 pub fn delete_token_by_cid(conn: &Connection, cid: &str) -> Result<()> {
@@ -742,6 +741,14 @@ pub fn delete_token_by_cid(conn: &Connection, cid: &str) -> Result<()> {
     }
 }
 
+fn delete_user(conn: &Connection, did: &str) -> Result<()> {
+    let mut stmt = conn.prepare("DELETE FROM users WHERE user_id= ?1 and account_type = 'peer'")?;
+    match stmt.execute([did]) {
+        Ok(0) => Err(anyhow!("User not found")),
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!(err.to_string())),
+    }
+}
 pub fn fetch_tokens(conn: &Connection, filter: TokenQueryOptions) -> Result<Vec<Token>> {
     let mut final_query: String = String::from("");
     let base_query =
@@ -859,7 +866,7 @@ fn save_token<S: Signature>(
             Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
         }?;
 
-        // We kinda do the unique username check in the query itself, so that we can assign username as None if conflict happens. This is fine as a local user can change this peer's username to whatever they wants ;ater. Usernames are always local and not globally unique unline DIDs
+        // We kinda do the unique username check in the query itself, so that we can assign username as None if conflict happens. This is fine as a local user can change this peer's username to whatever they wants later. Usernames are always local and not globally unique unlike DIDs
         let mut stmt2= txn.prepare("INSERT INTO users (id, user_id, username, active_profile, account_type, root, created_at, updated_at) SELECT ?1, ?2, CASE WHEN ?3 IS NOT NULL AND EXISTS (SELECT 1 FROM users WHERE username = ?3 AND user_id IS NOT ?2) THEN NULL ELSE ?3 END, ?4, ?5, ?6, ?7, ?8 ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, updated_at = excluded.updated_at WHERE excluded.username IS NOT NULL")?;
 
         match stmt2.execute(params![
@@ -1160,7 +1167,14 @@ pub fn update_user(conn: &Connection, update_params: UpdatePeerParams) -> Result
                 Err(anyhow!("User not found"))
             }
         }),
-        Err(err) => Err(anyhow!("Err updating user due to {}", err)),
+        Err(err)
+            if err
+                .to_string()
+                .contains("UNIQUE constraint failed: users.username") =>
+        {
+            Err(anyhow!("Nickname already exists!".to_string()))
+        }
+        Err(err) => Err(anyhow!("Error updating user due to {}", err)),
     }
 }
 
@@ -1884,7 +1898,18 @@ pub mod tests {
             1
         );
 
-        revoke_token(&added_token.aud_did, &user, &db_conn.common).unwrap();
+        assert!(
+            get_user(&db_conn.common, &added_token.aud_did)
+                .unwrap()
+                .is_some()
+        );
+        revoke_peer(&added_token.aud_did, &user, &db_conn.common).unwrap();
+
+        assert!(
+            get_user(&db_conn.common, &added_token.aud_did)
+                .unwrap()
+                .is_none()
+        );
 
         assert!(
             fetch_linked_tokens(&db_conn.common, &issuer_did)
@@ -1898,7 +1923,7 @@ pub mod tests {
         let db_conn = setup_db_conn_v2();
         let user = create_dummy_user(&db_conn.common, Some("did:plc:missing-issuer".to_owned()));
 
-        let result = revoke_token("did:key:missing-peer", &user, &db_conn.common);
+        let result = revoke_peer("did:key:missing-peer", &user, &db_conn.common);
 
         assert!(result.is_err());
     }

@@ -67,7 +67,7 @@ pub fn authz_router() -> Router<Arc<AppState>> {
             "/v1/tilekit/peers/list-linked-devices",
             post(fetch_linked_devices),
         )
-        .route("/v1/tilekit/peers/revoke", post(revoke_token))
+        .route("/v1/tilekit/peers/revoke", post(revoke_peer))
         .route("/v1/tilekit/peers/update-peer", post(update_peer))
 }
 
@@ -160,16 +160,20 @@ pub async fn fetch_linked_devices() -> Result<impl IntoResponse, AppError> {
     Ok(ApiResponse::success(peers))
 }
 
-// Later we will see into UCAN revocation
 #[debug_handler]
-pub async fn revoke_token(
+pub async fn revoke_peer(
     ApiJson(revoke_params): ApiJson<RevokeParams>,
 ) -> Result<impl IntoResponse, AppError> {
     let common_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     let user = get_current_user(&common_db_conn).map_err(|e| AppError::NotFound(e.to_string()))?;
-    local::revoke_token(&revoke_params.peer_did, &user, &common_db_conn)
+    if user.user_id == revoke_params.peer_did {
+        return Err(AppError::BadRequest(
+            "Peer to be revoked can be same as this device".to_string(),
+        ));
+    }
+    local::revoke_peer(&revoke_params.peer_did, &user, &common_db_conn)
         .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
     Ok(ApiResponse::success(SimpleResponse {
