@@ -1,5 +1,101 @@
 #!/bin/bash
 
+OLD_BIN="/usr/local/bin/tiles"
+LIB_DIR="/usr/local/share/tiles"
+
+# the person at the screen, the installer itself runs as root
+console_user() {
+  local user
+  user="$(stat -f%Su /dev/console 2>/dev/null)"
+  [ -n "${user}" ] && [ "${user}" != "root" ] && echo "${user}"
+}
+
+user_home() {
+  dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | awk '{ print $2 }'
+}
+
+# a data folder the user picked themselves, outside the default one
+custom_data_dir() {
+  local path
+  path="$(awk -F'"' '
+    /^\[/ { in_data = ($0 == "[data]") }
+    in_data && /^path[[:space:]]*=/ { print $2; exit }
+  ' "${CONFIG_DIR}/config.toml" 2>/dev/null)"
+  case "${path}" in
+    ""|"${DATA_DIR}"|"${DATA_DIR}"/*) ;;
+    *) echo "${path}" ;;
+  esac
+}
+
+# true only when the user pressed Remove and Install
+confirm_remove_old() {
+  local uid message custom
+  uid="$(id -u "${USER_NAME}" 2>/dev/null)" || return 1
+
+  message="Tiles ${OLD_VERSION} is installed on this Mac.
+
+This version of Tiles has breaking changes and doesn't work on top of a 0.4 install, so the old install has to be removed completely first.
+
+That deletes everything Tiles has saved in these folders, including your account, chats, settings and downloaded models:
+
+${DATA_DIR}
+${CONFIG_DIR}
+${LIB_DIR}
+"
+  custom="$(custom_data_dir)"
+  if [ -n "${custom}" ]; then
+    message="${message}
+Your data folder at ${custom} is left as it is.
+"
+  fi
+  message="${message}
+Back up anything you want to keep before you continue."
+
+  # shown in the user's own session, cancel makes osascript fail
+  launchctl asuser "${uid}" sudo -u "${USER_NAME}" osascript \
+    -e 'on run argv' \
+    -e 'display dialog (item 1 of argv) with title "Tiles" buttons {"Cancel", "Remove and Install"} default button "Cancel" cancel button "Cancel" with icon caution' \
+    -e 'end run' \
+    "${message}" >/dev/null
+}
+
+remove_old_install() {
+  echo "Removing Tiles ${OLD_VERSION}"
+  # the old daemon holds the databases open
+  curl -fsS -m 5 -o /dev/null -X POST -H "Content-Type: application/json" "http://127.0.0.1:1729/shutdown" 2>/dev/null \
+    || curl -fsS -m 5 -o /dev/null "http://127.0.0.1:1729/shutdown" 2>/dev/null \
+    || true
+  rm -f "${OLD_BIN}"
+  rm -rf "${LIB_DIR}" "${DATA_DIR}" "${CONFIG_DIR}"
+}
+
+# Tiles 0.5 doesn't work on top of a 0.4 install, so the old one is removed first.
+# Nothing is deleted unless the user agrees, and without an answer the install stops
+OLD_VERSION=""
+if [ -x "${OLD_BIN}" ]; then
+  OLD_VERSION="$("${OLD_BIN}" --version 2>/dev/null | awk 'NR == 1 { print $NF }')"
+fi
+
+case "${OLD_VERSION}" in
+  0.4.*)
+    USER_NAME="$(console_user)"
+    USER_HOME=""
+    [ -n "${USER_NAME}" ] && USER_HOME="$(user_home "${USER_NAME}")"
+    if [ -z "${USER_HOME}" ] || [ ! -d "${USER_HOME}" ]; then
+      echo "Tiles ${OLD_VERSION} is installed and nobody is logged in to ask about removing it"
+      exit 1
+    fi
+    DATA_DIR="${USER_HOME}/.local/share/tiles"
+    CONFIG_DIR="${USER_HOME}/.config/tiles"
+
+    if ! confirm_remove_old; then
+      echo "Tiles ${OLD_VERSION} was kept, nothing was changed"
+      exit 1
+    fi
+    remove_old_install
+    ;;
+esac
+
 # So that we don't have multiple copies of python libs lying around
 # from previous installs
 
