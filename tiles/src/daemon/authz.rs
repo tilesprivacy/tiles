@@ -11,8 +11,8 @@ use serde_json::json;
 use crate::{
     core::{
         account::local::{
-            self, Capability, Token, TokenQueryOptions, TokenType, UserQueryOptions, fetch_tokens,
-            fetch_users, get_current_user, update_user,
+            self, Capability, SameDidDelegation, Token, TokenQueryOptions, TokenType,
+            UserQueryOptions, fetch_tokens, fetch_users, get_current_user, update_user,
         },
         storage::db::get_db_conn,
     },
@@ -81,7 +81,13 @@ pub async fn create_token(
         create_token_req.capability,
     )
     .await
-    .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    .map_err(|e| {
+        if e.downcast_ref::<SameDidDelegation>().is_some() {
+            AppError::BadRequest("Audience DID cannot be same as user DID".to_string())
+        } else {
+            AppError::CannotProcess(e.to_string())
+        }
+    })?;
 
     Ok(ApiResponse::success(token))
 }

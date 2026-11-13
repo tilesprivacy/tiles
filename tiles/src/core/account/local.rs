@@ -282,6 +282,28 @@ pub struct UserQueryOptions {
     pub user_ids: Option<Vec<String>>,
 }
 
+#[derive(Debug)]
+pub struct SameDidDelegation();
+
+impl core::error::Error for SameDidDelegation {}
+
+impl std::fmt::Display for SameDidDelegation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cannot delegate to oneself")
+    }
+}
+
+fn validate_delegation_target(
+    issuer_did: &str,
+    audience_did: &str,
+) -> std::result::Result<(), SameDidDelegation> {
+    if issuer_did == audience_did {
+        Err(SameDidDelegation())
+    } else {
+        Ok(())
+    }
+}
+
 impl TokenQueryOptions {
     pub fn is_empty(&self) -> bool {
         self.issuer_did.is_none() && self.aud_did.is_none() && self.token_type.is_none()
@@ -536,6 +558,7 @@ pub async fn create_token(
 ) -> Result<Token> {
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
     let user = get_current_user(&db_conn)?;
+    validate_delegation_target(&user.user_id, aud_did)?;
     let app_name = get_app_name();
     let signing_key = get_signing_key(&app_name, &user.user_id)
         .map_err(|e| anyhow!("Failed to process the key from keychain: {}", e))?;
@@ -1231,6 +1254,16 @@ pub mod tests {
         let acc_details = get_root_user_details(&config)?;
         assert!(acc_details.id.contains("did:key"));
         Ok(())
+    }
+
+    #[test]
+    fn create_token_rejects_the_current_user_as_audience() {
+        let user_id = "did:key:z6MkpCurrentUser";
+
+        let error = validate_delegation_target(user_id, user_id)
+            .expect_err("a user must not delegate a token to itself");
+
+        assert_eq!(error.to_string(), "Cannot delegate to oneself");
     }
 
     #[tokio::test]
