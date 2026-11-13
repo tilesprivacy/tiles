@@ -14,25 +14,73 @@ pub struct EncryptedBase64Content {
     pub nonce: String,
     pub key: String,
 }
-pub fn encrypt_to_base64(content: &[u8]) -> Result<EncryptedBase64Content> {
-    let mut key_bytes = [0u8; 32];
-    OsRng.fill_bytes(&mut key_bytes);
 
-    let key = Key::from_slice(&key_bytes);
+#[derive(Serialize, Deserialize)]
+pub struct ContentKey {
+    pub key: Vec<u8>,
+    pub nonce: Vec<u8>,
+}
+
+impl Default for ContentKey {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ContentKey {
+    pub fn new() -> Self {
+        let mut key_bytes = [0u8; 32];
+        OsRng.fill_bytes(&mut key_bytes);
+
+        let key = Key::from_slice(&key_bytes);
+
+        let mut nonce_bytes = [0u8; 24];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = XNonce::from_slice(&nonce_bytes);
+
+        ContentKey {
+            key: key.to_vec(),
+            nonce: nonce.to_vec(),
+        }
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        postcard::from_bytes(bytes).map_err(Into::into)
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        postcard::to_stdvec(self).expect("Failed to convert content_key to bytes with postcard")
+    }
+}
+
+pub fn encrypt(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
+    let key = content_key.key.as_slice().into();
+    let nonce = content_key.nonce.as_slice().into();
     let cipher = XChaCha20Poly1305::new(key);
 
-    let mut nonce_bytes = [0u8; 24];
-    OsRng.fill_bytes(&mut nonce_bytes);
-    let nonce = XNonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher
+    cipher
         .encrypt(nonce, content.as_ref())
-        .map_err(|_e| anyhow!("Encryption failed for ciphertext"))?;
+        .map_err(|_e| anyhow!("Encryption failed for ciphertext"))
+}
+
+pub fn decrypt(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
+    let key = Key::from_slice(&content_key.key);
+    let cipher = XChaCha20Poly1305::new(key);
+    let nonce = XNonce::from_slice(&content_key.nonce);
+
+    cipher
+        .decrypt(nonce, content.as_ref())
+        .map_err(|_e| anyhow!("Failed to decrypt"))
+}
+
+pub fn encrypt_to_base64(content: &[u8]) -> Result<EncryptedBase64Content> {
+    let content_key = ContentKey::new();
+    let enc_content = encrypt(content, &content_key)?;
 
     Ok(EncryptedBase64Content {
-        ciphertext: data_encoding::BASE64.encode(&ciphertext),
-        nonce: data_encoding::BASE64.encode(nonce),
-        key: data_encoding::BASE64.encode(key),
+        ciphertext: data_encoding::BASE64.encode(&enc_content),
+        nonce: data_encoding::BASE64.encode(content_key.nonce.as_slice()),
+        key: data_encoding::BASE64.encode(content_key.key.as_slice()),
     })
 }
 
@@ -55,15 +103,15 @@ pub fn decrypt_from_base64(encrypted_content: EncryptedBase64Content) -> Result<
             nonce_bytes.len()
         ));
     }
-    let key = Key::from_slice(&key_bytes);
-    let cipher = XChaCha20Poly1305::new(key);
-    let nonce = XNonce::from_slice(&nonce_bytes);
+    let decrypted_content = decrypt(
+        &ciphertext_bytes,
+        &ContentKey {
+            key: key_bytes,
+            nonce: nonce_bytes,
+        },
+    )?;
 
-    let content = cipher
-        .decrypt(nonce, ciphertext_bytes.as_ref())
-        .map_err(|_e| anyhow!("Failed to decrypt"))?;
-
-    Ok(content)
+    Ok(decrypted_content)
 }
 
 #[cfg(test)]

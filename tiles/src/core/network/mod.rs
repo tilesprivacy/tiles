@@ -45,7 +45,10 @@ use crate::{
         storage::db::{DBTYPE, get_db_conn},
     },
     daemon::net::{API_TIMEOUT, NetworkApiEvent},
-    utils::get_unix_time_now,
+    utils::{
+        crypto::{ContentKey, decrypt, encrypt},
+        get_unix_time_now,
+    },
 };
 use owo_colors::OwoColorize;
 use sha2::{Digest, Sha256};
@@ -198,6 +201,7 @@ enum MessageBody {
         blob_ticket: String,
         last_row_counter: Option<i64>,
         auth_token: String,
+        content_key: Vec<u8>,
     },
     SyncEnd {
         auth_token: String,
@@ -931,6 +935,7 @@ async fn fetch_last_row_counter(
     recvx.await?
 }
 
+// TODO: move away frm memstore later
 /// Creates a Blob ticket from the data we need to send
 async fn fetch_encoded_delta_ticket(
     user_id: &str,
@@ -938,6 +943,7 @@ async fn fetch_encoded_delta_ticket(
     lrc: i64,
     store: &MemStore,
     addr: &EndpointAddr,
+    content_key: &ContentKey,
 ) -> Result<BlobTicket> {
     let (sendx, recvx) = oneshot::channel();
 
@@ -949,10 +955,10 @@ async fn fetch_encoded_delta_ticket(
 
     sender.send(sync_op_msg).await?;
     let encoded_data_result = recvx.await??;
-
+    let encrypted_data = encrypt(&encoded_data_result, content_key)?;
     let tag = store
         .blobs()
-        .add_bytes(Into::<Bytes>::into(encoded_data_result))
+        .add_bytes(Into::<Bytes>::into(encrypted_data))
         .await?;
 
     Ok(BlobTicket::new(addr.clone(), tag.hash, tag.format))
@@ -987,12 +993,14 @@ async fn on_sync_start_event(
         }
 
         let sender_did = msg.from_did.clone();
+        let content_key = ContentKey::new();
         let ticket = fetch_encoded_delta_ticket(
             &sync_helpers.user.user_id,
             sync_db_channel_sender,
             lrc.context("lrc failed")?,
             &sync_helpers.store,
             &sync_helpers.endpoint.addr(),
+            &content_key,
         )
         .await?;
 
@@ -1008,6 +1016,7 @@ async fn on_sync_start_event(
                 blob_ticket: ticket.to_string(),
                 last_row_counter: Some(receiver_last_row_counter),
                 auth_token: invocation_token,
+                content_key: content_key.to_bytes(),
             },
             NetworkMessageType::Sync,
             msg.from_did.to_string(),
@@ -1087,6 +1096,7 @@ async fn on_sync_send_delta_info(
         blob_ticket,
         last_row_counter,
         auth_token,
+        content_key,
     } = &msg.body
     {
         if let Err(err) = verify_invocation_token(auth_token, msg).await {
@@ -1132,9 +1142,10 @@ async fn on_sync_send_delta_info(
             .await;
         }
 
+        let decrypted_delta = decrypt(data, &ContentKey::from_bytes(content_key)?)?;
         let (sendx, recvx) = oneshot::channel();
         let sync_op_msg = SyncOp::ApplyDelta {
-            delta: data.to_vec(),
+            delta: decrypted_delta,
             resp: sendx,
         };
         sync_db_channel_sender.send(sync_op_msg).await?;
@@ -1146,12 +1157,14 @@ async fn on_sync_send_delta_info(
         // last_row_counter None means its end of sync relay
         if let Some(row_counter) = last_row_counter {
             // This block will be run by the initiator side
+            let content_key = ContentKey::new();
             let ticket = fetch_encoded_delta_ticket(
                 &sync_helpers.user.user_id,
                 sync_db_channel_sender,
                 *row_counter,
                 &sync_helpers.store,
                 &sync_helpers.endpoint.addr(),
+                &content_key,
             )
             .await?;
             let delta_info = NetworkMessage::new(
@@ -1161,6 +1174,7 @@ async fn on_sync_send_delta_info(
                     blob_ticket: ticket.to_string(),
                     last_row_counter: None,
                     auth_token: invocation_token,
+                    content_key: content_key.to_bytes(),
                 },
                 NetworkMessageType::Sync,
                 msg.from_did.clone(),
@@ -1386,6 +1400,7 @@ mod tests {
             fetch_last_row_counter, get_did_from_public_key,
         },
     };
+    use crate::utils::crypto::{ContentKey, decrypt, encrypt};
     use crate::utils::get_unix_time_now;
 
     fn signed_test_message(secret_key: &SecretKey) -> SignedNetworkMessage {
@@ -1606,9 +1621,11 @@ mod tests {
                 .unwrap();
 
         let payload = b"sync delta payload".to_vec();
+        let content_key = ContentKey::new();
+        let encrypted_data = encrypt(&payload, &content_key).unwrap();
         let tag = provider_store
             .blobs()
-            .add_bytes(payload.clone())
+            .add_bytes(encrypted_data.clone())
             .await
             .unwrap();
         let ticket = BlobTicket::new(provider_endpoint.addr(), tag.hash, tag.format);
@@ -1624,7 +1641,8 @@ mod tests {
             .get_bytes(ticket.hash())
             .await
             .unwrap();
-        assert_eq!(downloaded.as_ref(), payload.as_slice());
+        let downloaded = decrypt(&downloaded, &content_key).unwrap();
+        assert_eq!(downloaded, payload.as_slice());
 
         downloader_router.shutdown().await.unwrap();
         provider_router.shutdown().await.unwrap();
