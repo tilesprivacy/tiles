@@ -699,12 +699,13 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
 
 /// Revokes the peer by deleting the related delegations and the peer itself
 pub fn revoke_peer(peer_did: &str, user: &User, conn: &Connection) -> Result<()> {
-    let tokens = fetch_linked_tokens(conn, &user.user_id)?;
+    let txn = conn.unchecked_transaction()?;
+    let tokens = fetch_linked_tokens(&txn, &user.user_id)?;
 
     let link_token = tokens.iter().find(|t| t.aud_did == peer_did);
 
     if let Some(token) = link_token {
-        if let Err(err) = delete_token_by_cid(conn, &token.cid) {
+        if let Err(err) = delete_token_by_cid(&txn, &token.cid) {
             return Err(anyhow!(
                 "Failed to delete the delegation token from peer due to {:?}",
                 err
@@ -715,12 +716,12 @@ pub fn revoke_peer(peer_did: &str, user: &User, conn: &Connection) -> Result<()>
     }
 
     // also try to delete the link token this peer delegated to us
-    let tokens = fetch_linked_tokens(conn, peer_did)?;
+    let tokens = fetch_linked_tokens(&txn, peer_did)?;
     let link_token = tokens.iter().find(|t| t.aud_did == user.user_id);
     // We don't error out if below fails. Since its a cleanup process and returning error leaks abstraction of reverse delegation while linking
     // See core::network::mod.rs::initiate_device_linking()
     if let Some(token) = link_token {
-        if let Err(err) = delete_token_by_cid(conn, &token.cid) {
+        if let Err(err) = delete_token_by_cid(&txn, &token.cid) {
             log::error!(
                 "Failed to delete the delegation token from peer due to {:?}",
                 err
@@ -729,7 +730,9 @@ pub fn revoke_peer(peer_did: &str, user: &User, conn: &Connection) -> Result<()>
     } else {
         log::error!("Delegation token from the peer not found")
     };
-    delete_user(conn, peer_did)
+    delete_user(&txn, peer_did)?;
+    txn.commit()?;
+    Ok(())
 }
 
 pub fn delete_token_by_cid(conn: &Connection, cid: &str) -> Result<()> {
