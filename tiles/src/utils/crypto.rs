@@ -1,11 +1,18 @@
 //! Cryptographic utilities
-
 use anyhow::{Result, anyhow};
 use chacha20poly1305::{
     Key, KeyInit, XChaCha20Poly1305, XNonce,
     aead::{Aead, OsRng, rand_core::RngCore},
 };
+use hpke::{
+    Deserializable, Kem as KemTrait, Serializable, aead::ChaCha20Poly1305, kdf::HkdfSha256,
+    kem::X25519HkdfSha256, setup_receiver,
+};
 use serde::{Deserialize, Serialize};
+
+type Kem = X25519HkdfSha256;
+type HpkeAead = ChaCha20Poly1305;
+type Kdf = HkdfSha256;
 
 // All strings are base64 encoded (w/o padding)
 #[derive(Serialize, Deserialize, Debug)]
@@ -53,7 +60,7 @@ impl ContentKey {
     }
 }
 
-pub fn encrypt(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
+pub fn encrypt_by_content_key(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
     let key = content_key.key.as_slice().into();
     let nonce = content_key.nonce.as_slice().into();
     let cipher = XChaCha20Poly1305::new(key);
@@ -63,7 +70,7 @@ pub fn encrypt(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
         .map_err(|_e| anyhow!("Encryption failed for ciphertext"))
 }
 
-pub fn decrypt(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
+pub fn decrypt_by_content_key(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
     let key = Key::from_slice(&content_key.key);
     let cipher = XChaCha20Poly1305::new(key);
     let nonce = XNonce::from_slice(&content_key.nonce);
@@ -75,7 +82,7 @@ pub fn decrypt(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
 
 pub fn encrypt_to_base64(content: &[u8]) -> Result<EncryptedBase64Content> {
     let content_key = ContentKey::new();
-    let enc_content = encrypt(content, &content_key)?;
+    let enc_content = encrypt_by_content_key(content, &content_key)?;
 
     Ok(EncryptedBase64Content {
         ciphertext: data_encoding::BASE64.encode(&enc_content),
@@ -103,7 +110,7 @@ pub fn decrypt_from_base64(encrypted_content: EncryptedBase64Content) -> Result<
             nonce_bytes.len()
         ));
     }
-    let decrypted_content = decrypt(
+    let decrypted_content = decrypt_by_content_key(
         &ciphertext_bytes,
         &ContentKey {
             key: key_bytes,
@@ -114,10 +121,52 @@ pub fn decrypt_from_base64(encrypted_content: EncryptedBase64Content) -> Result<
     Ok(decrypted_content)
 }
 
+pub fn create_kem_pair() -> (Vec<u8>, Vec<u8>) {
+    let (sec_key, pub_key) = Kem::gen_keypair();
+    (sec_key.to_bytes().to_vec(), pub_key.to_bytes().to_vec())
+}
+
+pub fn encrypt_by_hpke(
+    pub_key: Vec<u8>,
+    domain: &str,
+    content: Vec<u8>,
+    aad: &str,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let pkey = <Kem as KemTrait>::PublicKey::from_bytes(&pub_key)?;
+
+    let (encapped_key, mut encrypt_ctx) =
+        hpke::setup_sender::<HpkeAead, Kdf, Kem>(&hpke::OpModeS::Base, &pkey, domain.as_bytes())?;
+
+    let encrypted_content = encrypt_ctx.seal(&content, aad.as_bytes())?;
+    Ok((encapped_key.to_bytes().to_vec(), encrypted_content))
+}
+
+pub fn decrypt_by_hpke(
+    secret_key: Vec<u8>,
+    encapped_key: Vec<u8>,
+    enc_content: Vec<u8>,
+    domain: &str,
+    aad: &str,
+) -> Result<Vec<u8>> {
+    let sec_key = <Kem as KemTrait>::PrivateKey::from_bytes(&secret_key)?;
+
+    let mut decrypt_ctx = setup_receiver::<HpkeAead, Kdf, Kem>(
+        &hpke::OpModeR::Base,
+        &sec_key,
+        &<Kem as KemTrait>::EncappedKey::from_bytes(&encapped_key)?,
+        domain.as_bytes(),
+    )?;
+
+    decrypt_ctx
+        .open(&enc_content, aad.as_bytes())
+        .map_err(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
 
     use atrium_api::types::string::Datetime;
+    use uuid::Uuid;
 
     use crate::repl::SharedSession;
 
@@ -157,5 +206,25 @@ mod tests {
         let dec_content: SharedSession = serde_json::from_value(v).unwrap();
 
         assert_eq!(shared_session.name, dec_content.name);
+    }
+
+    #[test]
+    fn test_round_trip_hpke_encryption() {
+        // let (alice_sk, alice_pk) = create_kem_pair();
+        let (bob_sk, bob_pk) = create_kem_pair();
+
+        let alice_data = "hello world";
+        let common_domain = "hpke_v2";
+        let aad: String = Uuid::now_v7().into();
+
+        // Alice encrypted her data with bob's public key
+        let (encapped_key, enc_content) =
+            encrypt_by_hpke(bob_pk, common_domain, alice_data.into(), &aad).unwrap();
+
+        // Bob decrypting with his private key and the encapped_key
+        let og_content =
+            decrypt_by_hpke(bob_sk, encapped_key, enc_content, common_domain, &aad).unwrap();
+
+        assert_eq!(alice_data, String::from_utf8_lossy(&og_content))
     }
 }

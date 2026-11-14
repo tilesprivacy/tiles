@@ -29,6 +29,7 @@ use tokio::{
         oneshot::{self, Receiver as oneshotReceiver},
     },
 };
+use uuid::Uuid;
 
 use crate::{
     core::{
@@ -46,7 +47,10 @@ use crate::{
     },
     daemon::net::{API_TIMEOUT, NetworkApiEvent},
     utils::{
-        crypto::{ContentKey, decrypt, encrypt},
+        crypto::{
+            ContentKey, create_kem_pair, decrypt_by_content_key, decrypt_by_hpke,
+            encrypt_by_content_key, encrypt_by_hpke,
+        },
         get_unix_time_now,
     },
 };
@@ -59,6 +63,8 @@ const MAX_MESSAGE_AGE_MILLI_SECS: u64 = 5 * 60 * 1000;
 const MAX_REPLAY_CACHE_ENTRIES: usize = 10_000;
 
 const ALPN: &[u8] = b"remote-link/v1";
+
+const HPKE_SYNC_DOMAIN_SEPARATION: &str = "sync-hpke/v1";
 
 // const DEVICE_LINK_LOCAL_TOPIC: &str = "com.tilesprivacy.tiles.link";
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
@@ -196,15 +202,22 @@ enum MessageBody {
     SyncStart {
         last_row_counter: Option<i64>,
         auth_token: String,
+        session_id: String,
+        // ephemeral KEM pubkey for the session
+        pub_key: Vec<u8>,
     },
     SyncSendDeltaInfo {
         blob_ticket: String,
         last_row_counter: Option<i64>,
         auth_token: String,
         content_key: Vec<u8>,
+        pub_key: Vec<u8>,
+        encapped_key: Vec<u8>,
+        session_id: String,
     },
     SyncEnd {
         auth_token: String,
+        session_id: String,
     },
     SyncRejected {
         reason: String,
@@ -218,6 +231,8 @@ pub struct SyncAcceptLoopData {
     store: MemStore,
     endpoint: Endpoint,
     db_channel_sender: Sender<SyncOp>,
+    // Map of local ephemeral key-pair of a sync session <sessionId, (secret_key, pub_key) pair>
+    sync_sessions: HashMap<String, (Vec<u8>, Vec<u8>)>,
 }
 
 /// At onces there can be multiple initiator gossip loop processes but only
@@ -459,6 +474,7 @@ async fn handle_sync_events(
     msg_sender: &GossipSender,
     process_type: &GossipProcessType,
 ) -> Result<GossipLoopCode> {
+    let mut sync_helpers = sync_helpers;
     match msg.body {
         MessageBody::SyncStart { .. } => {
             info!("Received sync start event...");
@@ -467,21 +483,27 @@ async fn handle_sync_events(
                 return Ok(GossipLoopCode::Continue);
             }
             let senders: (
-                &tokio::sync::mpsc::Sender<SyncOp>,
-                &tokio::sync::mpsc::Sender<NetworkApiEvent>,
-            ) = (&sync_helpers.db_channel_sender, caller_sender);
-            on_sync_start_event(msg_sender, &sync_helpers, &msg, senders).await
+                tokio::sync::mpsc::Sender<SyncOp>,
+                tokio::sync::mpsc::Sender<NetworkApiEvent>,
+            ) = (
+                sync_helpers.db_channel_sender.clone(),
+                caller_sender.clone(),
+            );
+            on_sync_start_event(msg_sender, &mut sync_helpers, &msg, senders).await
         }
         MessageBody::SyncSendDeltaInfo { .. } => {
             info!("on syncSendDeltaInfo");
 
             let senders: (
-                &tokio::sync::mpsc::Sender<SyncOp>,
-                &tokio::sync::mpsc::Sender<NetworkApiEvent>,
-            ) = (&sync_helpers.db_channel_sender, caller_sender);
-            on_sync_send_delta_info(msg_sender, &sync_helpers, &msg, senders).await
+                tokio::sync::mpsc::Sender<SyncOp>,
+                tokio::sync::mpsc::Sender<NetworkApiEvent>,
+            ) = (
+                sync_helpers.db_channel_sender.clone(),
+                caller_sender.clone(),
+            );
+            on_sync_send_delta_info(msg_sender, &mut sync_helpers, &msg, senders).await
         }
-        MessageBody::SyncEnd { ref auth_token } => {
+        MessageBody::SyncEnd { ref auth_token, .. } => {
             // SyncEnd is received by the initiator
             if matches!(process_type, GossipProcessType::Listener) {
                 log::warn!("Rejected the SyncEnd event on an Listener process");
@@ -605,7 +627,9 @@ pub async fn start_network(
         store,
         endpoint: endpoint.clone(),
         db_channel_sender: db_channel_sender.clone(),
+        sync_sessions: HashMap::new(),
     };
+
     tokio::spawn(process_gossip_network_events(
         gossip_network_receiver,
         gossip_network_sender.clone(),
@@ -798,11 +822,18 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
 
             let db_channel_sender = create_db_channel();
 
+            let sync_session_id: String = Uuid::now_v7().into();
+
+            let session_keypair_tuple = create_kem_pair();
+            let mut sync_sessions = HashMap::new();
+            sync_sessions.insert(sync_session_id.clone(), session_keypair_tuple.clone());
+
             let sync_helpers = SyncAcceptLoopData {
                 user: user.clone(),
                 store: MemStore::new(),
                 endpoint,
                 db_channel_sender,
+                sync_sessions,
             };
             let handle = tokio::spawn(process_gossip_network_events(
                 gossip_network_receiver,
@@ -819,6 +850,8 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
                 MessageBody::SyncStart {
                     last_row_counter: Some(last_chat_counter),
                     auth_token: invocation_token,
+                    session_id: sync_session_id.clone(),
+                    pub_key: session_keypair_tuple.1,
                 },
                 NetworkMessageType::Sync,
                 did.to_string(),
@@ -955,7 +988,7 @@ async fn fetch_encoded_delta_ticket(
 
     sender.send(sync_op_msg).await?;
     let encoded_data_result = recvx.await??;
-    let encrypted_data = encrypt(&encoded_data_result, content_key)?;
+    let encrypted_data = encrypt_by_content_key(&encoded_data_result, content_key)?;
     let tag = store
         .blobs()
         .add_bytes(Into::<Bytes>::into(encrypted_data))
@@ -967,17 +1000,19 @@ async fn fetch_encoded_delta_ticket(
 /// Process the `SyncStart` event. This is processed by the bg network listener
 async fn on_sync_start_event(
     msg_sender: &GossipSender,
-    sync_helpers: &SyncAcceptLoopData,
+    sync_helpers: &mut SyncAcceptLoopData,
     msg: &NetworkMessage,
     senders: (
-        &tokio::sync::mpsc::Sender<SyncOp>,
-        &tokio::sync::mpsc::Sender<NetworkApiEvent>,
+        tokio::sync::mpsc::Sender<SyncOp>,
+        tokio::sync::mpsc::Sender<NetworkApiEvent>,
     ),
 ) -> Result<GossipLoopCode> {
     let (sync_db_channel_sender, _caller_sender) = senders;
     if let MessageBody::SyncStart {
         last_row_counter: lrc,
         auth_token: token,
+        session_id,
+        pub_key,
     } = &msg.body
     {
         if let Err(err) = verify_invocation_token(token, msg).await {
@@ -996,7 +1031,7 @@ async fn on_sync_start_event(
         let content_key = ContentKey::new();
         let ticket = fetch_encoded_delta_ticket(
             &sync_helpers.user.user_id,
-            sync_db_channel_sender,
+            &sync_db_channel_sender,
             lrc.context("lrc failed")?,
             &sync_helpers.store,
             &sync_helpers.endpoint.addr(),
@@ -1004,8 +1039,19 @@ async fn on_sync_start_event(
         )
         .await?;
 
+        let session_keypair_tuple = create_kem_pair();
+        sync_helpers
+            .sync_sessions
+            .insert(session_id.clone(), session_keypair_tuple.clone());
+
+        let (encapped_key, enc_content_key) = encrypt_by_hpke(
+            pub_key.clone(),
+            HPKE_SYNC_DOMAIN_SEPARATION,
+            content_key.to_bytes().clone(),
+            session_id,
+        )?;
         let receiver_last_row_counter =
-            fetch_last_row_counter(&sender_did, sync_db_channel_sender).await?;
+            fetch_last_row_counter(&sender_did, &sync_db_channel_sender).await?;
 
         let common_conn = get_db_conn(&DBTYPE::COMMON)?;
         let invocation_token = create_auth_invocation_token(&msg.from_did, common_conn).await?;
@@ -1016,7 +1062,10 @@ async fn on_sync_start_event(
                 blob_ticket: ticket.to_string(),
                 last_row_counter: Some(receiver_last_row_counter),
                 auth_token: invocation_token,
-                content_key: content_key.to_bytes(),
+                content_key: enc_content_key,
+                encapped_key,
+                pub_key: session_keypair_tuple.1,
+                session_id: session_id.to_string(),
             },
             NetworkMessageType::Sync,
             msg.from_did.to_string(),
@@ -1084,11 +1133,11 @@ async fn handle_sync_rejection_by_listener(
 /// Process `SyncSendDeltaInfo`. Processed by listeners and sender processes
 async fn on_sync_send_delta_info(
     msg_sender: &GossipSender,
-    sync_helpers: &SyncAcceptLoopData,
+    sync_helpers: &mut SyncAcceptLoopData,
     msg: &NetworkMessage,
     senders: (
-        &tokio::sync::mpsc::Sender<SyncOp>,
-        &tokio::sync::mpsc::Sender<NetworkApiEvent>,
+        tokio::sync::mpsc::Sender<SyncOp>,
+        tokio::sync::mpsc::Sender<NetworkApiEvent>,
     ),
 ) -> Result<GossipLoopCode> {
     let (sync_db_channel_sender, _caller_sender) = senders;
@@ -1097,6 +1146,9 @@ async fn on_sync_send_delta_info(
         last_row_counter,
         auth_token,
         content_key,
+        pub_key,
+        encapped_key,
+        session_id,
     } = &msg.body
     {
         if let Err(err) = verify_invocation_token(auth_token, msg).await {
@@ -1142,7 +1194,22 @@ async fn on_sync_send_delta_info(
             .await;
         }
 
-        let decrypted_delta = decrypt(data, &ContentKey::from_bytes(content_key)?)?;
+        let keypair = if let Some(keypair) = sync_helpers.sync_sessions.get(session_id.as_str()) {
+            keypair
+        } else {
+            return Err(anyhow!("Failed to get session keypair"));
+        };
+
+        let content_key_bytes = decrypt_by_hpke(
+            keypair.0.clone(),
+            encapped_key.clone(),
+            content_key.clone(),
+            HPKE_SYNC_DOMAIN_SEPARATION,
+            session_id,
+        )?;
+
+        let decrypted_delta =
+            decrypt_by_content_key(data, &ContentKey::from_bytes(&content_key_bytes)?)?;
         let (sendx, recvx) = oneshot::channel();
         let sync_op_msg = SyncOp::ApplyDelta {
             delta: decrypted_delta,
@@ -1160,13 +1227,21 @@ async fn on_sync_send_delta_info(
             let content_key = ContentKey::new();
             let ticket = fetch_encoded_delta_ticket(
                 &sync_helpers.user.user_id,
-                sync_db_channel_sender,
+                &sync_db_channel_sender,
                 *row_counter,
                 &sync_helpers.store,
                 &sync_helpers.endpoint.addr(),
                 &content_key,
             )
             .await?;
+
+            let (encapped_key, enc_content_key) = encrypt_by_hpke(
+                pub_key.clone(),
+                HPKE_SYNC_DOMAIN_SEPARATION,
+                content_key.to_bytes().clone(),
+                session_id,
+            )?;
+
             let delta_info = NetworkMessage::new(
                 &sync_helpers.user,
                 msg.is_online,
@@ -1174,7 +1249,10 @@ async fn on_sync_send_delta_info(
                     blob_ticket: ticket.to_string(),
                     last_row_counter: None,
                     auth_token: invocation_token,
-                    content_key: content_key.to_bytes(),
+                    content_key: enc_content_key,
+                    pub_key: keypair.1.clone(),
+                    session_id: session_id.to_string(),
+                    encapped_key,
                 },
                 NetworkMessageType::Sync,
                 msg.from_did.clone(),
@@ -1184,11 +1262,14 @@ async fn on_sync_send_delta_info(
             msg_sender.broadcast(delta_info.to_bytes().into()).await?;
             info!("Sent blob ticket {} to {}", ticket, msg.from_did);
         } else {
+            // remove the session data
+            sync_helpers.sync_sessions.remove(session_id);
             let stop_req = NetworkMessage::new(
                 &sync_helpers.user,
                 msg.is_online,
                 MessageBody::SyncEnd {
                     auth_token: invocation_token,
+                    session_id: session_id.to_string(),
                 },
                 NetworkMessageType::Sync,
                 msg.from_did.clone(),
@@ -1400,7 +1481,7 @@ mod tests {
             fetch_last_row_counter, get_did_from_public_key,
         },
     };
-    use crate::utils::crypto::{ContentKey, decrypt, encrypt};
+    use crate::utils::crypto::{ContentKey, decrypt_by_content_key, encrypt_by_content_key};
     use crate::utils::get_unix_time_now;
 
     fn signed_test_message(secret_key: &SecretKey) -> SignedNetworkMessage {
@@ -1622,7 +1703,7 @@ mod tests {
 
         let payload = b"sync delta payload".to_vec();
         let content_key = ContentKey::new();
-        let encrypted_data = encrypt(&payload, &content_key).unwrap();
+        let encrypted_data = encrypt_by_content_key(&payload, &content_key).unwrap();
         let tag = provider_store
             .blobs()
             .add_bytes(encrypted_data.clone())
@@ -1641,7 +1722,7 @@ mod tests {
             .get_bytes(ticket.hash())
             .await
             .unwrap();
-        let downloaded = decrypt(&downloaded, &content_key).unwrap();
+        let downloaded = decrypt_by_content_key(&downloaded, &content_key).unwrap();
         assert_eq!(downloaded, payload.as_slice());
 
         downloader_router.shutdown().await.unwrap();
