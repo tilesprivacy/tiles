@@ -11,8 +11,8 @@ use serde_json::json;
 use crate::{
     core::{
         account::local::{
-            self, Capability, Token, TokenQueryOptions, TokenType, UserQueryOptions, fetch_tokens,
-            fetch_users, get_current_user, update_user,
+            self, Capability, SameDidDelegation, Token, TokenQueryOptions, TokenType,
+            UserQueryOptions, fetch_tokens, fetch_users, get_current_user, update_user,
         },
         storage::db::get_db_conn,
     },
@@ -67,7 +67,7 @@ pub fn authz_router() -> Router<Arc<AppState>> {
             "/v1/tilekit/peers/list-linked-devices",
             post(fetch_linked_devices),
         )
-        .route("/v1/tilekit/peers/revoke", post(revoke_token))
+        .route("/v1/tilekit/peers/revoke", post(revoke_peer))
         .route("/v1/tilekit/peers/update-peer", post(update_peer))
 }
 
@@ -81,7 +81,13 @@ pub async fn create_token(
         create_token_req.capability,
     )
     .await
-    .map_err(|e| AppError::CannotProcess(e.to_string()))?;
+    .map_err(|e| {
+        if e.downcast_ref::<SameDidDelegation>().is_some() {
+            AppError::BadRequest("Audience DID cannot be same as user DID".to_string())
+        } else {
+            AppError::CannotProcess(e.to_string())
+        }
+    })?;
 
     Ok(ApiResponse::success(token))
 }
@@ -154,16 +160,20 @@ pub async fn fetch_linked_devices() -> Result<impl IntoResponse, AppError> {
     Ok(ApiResponse::success(peers))
 }
 
-// Later we will see into UCAN revocation
 #[debug_handler]
-pub async fn revoke_token(
+pub async fn revoke_peer(
     ApiJson(revoke_params): ApiJson<RevokeParams>,
 ) -> Result<impl IntoResponse, AppError> {
     let common_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
 
     let user = get_current_user(&common_db_conn).map_err(|e| AppError::NotFound(e.to_string()))?;
-    local::revoke_token(&revoke_params.peer_did, &user, &common_db_conn)
+    if user.user_id == revoke_params.peer_did {
+        return Err(AppError::BadRequest(
+            "Peer to be revoked can be same as this device".to_string(),
+        ));
+    }
+    local::revoke_peer(&revoke_params.peer_did, &user, &common_db_conn)
         .map_err(|e| AppError::CannotProcess(e.to_string()))?;
 
     Ok(ApiResponse::success(SimpleResponse {

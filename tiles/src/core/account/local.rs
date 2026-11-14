@@ -282,6 +282,28 @@ pub struct UserQueryOptions {
     pub user_ids: Option<Vec<String>>,
 }
 
+#[derive(Debug)]
+pub struct SameDidDelegation();
+
+impl core::error::Error for SameDidDelegation {}
+
+impl std::fmt::Display for SameDidDelegation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Cannot delegate to oneself")
+    }
+}
+
+fn validate_delegation_target(
+    issuer_did: &str,
+    audience_did: &str,
+) -> std::result::Result<(), SameDidDelegation> {
+    if issuer_did == audience_did {
+        Err(SameDidDelegation())
+    } else {
+        Ok(())
+    }
+}
+
 impl TokenQueryOptions {
     pub fn is_empty(&self) -> bool {
         self.issuer_did.is_none() && self.aud_did.is_none() && self.token_type.is_none()
@@ -536,6 +558,7 @@ pub async fn create_token(
 ) -> Result<Token> {
     let db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)?;
     let user = get_current_user(&db_conn)?;
+    validate_delegation_target(&user.user_id, aud_did)?;
     let app_name = get_app_name();
     let signing_key = get_signing_key(&app_name, &user.user_id)
         .map_err(|e| anyhow!("Failed to process the key from keychain: {}", e))?;
@@ -674,14 +697,15 @@ pub fn fetch_token_by_cid(cid: &str, conn: &Connection) -> Result<Option<Token>>
     }
 }
 
-/// Revokes the peer by deleting the related delegations
-pub fn revoke_token(peer_did: &str, user: &User, conn: &Connection) -> Result<()> {
-    let tokens = fetch_linked_tokens(conn, &user.user_id)?;
+/// Revokes the peer by deleting the related delegations and the peer itself
+pub fn revoke_peer(peer_did: &str, user: &User, conn: &Connection) -> Result<()> {
+    let txn = conn.unchecked_transaction()?;
+    let tokens = fetch_linked_tokens(&txn, &user.user_id)?;
 
     let link_token = tokens.iter().find(|t| t.aud_did == peer_did);
 
     if let Some(token) = link_token {
-        if let Err(err) = delete_token_by_cid(conn, &token.cid) {
+        if let Err(err) = delete_token_by_cid(&txn, &token.cid) {
             return Err(anyhow!(
                 "Failed to delete the delegation token from peer due to {:?}",
                 err
@@ -692,12 +716,12 @@ pub fn revoke_token(peer_did: &str, user: &User, conn: &Connection) -> Result<()
     }
 
     // also try to delete the link token this peer delegated to us
-    let tokens = fetch_linked_tokens(conn, peer_did)?;
+    let tokens = fetch_linked_tokens(&txn, peer_did)?;
     let link_token = tokens.iter().find(|t| t.aud_did == user.user_id);
     // We don't error out if below fails. Since its a cleanup process and returning error leaks abstraction of reverse delegation while linking
     // See core::network::mod.rs::initiate_device_linking()
     if let Some(token) = link_token {
-        if let Err(err) = delete_token_by_cid(conn, &token.cid) {
+        if let Err(err) = delete_token_by_cid(&txn, &token.cid) {
             log::error!(
                 "Failed to delete the delegation token from peer due to {:?}",
                 err
@@ -705,8 +729,9 @@ pub fn revoke_token(peer_did: &str, user: &User, conn: &Connection) -> Result<()
         };
     } else {
         log::error!("Delegation token from the peer not found")
-    }
-
+    };
+    delete_user(&txn, peer_did)?;
+    txn.commit()?;
     Ok(())
 }
 
@@ -719,6 +744,14 @@ pub fn delete_token_by_cid(conn: &Connection, cid: &str) -> Result<()> {
     }
 }
 
+fn delete_user(conn: &Connection, did: &str) -> Result<()> {
+    let mut stmt = conn.prepare("DELETE FROM users WHERE user_id= ?1 and account_type = 'peer'")?;
+    match stmt.execute([did]) {
+        Ok(0) => Err(anyhow!("User not found")),
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!(err.to_string())),
+    }
+}
 pub fn fetch_tokens(conn: &Connection, filter: TokenQueryOptions) -> Result<Vec<Token>> {
     let mut final_query: String = String::from("");
     let base_query =
@@ -836,7 +869,7 @@ fn save_token<S: Signature>(
             Err(err) => Err(anyhow!("Err inserting token due to {}", err)),
         }?;
 
-        // We kinda do the unique username check in the query itself, so that we can assign username as None if conflict happens. This is fine as a local user can change this peer's username to whatever they wants ;ater. Usernames are always local and not globally unique unline DIDs
+        // We kinda do the unique username check in the query itself, so that we can assign username as None if conflict happens. This is fine as a local user can change this peer's username to whatever they wants later. Usernames are always local and not globally unique unlike DIDs
         let mut stmt2= txn.prepare("INSERT INTO users (id, user_id, username, active_profile, account_type, root, created_at, updated_at) SELECT ?1, ?2, CASE WHEN ?3 IS NOT NULL AND EXISTS (SELECT 1 FROM users WHERE username = ?3 AND user_id IS NOT ?2) THEN NULL ELSE ?3 END, ?4, ?5, ?6, ?7, ?8 ON CONFLICT(user_id) DO UPDATE SET username = excluded.username, updated_at = excluded.updated_at WHERE excluded.username IS NOT NULL")?;
 
         match stmt2.execute(params![
@@ -1137,7 +1170,14 @@ pub fn update_user(conn: &Connection, update_params: UpdatePeerParams) -> Result
                 Err(anyhow!("User not found"))
             }
         }),
-        Err(err) => Err(anyhow!("Err updating user due to {}", err)),
+        Err(err)
+            if err
+                .to_string()
+                .contains("UNIQUE constraint failed: users.username") =>
+        {
+            Err(anyhow!("Nickname already exists!".to_string()))
+        }
+        Err(err) => Err(anyhow!("Error updating user due to {}", err)),
     }
 }
 
@@ -1231,6 +1271,16 @@ pub mod tests {
         let acc_details = get_root_user_details(&config)?;
         assert!(acc_details.id.contains("did:key"));
         Ok(())
+    }
+
+    #[test]
+    fn create_token_rejects_the_current_user_as_audience() {
+        let user_id = "did:key:z6MkpCurrentUser";
+
+        let error = validate_delegation_target(user_id, user_id)
+            .expect_err("a user must not delegate a token to itself");
+
+        assert_eq!(error.to_string(), "Cannot delegate to oneself");
     }
 
     #[tokio::test]
@@ -1851,7 +1901,18 @@ pub mod tests {
             1
         );
 
-        revoke_token(&added_token.aud_did, &user, &db_conn.common).unwrap();
+        assert!(
+            get_user(&db_conn.common, &added_token.aud_did)
+                .unwrap()
+                .is_some()
+        );
+        revoke_peer(&added_token.aud_did, &user, &db_conn.common).unwrap();
+
+        assert!(
+            get_user(&db_conn.common, &added_token.aud_did)
+                .unwrap()
+                .is_none()
+        );
 
         assert!(
             fetch_linked_tokens(&db_conn.common, &issuer_did)
@@ -1865,7 +1926,7 @@ pub mod tests {
         let db_conn = setup_db_conn_v2();
         let user = create_dummy_user(&db_conn.common, Some("did:plc:missing-issuer".to_owned()));
 
-        let result = revoke_token("did:key:missing-peer", &user, &db_conn.common);
+        let result = revoke_peer("did:key:missing-peer", &user, &db_conn.common);
 
         assert!(result.is_err());
     }
