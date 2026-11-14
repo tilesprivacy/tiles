@@ -6,8 +6,8 @@
 pi = "v0.84.2"
 # latest follows tiles-ui's newest release, a tag like v0.2.0 pins one
 tiles-ui = "latest"
-# the build of llama.cpp v0.8.0. after changing it, run scripts/llama_engines.sh
-llama.cpp = "b11960"
+# the build of llama.cpp v1.0.0. after changing it, run scripts/llama_engines.sh
+llama.cpp = "b12359"
 sqlcipher = "4.10.0"
 
 [dev-tools]
