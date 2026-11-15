@@ -60,6 +60,7 @@ impl ContentKey {
     }
 }
 
+/// Uses the chachapoly1305 `ContentKey` to encrypt the content
 pub fn encrypt_by_content_key(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
     let key = content_key.key.as_slice().into();
     let nonce = content_key.nonce.as_slice().into();
@@ -70,6 +71,7 @@ pub fn encrypt_by_content_key(content: &[u8], content_key: &ContentKey) -> Resul
         .map_err(|_e| anyhow!("Encryption failed for ciphertext"))
 }
 
+/// Uses the chachapoly1305 `ContentKey` to decrypt the content
 pub fn decrypt_by_content_key(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
     let key = Key::from_slice(&content_key.key);
     let cipher = XChaCha20Poly1305::new(key);
@@ -121,11 +123,15 @@ pub fn decrypt_from_base64(encrypted_content: EncryptedBase64Content) -> Result<
     Ok(decrypted_content)
 }
 
+/// Creates a PKI ephermeral pair (secret_key, public_key) for the key encapsulation
 pub fn create_kem_pair() -> (Vec<u8>, Vec<u8>) {
     let (sec_key, pub_key) = Kem::gen_keypair();
     (sec_key.to_bytes().to_vec(), pub_key.to_bytes().to_vec())
 }
 
+/// Ecnrypts the given content via hpke using receiver's public key
+///
+/// Returns a tuple of (encapped key, encrypted_content)
 pub fn encrypt_by_hpke(
     pub_key: Vec<u8>,
     domain: &str,
@@ -141,6 +147,9 @@ pub fn encrypt_by_hpke(
     Ok((encapped_key.to_bytes().to_vec(), encrypted_content))
 }
 
+/// Decrypt the content using receiver's secret key and encapsulated key
+///
+/// Returns the decrypted content
 pub fn decrypt_by_hpke(
     secret_key: Vec<u8>,
     encapped_key: Vec<u8>,

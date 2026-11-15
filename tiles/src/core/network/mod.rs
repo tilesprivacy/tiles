@@ -64,8 +64,8 @@ const MAX_REPLAY_CACHE_ENTRIES: usize = 10_000;
 
 const ALPN: &[u8] = b"remote-link/v1";
 
+// Used as the `info_str` for the hpke encryption
 const HPKE_SYNC_DOMAIN_SEPARATION: &str = "sync-hpke/v1";
-
 // const DEVICE_LINK_LOCAL_TOPIC: &str = "com.tilesprivacy.tiles.link";
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 struct NetworkMessage {
@@ -202,16 +202,20 @@ enum MessageBody {
     SyncStart {
         last_row_counter: Option<i64>,
         auth_token: String,
+        // Unique sessionId to track a sync session
         session_id: String,
-        // ephemeral KEM pubkey for the session
+        // ephemeral KEM pubkey of the sender for the sync session
         pub_key: Vec<u8>,
     },
     SyncSendDeltaInfo {
         blob_ticket: String,
         last_row_counter: Option<i64>,
         auth_token: String,
+        // The encrypted symmetric key that encrypts the actual blob locally
         content_key: Vec<u8>,
+        // ephemeral KEM pubkey of the sender for the sync session
         pub_key: Vec<u8>,
+        // hpke encapsulation key, by which we encrypted the content_key
         encapped_key: Vec<u8>,
         session_id: String,
     },
@@ -222,10 +226,10 @@ enum MessageBody {
     SyncRejected {
         reason: String,
         auth_token: String,
+        session_id: String,
     },
 }
 
-#[derive(Clone)]
 pub struct SyncAcceptLoopData {
     user: User,
     store: MemStore,
@@ -254,6 +258,32 @@ enum DeviceLinkSelector {
     Error(String),
     Joined(GossipTopic),
 }
+
+/// Reports an incompatible wire message to an initiator. The long-lived
+/// listener stays alive so it can continue handling messages from other peers.
+async fn should_exit_on_decode_failure(
+    err: &anyhow::Error,
+    process_type: &GossipProcessType,
+    caller_sender: &tokio::sync::mpsc::Sender<NetworkApiEvent>,
+) -> Result<bool> {
+    log::error!("Failed to decode msg due to {:?}", err);
+    log::error!(
+        "Peers are communicating via incompatible protocols, both should be same version, not proceeding",
+    );
+
+    if matches!(process_type, GossipProcessType::Initiator) {
+        caller_sender
+            .send(NetworkApiEvent::Error(
+                "Peers are communicating via incompatible protocols, both should be same version"
+                    .to_string(),
+            ))
+            .await?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// Handles the iroh gossip events
 async fn process_gossip_network_events(
     mut msg_receiver: GossipReceiver,
@@ -264,7 +294,7 @@ async fn process_gossip_network_events(
     process_type: GossipProcessType,
 ) -> Result<()> {
     let mut replay_cache = ReplayCache::new();
-
+    let mut sync_helpers = sync_helpers;
     while let Some(event) = msg_receiver.try_next().await? {
         info!(
             "Gossip Loop: Received by {:?}:, event {:?}",
@@ -274,7 +304,9 @@ async fn process_gossip_network_events(
             let signed_msg = match SignedNetworkMessage::from_bytes(&msg.content) {
                 Ok(msg) => msg,
                 Err(err) => {
-                    log::error!("Failed to decode msg due to {:?}", err);
+                    if should_exit_on_decode_failure(&err, &process_type, &caller_sender).await? {
+                        return Ok(());
+                    }
                     continue;
                 }
             };
@@ -347,7 +379,7 @@ async fn process_gossip_network_events(
                     }
                 }
                 NetworkMessageType::Sync => {
-                    if let Some(sync_helpers) = sync_helpers.clone() {
+                    if let Some(sync_helpers) = sync_helpers.as_mut() {
                         match handle_sync_events(
                             msg,
                             sync_helpers,
@@ -469,12 +501,11 @@ async fn handle_device_link_events(
 
 async fn handle_sync_events(
     msg: NetworkMessage,
-    sync_helpers: SyncAcceptLoopData,
+    sync_helpers: &mut SyncAcceptLoopData,
     caller_sender: &tokio::sync::mpsc::Sender<NetworkApiEvent>,
     msg_sender: &GossipSender,
     process_type: &GossipProcessType,
 ) -> Result<GossipLoopCode> {
-    let mut sync_helpers = sync_helpers;
     match msg.body {
         MessageBody::SyncStart { .. } => {
             info!("Received sync start event...");
@@ -489,7 +520,7 @@ async fn handle_sync_events(
                 sync_helpers.db_channel_sender.clone(),
                 caller_sender.clone(),
             );
-            on_sync_start_event(msg_sender, &mut sync_helpers, &msg, senders).await
+            on_sync_start_event(msg_sender, sync_helpers, &msg, senders).await
         }
         MessageBody::SyncSendDeltaInfo { .. } => {
             info!("on syncSendDeltaInfo");
@@ -501,7 +532,7 @@ async fn handle_sync_events(
                 sync_helpers.db_channel_sender.clone(),
                 caller_sender.clone(),
             );
-            on_sync_send_delta_info(msg_sender, &mut sync_helpers, &msg, senders).await
+            on_sync_send_delta_info(msg_sender, sync_helpers, &msg, senders).await
         }
         MessageBody::SyncEnd { ref auth_token, .. } => {
             // SyncEnd is received by the initiator
@@ -522,6 +553,7 @@ async fn handle_sync_events(
         MessageBody::SyncRejected {
             ref reason,
             ref auth_token,
+            ..
         } => {
             log::warn!("On sync rejected");
             if matches!(process_type, GossipProcessType::Listener) {
@@ -614,7 +646,6 @@ pub async fn start_network(
     let network_topic = format!("tiles:{}", did);
     let network_topic_id = create_topic_id(&network_topic);
     let (gossip, router_recv, store) = create_tiles_gossip_endpoint(&endpoint).await?;
-
     let (gossip_network_sender, gossip_network_receiver) =
         gossip.subscribe(network_topic_id, vec![]).await?.split();
 
@@ -624,7 +655,7 @@ pub async fn start_network(
 
     let sync_helpers = SyncAcceptLoopData {
         user: user.clone(),
-        store,
+        store: store.clone(),
         endpoint: endpoint.clone(),
         db_channel_sender: db_channel_sender.clone(),
         sync_sessions: HashMap::new(),
@@ -644,6 +675,7 @@ pub async fn start_network(
         .send(NetworkApiEvent::NetworkStarted((
             gossip,
             main_network_sender.clone(),
+            store.clone(),
         )))
         .await?;
 
@@ -774,6 +806,7 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
             {
                 Ok(Some(NetworkApiEvent::DeviceLinkFailed(reason))) => Err(anyhow!(reason)),
                 Ok(Some(NetworkApiEvent::DeviceLinkSuccess)) => Ok(()),
+                Ok(Some(NetworkApiEvent::Error(reason))) => Err(anyhow!(reason)),
                 Ok(Some(_)) => Err(anyhow!("Invalid event")),
                 Ok(None) => Err(anyhow!("Network process closed unexpectedly")),
                 Err(_err) => Err(anyhow!("Timed out waiting for linking response")),
@@ -785,7 +818,12 @@ pub async fn initiate_device_linking(link_token: &str, gossip: Gossip) -> Result
 }
 
 /// Initiate sync with a peer
-pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
+pub async fn sync(
+    did: &str,
+    gossip: Gossip,
+    endpoint: Endpoint,
+    blob_store: MemStore,
+) -> Result<()> {
     let common_conn = get_db_conn(&DBTYPE::COMMON)?;
     let user = get_current_user(&common_conn)?;
     let device_link_topic = format!("tiles:{}", did);
@@ -830,7 +868,7 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
 
             let sync_helpers = SyncAcceptLoopData {
                 user: user.clone(),
-                store: MemStore::new(),
+                store: blob_store,
                 endpoint,
                 db_channel_sender,
                 sync_sessions,
@@ -872,6 +910,7 @@ pub async fn sync(did: &str, gossip: Gossip, endpoint: Endpoint) -> Result<()> {
             {
                 Ok(Some(NetworkApiEvent::SyncFailed(reason))) => Err(anyhow!(reason)),
                 Ok(Some(NetworkApiEvent::SyncSuccess)) => Ok(()),
+                Ok(Some(NetworkApiEvent::Error(reason))) => Err(anyhow!(reason)),
                 Ok(Some(_)) => Err(anyhow!("Invalid event")),
                 Ok(None) => Err(anyhow!("Network process closed unexpectedly")),
                 Err(_err) => Err(anyhow!("Timed out waiting for syncing response")),
@@ -989,11 +1028,13 @@ async fn fetch_encoded_delta_ticket(
     sender.send(sync_op_msg).await?;
     let encoded_data_result = recvx.await??;
     let encrypted_data = encrypt_by_content_key(&encoded_data_result, content_key)?;
+    info!("Encrypted the blob by the content_key");
     let tag = store
         .blobs()
         .add_bytes(Into::<Bytes>::into(encrypted_data))
         .await?;
 
+    info!("blob tag {}", tag.hash);
     Ok(BlobTicket::new(addr.clone(), tag.hash, tag.format))
 }
 
@@ -1028,28 +1069,24 @@ async fn on_sync_start_event(
         }
 
         let sender_did = msg.from_did.clone();
-        let content_key = ContentKey::new();
-        let ticket = fetch_encoded_delta_ticket(
-            &sync_helpers.user.user_id,
-            &sync_db_channel_sender,
-            lrc.context("lrc failed")?,
-            &sync_helpers.store,
-            &sync_helpers.endpoint.addr(),
-            &content_key,
-        )
-        .await?;
 
+        // On sync_start the listener creates PKI sync session pair and
+        // adds it to map for tracking its private key to decrypt
+        // the data from initiator
         let session_keypair_tuple = create_kem_pair();
         sync_helpers
             .sync_sessions
             .insert(session_id.clone(), session_keypair_tuple.clone());
 
-        let (encapped_key, enc_content_key) = encrypt_by_hpke(
+        let (encapped_key, enc_content_key, blob_ticket) = encrypt_blob(
+            sync_helpers,
+            lrc.context("lrc failed")?,
+            &sync_db_channel_sender,
             pub_key.clone(),
-            HPKE_SYNC_DOMAIN_SEPARATION,
-            content_key.to_bytes().clone(),
             session_id,
-        )?;
+        )
+        .await?;
+        info!("Encrypted the content key from hpke");
         let receiver_last_row_counter =
             fetch_last_row_counter(&sender_did, &sync_db_channel_sender).await?;
 
@@ -1059,7 +1096,7 @@ async fn on_sync_start_event(
             &sync_helpers.user,
             msg.is_online,
             MessageBody::SyncSendDeltaInfo {
-                blob_ticket: ticket.to_string(),
+                blob_ticket: blob_ticket.to_string(),
                 last_row_counter: Some(receiver_last_row_counter),
                 auth_token: invocation_token,
                 content_key: enc_content_key,
@@ -1072,11 +1109,38 @@ async fn on_sync_start_event(
         );
         let delta_info = SignedNetworkMessage::sign(delta_info)?;
         msg_sender.broadcast(delta_info.to_bytes().into()).await?;
-        info!("Sent blob ticket {} to {}", ticket, sender_did);
+        info!("Sent blob ticket {} to {}", blob_ticket, sender_did);
     }
     Ok(GossipLoopCode::Continue)
 }
 
+async fn encrypt_blob(
+    sync_helpers: &SyncAcceptLoopData,
+    lrc: i64,
+    db_channel_sender: &tokio::sync::mpsc::Sender<SyncOp>,
+    pub_key: Vec<u8>,
+    session_id: &str,
+) -> Result<(Vec<u8>, Vec<u8>, BlobTicket)> {
+    let content_key = ContentKey::new();
+    let ticket = fetch_encoded_delta_ticket(
+        &sync_helpers.user.user_id,
+        db_channel_sender,
+        lrc,
+        &sync_helpers.store,
+        &sync_helpers.endpoint.addr(),
+        &content_key,
+    )
+    .await?;
+
+    let (encapped, enc_content) = encrypt_by_hpke(
+        pub_key,
+        HPKE_SYNC_DOMAIN_SEPARATION,
+        content_key.to_bytes().clone(),
+        session_id,
+    )?;
+
+    Ok((encapped, enc_content, ticket))
+}
 async fn handle_device_link_rejection_by_listener(
     err: &str,
     user: &User,
@@ -1102,6 +1166,16 @@ async fn handle_device_link_rejection_by_listener(
     Ok(GossipLoopCode::Continue)
 }
 
+fn get_sync_session_id(msg: &NetworkMessage) -> Option<String> {
+    match msg.body {
+        MessageBody::SyncStart { ref session_id, .. } => Some(session_id.clone()),
+        MessageBody::SyncSendDeltaInfo { ref session_id, .. } => Some(session_id.clone()),
+        MessageBody::SyncRejected { ref session_id, .. } => Some(session_id.clone()),
+        MessageBody::SyncEnd { ref session_id, .. } => Some(session_id.clone()),
+        _ => None,
+    }
+}
+
 async fn handle_sync_rejection_by_listener(
     err: &str,
     user: &User,
@@ -1112,12 +1186,16 @@ async fn handle_sync_rejection_by_listener(
     log::error!("{}", err);
     let common_conn = get_db_conn(&DBTYPE::COMMON)?;
     let invocation_token = create_auth_invocation_token(&msg.from_did, common_conn).await?;
+
+    let session_id =
+        get_sync_session_id(msg).ok_or_else(|| anyhow!("Failed to get sync session_id"))?;
     let sync_reject_request = NetworkMessage::new(
         user,
         msg.is_online,
         MessageBody::SyncRejected {
             reason: err.to_string(),
             auth_token: invocation_token,
+            session_id,
         },
         NetworkMessageType::Sync,
         msg.from_did.clone(),
@@ -1165,6 +1243,7 @@ async fn on_sync_send_delta_info(
         }
         let ticket: BlobTicket = blob_ticket.parse()?;
         let downloader = &sync_helpers.store.downloader(&sync_helpers.endpoint);
+        info!("Downloading from {}", ticket.addr().id);
         downloader
             .download(ticket.hash(), Some(ticket.addr().id))
             .await?;
@@ -1208,8 +1287,11 @@ async fn on_sync_send_delta_info(
             session_id,
         )?;
 
+        info!("Decrypted the content key");
+
         let decrypted_delta =
             decrypt_by_content_key(data, &ContentKey::from_bytes(&content_key_bytes)?)?;
+        info!("Decrypted the blob with the content key");
         let (sendx, recvx) = oneshot::channel();
         let sync_op_msg = SyncOp::ApplyDelta {
             delta: decrypted_delta,
@@ -1224,29 +1306,21 @@ async fn on_sync_send_delta_info(
         // last_row_counter None means its end of sync relay
         if let Some(row_counter) = last_row_counter {
             // This block will be run by the initiator side
-            let content_key = ContentKey::new();
-            let ticket = fetch_encoded_delta_ticket(
-                &sync_helpers.user.user_id,
-                &sync_db_channel_sender,
+
+            let (encapped_key, enc_content_key, blob_ticket) = encrypt_blob(
+                sync_helpers,
                 *row_counter,
-                &sync_helpers.store,
-                &sync_helpers.endpoint.addr(),
-                &content_key,
+                &sync_db_channel_sender,
+                pub_key.clone(),
+                session_id,
             )
             .await?;
-
-            let (encapped_key, enc_content_key) = encrypt_by_hpke(
-                pub_key.clone(),
-                HPKE_SYNC_DOMAIN_SEPARATION,
-                content_key.to_bytes().clone(),
-                session_id,
-            )?;
-
+            info!("Encrypted the content key from hpke");
             let delta_info = NetworkMessage::new(
                 &sync_helpers.user,
                 msg.is_online,
                 MessageBody::SyncSendDeltaInfo {
-                    blob_ticket: ticket.to_string(),
+                    blob_ticket: blob_ticket.to_string(),
                     last_row_counter: None,
                     auth_token: invocation_token,
                     content_key: enc_content_key,
@@ -1262,7 +1336,7 @@ async fn on_sync_send_delta_info(
             msg_sender.broadcast(delta_info.to_bytes().into()).await?;
             info!("Sent blob ticket {} to {}", ticket, msg.from_did);
         } else {
-            // remove the session data
+            // removing the sync session data
             sync_helpers.sync_sessions.remove(session_id);
             let stop_req = NetworkMessage::new(
                 &sync_helpers.user,
@@ -1481,6 +1555,7 @@ mod tests {
             fetch_last_row_counter, get_did_from_public_key,
         },
     };
+    use crate::daemon::net::NetworkApiEvent;
     use crate::utils::crypto::{ContentKey, decrypt_by_content_key, encrypt_by_content_key};
     use crate::utils::get_unix_time_now;
 
@@ -1567,6 +1642,44 @@ mod tests {
 
         assert!(cache.accept("did:key:sender-a", nonce, 100));
         assert!(cache.accept("did:key:sender-b", nonce, 100));
+    }
+
+    #[tokio::test]
+    async fn decode_failure_reports_error_and_stops_initiator() {
+        let decode_error = SignedNetworkMessage::from_bytes(&[0xff]).unwrap_err();
+        let (caller_sender, mut caller_receiver) = mpsc::channel(1);
+
+        let should_stop = super::should_exit_on_decode_failure(
+            &decode_error,
+            &super::GossipProcessType::Initiator,
+            &caller_sender,
+        )
+        .await
+        .unwrap();
+
+        assert!(should_stop);
+        assert!(matches!(
+            caller_receiver.recv().await,
+            Some(NetworkApiEvent::Error(reason))
+                if reason == "Peers are communicating via incompatible protocols, both should be same version"
+        ));
+    }
+
+    #[tokio::test]
+    async fn decode_failure_does_not_stop_listener_or_report_error() {
+        let decode_error = SignedNetworkMessage::from_bytes(&[0xff]).unwrap_err();
+        let (caller_sender, mut caller_receiver) = mpsc::channel(1);
+
+        let should_stop = super::should_exit_on_decode_failure(
+            &decode_error,
+            &super::GossipProcessType::Listener,
+            &caller_sender,
+        )
+        .await
+        .unwrap();
+
+        assert!(!should_stop);
+        assert!(caller_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
