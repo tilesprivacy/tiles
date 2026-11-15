@@ -259,31 +259,6 @@ enum DeviceLinkSelector {
     Joined(GossipTopic),
 }
 
-/// Reports an incompatible wire message to an initiator. The long-lived
-/// listener stays alive so it can continue handling messages from other peers.
-async fn should_exit_on_decode_failure(
-    err: &anyhow::Error,
-    process_type: &GossipProcessType,
-    caller_sender: &tokio::sync::mpsc::Sender<NetworkApiEvent>,
-) -> Result<bool> {
-    log::error!("Failed to decode msg due to {:?}", err);
-    log::error!(
-        "Peers are communicating via incompatible protocols, both should be same version, not proceeding",
-    );
-
-    if matches!(process_type, GossipProcessType::Initiator) {
-        caller_sender
-            .send(NetworkApiEvent::Error(
-                "Peers are communicating via incompatible protocols, both should be same version"
-                    .to_string(),
-            ))
-            .await?;
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
 /// Handles the iroh gossip events
 async fn process_gossip_network_events(
     mut msg_receiver: GossipReceiver,
@@ -304,9 +279,10 @@ async fn process_gossip_network_events(
             let signed_msg = match SignedNetworkMessage::from_bytes(&msg.content) {
                 Ok(msg) => msg,
                 Err(err) => {
-                    if should_exit_on_decode_failure(&err, &process_type, &caller_sender).await? {
-                        return Ok(());
-                    }
+                    log::error!(
+                        "Failed to decode msg due to {:?}. This could be due to incompatible protocols. Make sure both peers are same version",
+                        err
+                    );
                     continue;
                 }
             };
@@ -534,7 +510,10 @@ async fn handle_sync_events(
             );
             on_sync_send_delta_info(msg_sender, sync_helpers, &msg, senders).await
         }
-        MessageBody::SyncEnd { ref auth_token, .. } => {
+        MessageBody::SyncEnd {
+            ref auth_token,
+            ref session_id,
+        } => {
             // SyncEnd is received by the initiator
             if matches!(process_type, GossipProcessType::Listener) {
                 log::warn!("Rejected the SyncEnd event on an Listener process");
@@ -543,6 +522,9 @@ async fn handle_sync_events(
 
             if let Err(err) = verify_invocation_token(auth_token, &msg).await {
                 log::warn!("Sync end command failed due to {}", err);
+                Ok(GossipLoopCode::Continue)
+            } else if !sync_helpers.sync_sessions.contains_key(session_id) {
+                log::warn!("Wrong session, ignoring");
                 Ok(GossipLoopCode::Continue)
             } else {
                 log::info!("Sync completed..., exiting..");
@@ -553,7 +535,7 @@ async fn handle_sync_events(
         MessageBody::SyncRejected {
             ref reason,
             ref auth_token,
-            ..
+            ref session_id,
         } => {
             log::warn!("On sync rejected");
             if matches!(process_type, GossipProcessType::Listener) {
@@ -563,6 +545,9 @@ async fn handle_sync_events(
 
             if let Err(err) = verify_invocation_token(auth_token, &msg).await {
                 log::warn!("Sync rejected command failed due to {}", err);
+                Ok(GossipLoopCode::Continue)
+            } else if !sync_helpers.sync_sessions.contains_key(session_id) {
+                log::warn!("Wrong session, ignoring");
                 Ok(GossipLoopCode::Continue)
             } else {
                 caller_sender
@@ -1555,7 +1540,6 @@ mod tests {
             fetch_last_row_counter, get_did_from_public_key,
         },
     };
-    use crate::daemon::net::NetworkApiEvent;
     use crate::utils::crypto::{ContentKey, decrypt_by_content_key, encrypt_by_content_key};
     use crate::utils::get_unix_time_now;
 
@@ -1642,44 +1626,6 @@ mod tests {
 
         assert!(cache.accept("did:key:sender-a", nonce, 100));
         assert!(cache.accept("did:key:sender-b", nonce, 100));
-    }
-
-    #[tokio::test]
-    async fn decode_failure_reports_error_and_stops_initiator() {
-        let decode_error = SignedNetworkMessage::from_bytes(&[0xff]).unwrap_err();
-        let (caller_sender, mut caller_receiver) = mpsc::channel(1);
-
-        let should_stop = super::should_exit_on_decode_failure(
-            &decode_error,
-            &super::GossipProcessType::Initiator,
-            &caller_sender,
-        )
-        .await
-        .unwrap();
-
-        assert!(should_stop);
-        assert!(matches!(
-            caller_receiver.recv().await,
-            Some(NetworkApiEvent::Error(reason))
-                if reason == "Peers are communicating via incompatible protocols, both should be same version"
-        ));
-    }
-
-    #[tokio::test]
-    async fn decode_failure_does_not_stop_listener_or_report_error() {
-        let decode_error = SignedNetworkMessage::from_bytes(&[0xff]).unwrap_err();
-        let (caller_sender, mut caller_receiver) = mpsc::channel(1);
-
-        let should_stop = super::should_exit_on_decode_failure(
-            &decode_error,
-            &super::GossipProcessType::Listener,
-            &caller_sender,
-        )
-        .await
-        .unwrap();
-
-        assert!(!should_stop);
-        assert!(caller_receiver.try_recv().is_err());
     }
 
     #[tokio::test]
