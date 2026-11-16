@@ -1,6 +1,6 @@
 [package]
 name = "tiles"
-version = "0.5.1"
+version = "0.5.2-rc.1"
 edition = "2024"
 
 [dependencies]
@@ -29,7 +29,7 @@ iroh-gossip = "0.101.0"
 postcard = "1.1.3"
 data-encoding = "2.10.0"
 sha2 = "0.10.9"
-iroh-blobs = "0.103.0"
+iroh-blobs = "0.104.1"
 log = "0.4.29"
 env_logger = "0.11.10"
 atrium-oauth = "0.1.7"
@@ -52,7 +52,7 @@ tower-http = {version = "0.6.11", features = ["cors", "fs", "set-header"]}
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 async-stream = "0.3.6"
-
+hpke = "0.15.1"
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["fs", "user", "process", "signal"] }
 

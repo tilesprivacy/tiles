@@ -1,6 +1,7 @@
 //! Tilekit apis related to networking
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::core::account::local::{UserQueryOptions, fetch_users, get_current_user};
 use crate::core::network::{self as core_network, create_endpoint};
@@ -13,19 +14,21 @@ use anyhow::{Context, Result, anyhow};
 use axum::{Router, extract::State, response::IntoResponse, routing::post};
 use axum_macros::debug_handler;
 use iroh::Endpoint;
+use iroh_blobs::store::mem::MemStore;
 use iroh_gossip::Gossip;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_rusqlite::rusqlite::Connection;
 
-pub const API_TIMEOUT: u16 = 60;
+pub const API_TIMEOUT: u16 = 30;
 #[derive(Debug, Clone)]
 pub struct NetworkState {
     pub is_endpoint_running: bool,
     pub main_network_sender: tokio::sync::mpsc::Sender<NetworkApiEvent>,
     pub endpoint: Endpoint,
     pub gossip: Gossip,
+    pub blob_mem_store: MemStore,
 }
 
 /// Events emitted as part of other tile's processes communicating with the main network
@@ -33,7 +36,7 @@ pub struct NetworkState {
 /// For ex: A tilekit api communicating with network to stop it
 #[derive(Debug)]
 pub enum NetworkApiEvent {
-    NetworkStarted((Gossip, Sender<NetworkApiEvent>)),
+    NetworkStarted((Gossip, Sender<NetworkApiEvent>, MemStore)),
     // command event to stop the network
     StopNetwork,
     // confirmation event after stopping a network
@@ -44,6 +47,7 @@ pub enum NetworkApiEvent {
     DeviceLinkSuccess,
     SyncFailed(String),
     SyncSuccess,
+    Error(String),
     Timeout,
 }
 
@@ -101,37 +105,42 @@ async fn do_start_network(
 
     let endpoint_clone = endpoint.clone();
 
-    tokio::spawn(async move {
-        core_network::start_network(user, endpoint, api_resp_sendx.clone()).await?;
-        anyhow::Result::<()>::Ok(())
+    let handle = tokio::spawn(async move {
+        core_network::start_network(user, endpoint, api_resp_sendx.clone()).await
     });
 
     // waiting for the confrimation from the above process that network has
     // been started
-    if let Some(net_event) = api_resp_recvx.recv().await {
-        match net_event {
-            NetworkApiEvent::NetworkStarted((gossip, main_network_sender)) => {
-                *network_state = Some(NetworkState {
-                    is_endpoint_running: true,
-                    main_network_sender,
-                    endpoint: endpoint_clone.clone(),
-                    gossip,
-                });
+    match tokio::time::timeout(
+        Duration::from_secs(API_TIMEOUT as u64),
+        api_resp_recvx.recv(),
+    )
+    .await
+    {
+        Ok(Some(NetworkApiEvent::NetworkStarted((gossip, main_network_sender, mem_store)))) => {
+            *network_state = Some(NetworkState {
+                is_endpoint_running: true,
+                main_network_sender,
+                endpoint: endpoint_clone.clone(),
+                gossip,
+                blob_mem_store: mem_store,
+            });
 
-                Ok(ApiResponse::success(SimpleResponse {
-                    message: "Started Tiles Network successfully".to_string(),
-                }))
-            }
-            //TODO: These shld be AppError type
-            _ => Err(AppError::CannotProcess(
+            Ok(ApiResponse::success(SimpleResponse {
+                message: "Started Tiles Network successfully".to_string(),
+            }))
+        }
+        Ok(Some(_) | None) => {
+            handle.abort();
+            Err(AppError::CannotProcess(
                 "Failed to start network due to received wrong event on creating network"
                     .to_string(),
-            )),
+            ))
         }
-    } else {
-        Err(AppError::InternalServerError(
-            "Failed to start network due to received wrong event on creating network".to_string(),
-        ))
+        Err(_err) => {
+            handle.abort();
+            Err(AppError::RequestTimeout)
+        }
     }
 }
 
@@ -219,13 +228,20 @@ pub async fn sync_with_device(
     let net_objs = {
         let network_state = state.network_state.read().await;
 
-        network_state
-            .as_ref()
-            .map(|net_state| (net_state.endpoint.clone(), net_state.gossip.clone()))
+        network_state.as_ref().map(|net_state| {
+            (
+                net_state.endpoint.clone(),
+                net_state.gossip.clone(),
+                net_state.blob_mem_store.clone(),
+            )
+        })
     };
 
-    if let Some((endpoint, gossip)) = net_objs {
-        let handle = tokio::spawn(async move { core_network::sync(&did, gossip, endpoint).await });
+    if let Some((endpoint, gossip, blob_store)) = net_objs {
+        let handle =
+            tokio::spawn(
+                async move { core_network::sync(&did, gossip, endpoint, blob_store).await },
+            );
 
         match handle
             .await
