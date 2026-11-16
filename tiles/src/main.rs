@@ -75,7 +75,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    uninstall Uninstall Tiles from this machine\n",
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
-    "    config    Change model settings like the context size\n",
+    "    config    Change model settings\n",
     "    daemon    Configure daemon behavior\n",
     "    service   Run Tiles in the background from login\n",
     "    network   Configure Tiles network\n\n",
