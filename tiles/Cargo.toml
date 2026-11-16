@@ -22,7 +22,7 @@ tokio-rusqlite = { version = "0.8.0", features = ["bundled-sqlcipher-vendored-op
 rusqlite_migration = "2.4.1"
 uuid = {version = "1.21.0", features = ["v7"]}
 axum = "0.8.8"
-iroh = {version = "1.0.0"}
+iroh = {version = "1.2.0"}
 iroh-tickets = "1.0.0"
 axum-macros = "0.5.0"
 iroh-gossip = "0.101.0"
@@ -38,10 +38,17 @@ hickory-resolver = "0.26.1"
 atrium-common = "0.1.4"
 atrium-api = "0.25.8"
 ctrlc = "3.5.2"
-dialog-ucan = { git = "https://github.com/dialog-db/dialog-db", tag = "tonk-2026-09-25.2", package = "dialog-ucan-core"}
-dialog-credentials = { git = "https://github.com/dialog-db/dialog-db", tag = "tonk-2026-09-25.2", package = "dialog-credentials"}
 chacha20poly1305 = { version = "0.10" }
-dialog-varsig= { git = "https://github.com/dialog-db/dialog-db", tag = "tonk-2026-09-25.2", package = "dialog-varsig"}
+dialog-ucan = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0", package = "dialog-ucan-core"}
+dialog-credentials = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0", package = "dialog-credentials"}
+dialog-varsig= { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0", package = "dialog-varsig"}
+dialog-corpus = { git = "https://github.com/dialog-db/dialog-db.git", tag = "v0.4.0"}
+dialog-query= { git = "https://github.com/dialog-db/dialog-db.git", tag = "v0.4.0"}
+dialog-effects= { git = "https://github.com/dialog-db/dialog-db.git", tag = "v0.4.0"}
+dialog-identity= { git = "https://github.com/dialog-db/dialog-db.git", tag = "v0.4.0"}
+dialog-peer= { git = "https://github.com/dialog-db/dialog-db.git", tag = "v0.4.0"}
+dialog-repository= { git = "https://github.com/dialog-db/dialog-db.git", tag = "v0.4.0"}
+dialog-storage= { git = "https://github.com/dialog-db/dialog-db.git", tag = "v0.4.0"}
 serde_ipld_dagcbor = "0.6.4"
 cid = "0.11.3"
 keyring-core = "1.0.0"

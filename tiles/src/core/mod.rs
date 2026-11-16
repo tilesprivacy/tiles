@@ -21,6 +21,7 @@ pub mod network;
 pub mod plugin;
 pub mod server;
 pub mod service;
+pub mod session;
 pub mod storage;
 // Entrypoint of the core
 pub fn init() -> Result<Dbconn> {
