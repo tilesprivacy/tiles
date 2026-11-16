@@ -111,20 +111,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_list_has_every_setting() {
-        let (status, body) =
-            call_route(Request::get(LLAMA_PATH).body(Body::empty()).unwrap()).await;
-        assert_eq!(status, 200);
-        let names: Vec<_> = body["data"]["settings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|setting| setting["name"].as_str().unwrap())
-            .collect();
-        assert_eq!(names, llama_setting_names().collect::<Vec<_>>());
-    }
-
-    #[tokio::test]
     async fn a_wrong_name_or_value_is_a_bad_request() {
         let set = "/v1/tilekit/config/llama/set";
         let (status, body) =

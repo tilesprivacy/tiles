@@ -864,6 +864,7 @@ pub fn llama_setting_names() -> impl Iterator<Item = &'static str> {
 pub fn update_llama_settings(
     changes: &[(String, Option<serde_json::Value>)],
 ) -> Result<Vec<LlamaSetting>> {
+    let changes = parse_setting_changes(changes)?;
     let mut root_config = get_or_create_root_config()?;
     let current = root_config.llama.take().unwrap_or_default();
     let config = apply_setting_changes(&current, changes)?.with_defaults();
@@ -899,9 +900,28 @@ fn llama_settings_from_config(config: &LlamaConfig) -> Vec<LlamaSetting> {
         .collect()
 }
 
+fn parse_setting_changes(
+    changes: &[(String, Option<serde_json::Value>)],
+) -> Result<Vec<(&'static str, serde_json::Value)>, InvalidSetting> {
+    changes
+        .iter()
+        .map(|(name, value)| {
+            let definition = LLAMA_SETTINGS
+                .iter()
+                .find(|definition| definition.name == name)
+                .ok_or_else(|| InvalidSetting(format!("No setting named {name}")))?;
+            let value = match value {
+                Some(value) => parse_setting_value(definition, value)?,
+                None => serde_json::Value::Null,
+            };
+            Ok((definition.name, value))
+        })
+        .collect()
+}
+
 fn apply_setting_changes(
     config: &LlamaConfig,
-    changes: &[(String, Option<serde_json::Value>)],
+    changes: Vec<(&'static str, serde_json::Value)>,
 ) -> Result<LlamaConfig, InvalidSetting> {
     let invalid = |err: serde_json::Error| InvalidSetting(err.to_string());
     let serde_json::Value::Object(mut fields) = serde_json::to_value(config).map_err(invalid)?
@@ -911,15 +931,7 @@ fn apply_setting_changes(
         ));
     };
     for (name, value) in changes {
-        let definition = LLAMA_SETTINGS
-            .iter()
-            .find(|definition| definition.name == name)
-            .ok_or_else(|| InvalidSetting(format!("No setting named {name}")))?;
-        let value = match value {
-            Some(value) => parse_setting_value(definition, value)?,
-            None => serde_json::Value::Null,
-        };
-        fields.insert(name.clone(), value);
+        fields.insert(name.to_owned(), value);
     }
     serde_json::from_value(serde_json::Value::Object(fields)).map_err(invalid)
 }
@@ -1051,7 +1063,8 @@ mod tests {
             ("mtp".to_owned(), Some(json!(true))),
             ("load_mode".to_owned(), Some(json!("mmap+mlock"))),
         ];
-        let config = apply_setting_changes(&LlamaConfig::default(), &changes).unwrap();
+        let changes = parse_setting_changes(&changes).unwrap();
+        let config = apply_setting_changes(&LlamaConfig::default(), changes).unwrap();
         assert_eq!(config.context_length, Some(64000));
         assert_eq!(config.gpu_layers, Some(-1));
         assert_eq!(config.flash_attn, Some(false));
@@ -1063,7 +1076,7 @@ mod tests {
     #[test]
     fn a_wrong_name_or_value_says_what_is_wrong() {
         fn rejection_reason(name: &str, value: Value) -> String {
-            apply_setting_changes(&LlamaConfig::default(), &one_setting_change(name, value))
+            parse_setting_changes(&one_setting_change(name, value))
                 .unwrap_err()
                 .to_string()
         }
@@ -1131,7 +1144,7 @@ mod tests {
             ("context_length".to_owned(), None),
             ("gpu_layers".to_owned(), None),
         ];
-        let config = apply_setting_changes(&set, &resets)
+        let config = apply_setting_changes(&set, parse_setting_changes(&resets).unwrap())
             .unwrap()
             .with_defaults();
         assert_eq!(config.context_length, Some(DEFAULT_CONTEXT_LENGTH));
