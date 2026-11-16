@@ -48,6 +48,9 @@ def test_build_llama_server_command_omits_unset_flags(tmp_path: Path):
         "-m",
         str(gguf),
         "--jinja",
+        "--no-webui",
+        "--cors-origins",
+        "localhost",
     ]
 
 
@@ -65,6 +68,8 @@ def test_build_llama_server_command_passes_the_daemons_arguments_on(tmp_path: Pa
     assert cmd[0] == "/usr/bin/llama-server"
     assert "-m" in cmd and str(gguf) in cmd
     assert "--jinja" in cmd
+    assert "--no-webui" in cmd
+    assert cmd[cmd.index("--cors-origins") + 1] == "localhost"
     assert tuple(cmd[-len(server_args) :]) == server_args
     assert "--spec-type" not in cmd
 

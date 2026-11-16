@@ -107,6 +107,10 @@ def build_llama_server_command(
         "-m",
         str(gguf_path),
         "--jinja",
+        # this server is its only client, no website can call it
+        "--no-webui",
+        "--cors-origins",
+        "localhost",
         *server_args,
     ]
 
