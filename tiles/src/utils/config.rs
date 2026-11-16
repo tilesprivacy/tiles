@@ -176,8 +176,8 @@ pub trait ConfigProvider {
 // Default MAX_TOKENS passed to Pi, incase not configued
 const MAX_TOKENS: u32 = 30_000;
 
-// Hard default MIN_TOKENS passed to Pi, incase configured with something way less
-const MIN_TOKENS: u32 = 4_096;
+// smallest context length the settings take
+const MIN_CONTEXT_LENGTH: u32 = 4_096;
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DefaultProvider;
@@ -580,10 +580,6 @@ pub fn get_pi_context_window() -> Option<u32> {
         .and_then(|config| config.context_length)
 }
 
-fn get_pi_max_tokens(context_window: Option<u32>) -> Option<u32> {
-    context_window.map(|context_window| context_window.clamp(MIN_TOKENS, context_window))
-}
-
 pub fn create_pi_provider_config(model_name: &str, enpoint_base_url: &str) -> Result<String> {
     create_pi_provider_config_with_context(model_name, enpoint_base_url, get_pi_context_window())
 }
@@ -593,7 +589,7 @@ fn create_pi_provider_config_with_context(
     enpoint_base_url: &str,
     context_window: Option<u32>,
 ) -> Result<String> {
-    let max_tokens = get_pi_max_tokens(context_window).unwrap_or(MAX_TOKENS);
+    let max_tokens = context_window.unwrap_or(MAX_TOKENS);
     let provider_config = PiProviderConfig {
         api: String::from("openai-responses"),
         api_key: String::from("tiles"),
@@ -628,7 +624,7 @@ fn try_update_pi_provider_model(config: &str, model_name: &str) -> Result<String
 
     if tiles_provider_config.models[0].id != model_name {
         let context_window = get_pi_context_window();
-        let max_tokens = get_pi_max_tokens(context_window).unwrap_or(MAX_TOKENS);
+        let max_tokens = context_window.unwrap_or(MAX_TOKENS);
         tiles_provider_config.models = vec![PiProviderModelConfig {
             id: model_name.to_owned(),
             reasoning: true,
@@ -758,7 +754,9 @@ struct SettingDefinition {
 const LLAMA_SETTINGS: [SettingDefinition; 8] = [
     SettingDefinition {
         name: "context_length",
-        setting_type: SettingType::Number { min: 1 },
+        setting_type: SettingType::Number {
+            min: MIN_CONTEXT_LENGTH as i64,
+        },
         default: "65536",
         help: "Size of the context window, in tokens",
         server_argument: ServerArgument::FlagThenValue("-c"),
@@ -1089,8 +1087,8 @@ mod tests {
             "context_length needs a whole number, not big"
         );
         assert_eq!(
-            rejection_reason("context_length", json!(0)),
-            "context_length can't be less than 1"
+            rejection_reason("context_length", json!(2048)),
+            "context_length can't be less than 4096"
         );
         assert_eq!(
             rejection_reason("flash_attn", json!("maybe")),
@@ -1171,7 +1169,7 @@ mod tests {
             model_object.insert("contextWindow".to_owned(), json!(context_window));
         }
 
-        if let Some(max_tokens) = get_pi_max_tokens(get_pi_context_window())
+        if let Some(max_tokens) = get_pi_context_window()
             && let Value::Object(model_object) = &mut model
         {
             model_object.insert("maxTokens".to_owned(), json!(max_tokens));
@@ -1275,6 +1273,21 @@ mod tests {
 
         assert_eq!(model["contextWindow"], 12_000);
         assert_eq!(model["maxTokens"], 12_000);
+    }
+
+    #[test]
+    fn a_small_context_length_in_config_toml_is_passed_on_unchanged() {
+        let config_str = create_pi_provider_config_with_context(
+            "unsloth/gpt-oss-20b-GGUF",
+            "http://127.0.0.1:6969/v1",
+            Some(2_048),
+        )
+        .unwrap();
+        let config: Value = serde_json::from_str(&config_str).unwrap();
+        let model = &config["providers"]["tiles"]["models"][0];
+
+        assert_eq!(model["contextWindow"], 2_048);
+        assert_eq!(model["maxTokens"], 2_048);
     }
 
     #[test]
