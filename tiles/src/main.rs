@@ -288,6 +288,7 @@ fn llama_config_from_flags(flags: &RunFlags) -> Option<LlamaConfig> {
         n_cpu_moe: flags.n_cpu_moe,
         flash_attn: flags.flash_attn,
         load_mode: flags.load_mode,
+        context_checkpoints: None,
     };
 
     Some(config)

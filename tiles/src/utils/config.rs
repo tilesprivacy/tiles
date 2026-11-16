@@ -60,6 +60,7 @@ pub struct LlamaConfig {
     pub flash_attn: Option<bool>,
     /// How llama.cpp loads the model (`--load-mode`).
     pub load_mode: Option<LoadMode>,
+    pub context_checkpoints: Option<u32>,
 }
 
 /// llama.cpp's `--load-mode`, with llama.cpp's own value names
@@ -88,6 +89,9 @@ impl LlamaConfig {
     pub fn with_defaults(mut self) -> Self {
         self.context_length = self.context_length.or(Some(DEFAULT_CONTEXT_LENGTH));
         self.flash_attn = self.flash_attn.or(Some(true));
+        self.context_checkpoints = self
+            .context_checkpoints
+            .or(Some(DEFAULT_CONTEXT_CHECKPOINTS));
         self
     }
 
@@ -100,6 +104,7 @@ impl LlamaConfig {
             && self.n_cpu_moe.is_none()
             && self.flash_attn.is_none()
             && self.load_mode.is_none()
+            && self.context_checkpoints.is_none()
     }
 }
 
@@ -147,6 +152,8 @@ pub struct PiProviderModelConfig {
     pub max_tokens: Option<u32>,
 }
 pub const DEFAULT_CONTEXT_LENGTH: u32 = 65536;
+// llama.cpp keeps 32 per slot, and with Gemma they fill RAM
+pub const DEFAULT_CONTEXT_CHECKPOINTS: u32 = 4;
 
 const MODEL_SUB_PATH: &str = "models/huggingface/hub";
 pub const SYSTEM_BIN_DIR: &str = "/usr/local/bin";
@@ -699,6 +706,9 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     llama_config.n_cpu_moe = config.n_cpu_moe.or(llama_config.n_cpu_moe);
     llama_config.flash_attn = config.flash_attn.or(llama_config.flash_attn);
     llama_config.load_mode = config.load_mode.or(llama_config.load_mode);
+    llama_config.context_checkpoints = config
+        .context_checkpoints
+        .or(llama_config.context_checkpoints);
     root_config.llama = Some(llama_config.with_defaults());
     save_root_config(&root_config)
 }
@@ -751,7 +761,7 @@ struct SettingDefinition {
     server_argument: ServerArgument,
 }
 
-const LLAMA_SETTINGS: [SettingDefinition; 8] = [
+const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     SettingDefinition {
         name: "context_length",
         setting_type: SettingType::Number {
@@ -812,6 +822,13 @@ const LLAMA_SETTINGS: [SettingDefinition; 8] = [
         default: "auto",
         help: "How llama.cpp loads the model",
         server_argument: ServerArgument::FlagThenValue("--load-mode"),
+    },
+    SettingDefinition {
+        name: "context_checkpoints",
+        setting_type: SettingType::Number { min: 0 },
+        default: "4",
+        help: "Chat snapshots kept in RAM, so a reply doesn't re-read the chat",
+        server_argument: ServerArgument::FlagThenValue("--ctx-checkpoints"),
     },
 ];
 
@@ -1113,11 +1130,12 @@ mod tests {
             n_cpu_moe: Some(4),
             flash_attn: Some(true),
             load_mode: Some(LoadMode::MmapMlock),
+            context_checkpoints: Some(2),
         };
         let arguments = llama_server_arguments(&config).join(" ");
         assert_eq!(
             arguments,
-            "-c 8192 -ngl -1 --no-kv-offload -b 512 --n-cpu-moe 4 --flash-attn on --load-mode mmap+mlock"
+            "-c 8192 -ngl -1 --no-kv-offload -b 512 --n-cpu-moe 4 --flash-attn on --load-mode mmap+mlock --ctx-checkpoints 2"
         );
 
         let flipped = LlamaConfig {
@@ -1249,6 +1267,7 @@ mod tests {
         assert_eq!(filled.flash_attn, Some(true));
         // llama.cpp picks how to load the model
         assert_eq!(filled.load_mode, None);
+        assert_eq!(filled.context_checkpoints, Some(4));
 
         let mine = LlamaConfig {
             context_length: Some(8192),
