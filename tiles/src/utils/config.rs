@@ -683,8 +683,12 @@ pub fn get_current_model() -> Option<String> {
 /// The config for the model server, with the llama defaults filled in
 pub fn get_config_json() -> Result<serde_json::Value> {
     let mut root_config = get_or_create_root_config()?;
-    root_config.llama = Some(root_config.llama.unwrap_or_default().with_defaults());
-    serde_json::to_value(root_config).map_err(Into::<anyhow::Error>::into)
+    let llama = root_config.llama.take().unwrap_or_default().with_defaults();
+    let llama_server_args = llama_server_arguments(&llama);
+    root_config.llama = Some(llama);
+    let mut config = serde_json::to_value(root_config)?;
+    config["llama_server_args"] = json!(llama_server_args);
+    Ok(config)
 }
 
 pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
@@ -701,6 +705,262 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
     llama_config.load_mode = config.load_mode.or(llama_config.load_mode);
     root_config.llama = Some(llama_config.with_defaults());
     save_root_config(&root_config)
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct LlamaSetting {
+    pub name: String,
+    pub value: Option<serde_json::Value>,
+    pub default: String,
+    // number, flag or choice
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub choices: Vec<String>,
+    pub help: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidSetting(String);
+
+impl std::fmt::Display for InvalidSetting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for InvalidSetting {}
+
+enum SettingType {
+    Number { min: i64 },
+    Flag,
+    LoadMode,
+}
+
+enum ServerArgument {
+    FlagThenValue(&'static str),
+    FlagThenOnOrOff(&'static str),
+    FlagForEach {
+        enabled: &'static str,
+        disabled: &'static str,
+    },
+    // mtp, the model server finds the head file first
+    PassedByModelServer,
+}
+
+struct SettingDefinition {
+    name: &'static str,
+    setting_type: SettingType,
+    default: &'static str,
+    help: &'static str,
+    server_argument: ServerArgument,
+}
+
+const LLAMA_SETTINGS: [SettingDefinition; 8] = [
+    SettingDefinition {
+        name: "context_length",
+        setting_type: SettingType::Number { min: 1 },
+        default: "65536",
+        help: "Size of the context window, in tokens",
+        server_argument: ServerArgument::FlagThenValue("-c"),
+    },
+    SettingDefinition {
+        name: "gpu_layers",
+        setting_type: SettingType::Number { min: -1 },
+        default: "auto",
+        help: "Model layers to run on the GPU",
+        server_argument: ServerArgument::FlagThenValue("-ngl"),
+    },
+    SettingDefinition {
+        name: "offload_kqv",
+        setting_type: SettingType::Flag,
+        default: "true",
+        help: "Keep the KV cache on the GPU",
+        server_argument: ServerArgument::FlagForEach {
+            enabled: "--kv-offload",
+            disabled: "--no-kv-offload",
+        },
+    },
+    SettingDefinition {
+        name: "batch_size",
+        setting_type: SettingType::Number { min: 1 },
+        default: "2048",
+        help: "Prompt tokens processed at once",
+        server_argument: ServerArgument::FlagThenValue("-b"),
+    },
+    SettingDefinition {
+        name: "mtp",
+        setting_type: SettingType::Flag,
+        default: "false",
+        help: "MTP speculative decoding, for models that come with an MTP head",
+        server_argument: ServerArgument::PassedByModelServer,
+    },
+    SettingDefinition {
+        name: "n_cpu_moe",
+        setting_type: SettingType::Number { min: 0 },
+        default: "0",
+        help: "MoE models: layers whose expert weights stay on the CPU",
+        server_argument: ServerArgument::FlagThenValue("--n-cpu-moe"),
+    },
+    SettingDefinition {
+        name: "flash_attn",
+        setting_type: SettingType::Flag,
+        default: "true",
+        help: "Flash attention",
+        server_argument: ServerArgument::FlagThenOnOrOff("--flash-attn"),
+    },
+    SettingDefinition {
+        name: "load_mode",
+        setting_type: SettingType::LoadMode,
+        default: "auto",
+        help: "How llama.cpp loads the model",
+        server_argument: ServerArgument::FlagThenValue("--load-mode"),
+    },
+];
+
+pub fn llama_server_arguments(config: &LlamaConfig) -> Vec<String> {
+    let fields = serde_json::to_value(config).unwrap_or_default();
+    let mut arguments = vec![];
+    for definition in &LLAMA_SETTINGS {
+        let value = match fields.get(definition.name) {
+            Some(serde_json::Value::String(text)) => text.clone(),
+            Some(serde_json::Value::Null) | None => continue,
+            Some(value) => value.to_string(),
+        };
+        let enabled = value == "true";
+        match definition.server_argument {
+            ServerArgument::FlagThenValue(flag) => arguments.extend([flag.to_owned(), value]),
+            ServerArgument::FlagThenOnOrOff(flag) => {
+                let on_or_off = if enabled { "on" } else { "off" };
+                arguments.extend([flag.to_owned(), on_or_off.to_owned()]);
+            }
+            ServerArgument::FlagForEach { enabled: flag, .. } if enabled => {
+                arguments.push(flag.to_owned());
+            }
+            ServerArgument::FlagForEach { disabled: flag, .. } => arguments.push(flag.to_owned()),
+            ServerArgument::PassedByModelServer => {}
+        }
+    }
+    arguments
+}
+
+fn load_mode_names() -> Vec<String> {
+    use clap::ValueEnum;
+    LoadMode::value_variants()
+        .iter()
+        .filter_map(|mode| mode.to_possible_value())
+        .map(|mode| mode.get_name().to_owned())
+        .collect()
+}
+
+pub fn get_llama_settings() -> Result<Vec<LlamaSetting>> {
+    Ok(llama_settings_from_config(&get_llama_config()?))
+}
+
+pub fn llama_setting_names() -> impl Iterator<Item = &'static str> {
+    LLAMA_SETTINGS.iter().map(|definition| definition.name)
+}
+
+/// `None` resets a setting
+pub fn update_llama_settings(
+    changes: &[(String, Option<serde_json::Value>)],
+) -> Result<Vec<LlamaSetting>> {
+    let mut root_config = get_or_create_root_config()?;
+    let current = root_config.llama.take().unwrap_or_default();
+    let config = apply_setting_changes(&current, changes)?.with_defaults();
+    let settings = llama_settings_from_config(&config);
+    root_config.llama = Some(config);
+    save_root_config(&root_config)?;
+    Ok(settings)
+}
+
+fn llama_settings_from_config(config: &LlamaConfig) -> Vec<LlamaSetting> {
+    let fields = serde_json::to_value(config).unwrap_or_default();
+    LLAMA_SETTINGS
+        .iter()
+        .map(|definition| LlamaSetting {
+            name: definition.name.to_owned(),
+            value: fields
+                .get(definition.name)
+                .filter(|v| !v.is_null())
+                .cloned(),
+            default: definition.default.to_owned(),
+            kind: match definition.setting_type {
+                SettingType::Number { .. } => "number",
+                SettingType::Flag => "flag",
+                SettingType::LoadMode => "choice",
+            }
+            .to_owned(),
+            choices: match definition.setting_type {
+                SettingType::LoadMode => load_mode_names(),
+                _ => vec![],
+            },
+            help: definition.help.to_owned(),
+        })
+        .collect()
+}
+
+fn apply_setting_changes(
+    config: &LlamaConfig,
+    changes: &[(String, Option<serde_json::Value>)],
+) -> Result<LlamaConfig, InvalidSetting> {
+    let invalid = |err: serde_json::Error| InvalidSetting(err.to_string());
+    let serde_json::Value::Object(mut fields) = serde_json::to_value(config).map_err(invalid)?
+    else {
+        return Err(InvalidSetting(
+            "The llama settings aren't a table".to_owned(),
+        ));
+    };
+    for (name, value) in changes {
+        let definition = LLAMA_SETTINGS
+            .iter()
+            .find(|definition| definition.name == name)
+            .ok_or_else(|| InvalidSetting(format!("No setting named {name}")))?;
+        let value = match value {
+            Some(value) => parse_setting_value(definition, value)?,
+            None => serde_json::Value::Null,
+        };
+        fields.insert(name.clone(), value);
+    }
+    serde_json::from_value(serde_json::Value::Object(fields)).map_err(invalid)
+}
+
+// JSON from the API, text from the CLI
+fn parse_setting_value(
+    definition: &SettingDefinition,
+    value: &serde_json::Value,
+) -> Result<serde_json::Value, InvalidSetting> {
+    let name = definition.name;
+    let text = match value {
+        serde_json::Value::String(text) => text.trim().to_owned(),
+        other => other.to_string(),
+    };
+    match definition.setting_type {
+        SettingType::Number { min } => match text.parse::<i64>() {
+            Ok(number) if number >= min => Ok(json!(number)),
+            Ok(_) => Err(InvalidSetting(format!("{name} can't be less than {min}"))),
+            Err(_) => Err(InvalidSetting(format!(
+                "{name} needs a whole number, not {text}"
+            ))),
+        },
+        SettingType::Flag => match text.as_str() {
+            "true" | "on" => Ok(json!(true)),
+            "false" | "off" => Ok(json!(false)),
+            _ => Err(InvalidSetting(format!(
+                "{name} needs true or false, not {text}"
+            ))),
+        },
+        SettingType::LoadMode => {
+            let modes = load_mode_names();
+            if modes.contains(&text) {
+                Ok(json!(text))
+            } else {
+                Err(InvalidSetting(format!(
+                    "{name} needs one of {}, not {text}",
+                    modes.join(", ")
+                )))
+            }
+        }
+    }
 }
 
 pub fn handle_pi_settings_config(settings_path: &PathBuf) -> Result<()> {
@@ -764,6 +1024,125 @@ mod tests {
             assert_eq!(config.load_mode, Some(mode));
         }
         assert!(toml::from_str::<LlamaConfig>("load_mode = \"no-mmap\"").is_err());
+    }
+
+    fn one_setting_change(name: &str, value: Value) -> Vec<(String, Option<Value>)> {
+        vec![(name.to_owned(), Some(value))]
+    }
+
+    #[test]
+    fn there_is_a_setting_for_every_llama_config_field() {
+        let Value::Object(fields) = serde_json::to_value(LlamaConfig::default()).unwrap() else {
+            panic!("LlamaConfig isn't a table");
+        };
+        let mut fields: Vec<_> = fields.keys().map(String::as_str).collect();
+        let mut names: Vec<_> = llama_setting_names().collect();
+        fields.sort_unstable();
+        names.sort_unstable();
+        assert_eq!(names, fields);
+    }
+
+    #[test]
+    fn settings_take_text_from_the_cli_and_json_from_the_api() {
+        let changes = [
+            ("context_length".to_owned(), Some(json!("64000"))),
+            ("gpu_layers".to_owned(), Some(json!(-1))),
+            ("flash_attn".to_owned(), Some(json!("off"))),
+            ("mtp".to_owned(), Some(json!(true))),
+            ("load_mode".to_owned(), Some(json!("mmap+mlock"))),
+        ];
+        let config = apply_setting_changes(&LlamaConfig::default(), &changes).unwrap();
+        assert_eq!(config.context_length, Some(64000));
+        assert_eq!(config.gpu_layers, Some(-1));
+        assert_eq!(config.flash_attn, Some(false));
+        assert_eq!(config.mtp, Some(true));
+        assert_eq!(config.load_mode, Some(LoadMode::MmapMlock));
+        assert_eq!(config.batch_size, None);
+    }
+
+    #[test]
+    fn a_wrong_name_or_value_says_what_is_wrong() {
+        fn rejection_reason(name: &str, value: Value) -> String {
+            apply_setting_changes(&LlamaConfig::default(), &one_setting_change(name, value))
+                .unwrap_err()
+                .to_string()
+        }
+        assert_eq!(
+            rejection_reason("context_size", json!(1)),
+            "No setting named context_size"
+        );
+        assert_eq!(
+            rejection_reason("context_length", json!("big")),
+            "context_length needs a whole number, not big"
+        );
+        assert_eq!(
+            rejection_reason("context_length", json!(0)),
+            "context_length can't be less than 1"
+        );
+        assert_eq!(
+            rejection_reason("flash_attn", json!("maybe")),
+            "flash_attn needs true or false, not maybe"
+        );
+        assert_eq!(
+            rejection_reason("load_mode", json!("no-mmap")),
+            "load_mode needs one of auto, none, mmap, mlock, mmap+mlock, dio, not no-mmap"
+        );
+    }
+
+    #[test]
+    fn set_settings_become_llama_server_arguments() {
+        assert!(llama_server_arguments(&LlamaConfig::default()).is_empty());
+
+        let config = LlamaConfig {
+            context_length: Some(8192),
+            gpu_layers: Some(-1),
+            offload_kqv: Some(false),
+            batch_size: Some(512),
+            mtp: Some(true),
+            n_cpu_moe: Some(4),
+            flash_attn: Some(true),
+            load_mode: Some(LoadMode::MmapMlock),
+        };
+        let arguments = llama_server_arguments(&config).join(" ");
+        assert_eq!(
+            arguments,
+            "-c 8192 -ngl -1 --no-kv-offload -b 512 --n-cpu-moe 4 --flash-attn on --load-mode mmap+mlock"
+        );
+
+        let flipped = LlamaConfig {
+            offload_kqv: Some(true),
+            flash_attn: Some(false),
+            ..LlamaConfig::default()
+        };
+        assert_eq!(
+            llama_server_arguments(&flipped).join(" "),
+            "--kv-offload --flash-attn off"
+        );
+    }
+
+    #[test]
+    fn a_reset_setting_goes_back_to_its_default() {
+        let set = LlamaConfig {
+            context_length: Some(8192),
+            gpu_layers: Some(10),
+            ..LlamaConfig::default()
+        };
+        let resets = [
+            ("context_length".to_owned(), None),
+            ("gpu_layers".to_owned(), None),
+        ];
+        let config = apply_setting_changes(&set, &resets)
+            .unwrap()
+            .with_defaults();
+        assert_eq!(config.context_length, Some(DEFAULT_CONTEXT_LENGTH));
+        assert_eq!(config.gpu_layers, None);
+
+        let settings = llama_settings_from_config(&config);
+        let gpu_layers = settings.iter().find(|s| s.name == "gpu_layers").unwrap();
+        assert_eq!(gpu_layers.value, None);
+        assert_eq!(gpu_layers.default, "auto");
+        let load_mode = settings.iter().find(|s| s.name == "load_mode").unwrap();
+        assert_eq!(load_mode.choices, load_mode_names());
     }
 
     fn expected_pi_provider_json(model_name: &str, endpoint_base_url: &str) -> Value {

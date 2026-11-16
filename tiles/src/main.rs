@@ -25,7 +25,10 @@ use tiles::{
     },
 };
 
-use crate::commands::set_inference_config_to_daemon;
+use crate::commands::{
+    config::{get_setting_cli, list_settings_cli, reset_settings_cli, set_settings_cli},
+    set_inference_config_to_daemon,
+};
 
 mod commands;
 
@@ -72,6 +75,7 @@ const CLI_HELP_TEMPLATE: &str = concat!(
     "    uninstall Uninstall Tiles from this machine\n",
     "    health    Check the status of dependencies\n",
     "    server    Configure the inference server\n",
+    "    config    Change model settings like the context size\n",
     "    daemon    Configure daemon behavior\n",
     "    service   Run Tiles in the background from login\n",
     "    network   Configure Tiles network\n\n",
@@ -192,6 +196,9 @@ enum SystemCommands {
 
     /// Configure the inference server
     Server(ServerArgs),
+
+    /// Change model settings like the context size
+    Config(ConfigArgs),
 
     /// Configure daemon behavior
     Daemon(DaemonArgs),
@@ -380,6 +387,37 @@ enum ServiceCommands {
 
     /// Stop the service now
     Stop,
+}
+
+#[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
+#[command(flatten_help = true)]
+struct ConfigArgs {
+    /// Lists every setting when left out
+    #[command(subcommand)]
+    command: Option<ConfigCommands>,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    /// Set one or more settings, like context_length=64000 flash_attn=false
+    Set {
+        #[arg(required = true, value_name = "NAME=VALUE")]
+        values: Vec<String>,
+    },
+
+    /// Print one setting
+    Get { name: String },
+
+    /// Put settings back to their defaults
+    Reset {
+        #[arg(value_name = "NAME", required_unless_present = "all")]
+        names: Vec<String>,
+
+        /// Every setting
+        #[arg(long, conflicts_with = "names")]
+        all: bool,
+    },
 }
 
 #[derive(Debug, Args)]
@@ -683,6 +721,12 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         Some(Commands::Uninstall { .. } | Commands::NvidiaProbe) => {
             unreachable!("run before core::init")
         }
+        Some(Commands::System(SystemCommands::Config(config_args))) => match config_args.command {
+            None => list_settings_cli().await?,
+            Some(ConfigCommands::Set { values }) => set_settings_cli(&values).await?,
+            Some(ConfigCommands::Get { name }) => get_setting_cli(&name).await?,
+            Some(ConfigCommands::Reset { names, all }) => reset_settings_cli(names, all).await?,
+        },
         Some(Commands::System(SystemCommands::Network(network_args))) => {
             match network_args.command {
                 NetworkCommands::Start => {

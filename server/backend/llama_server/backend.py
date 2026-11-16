@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 from fastapi import HTTPException
 
-from ...config import DAEMON_PORT, get_llama_config
+from ...config import DAEMON_PORT, get_daemon_config, get_llama_config
 from ...schemas import ResponsesRequest
 from .gguf import find_gguf_file
 from . import process
@@ -57,7 +57,8 @@ def get_or_load_model(
     model_cache_path: str | None = None,
     verbose: bool = True,
 ) -> LlamaServerRunner:
-    llama_config = get_llama_config()
+    daemon_config = get_daemon_config()
+    llama_config = daemon_config.llama
 
     try:
         model_dir = _resolve_model_path(model_spec, model_cache_path)
@@ -80,7 +81,9 @@ def get_or_load_model(
     # and restarts only when they change. It returns this call's startup
     # warnings (drained under its lock) so concurrent requests can't
     # read or wipe each other's warnings.
-    warnings = process.ensure_running(gguf_path, llama_config)
+    warnings = process.ensure_running(
+        gguf_path, llama_config, daemon_config.llama_server_args
+    )
 
     return LlamaServerRunner(str(model_dir), llama_config, warnings)
 
