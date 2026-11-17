@@ -1,4 +1,4 @@
-//! APIs for the llama settings
+//! APIs for the Tiles config, one section per route, starting with llama
 
 use std::sync::Arc;
 

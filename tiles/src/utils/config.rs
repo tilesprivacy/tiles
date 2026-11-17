@@ -718,11 +718,18 @@ pub struct LlamaSetting {
     pub name: String,
     pub value: Option<serde_json::Value>,
     pub default: String,
-    // number, flag or choice
-    pub kind: String,
+    pub kind: SettingKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub choices: Vec<String>,
     pub help: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SettingKind {
+    Number,
+    Flag,
+    Choice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -901,11 +908,10 @@ fn llama_settings_from_config(config: &LlamaConfig) -> Vec<LlamaSetting> {
                 .cloned(),
             default: definition.default.to_owned(),
             kind: match definition.setting_type {
-                SettingType::Number { .. } => "number",
-                SettingType::Flag => "flag",
-                SettingType::LoadMode => "choice",
-            }
-            .to_owned(),
+                SettingType::Number { .. } => SettingKind::Number,
+                SettingType::Flag => SettingKind::Flag,
+                SettingType::LoadMode => SettingKind::Choice,
+            },
             choices: match definition.setting_type {
                 SettingType::LoadMode => load_mode_names(),
                 _ => vec![],
