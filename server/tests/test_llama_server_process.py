@@ -48,41 +48,44 @@ def test_build_llama_server_command_omits_unset_flags(tmp_path: Path):
         "-m",
         str(gguf),
         "--jinja",
+        "--no-webui",
+        "--cors-origins",
+        "localhost",
     ]
 
 
-def test_build_llama_server_command_includes_optional_flags(tmp_path: Path):
+def test_build_llama_server_command_passes_the_daemons_arguments_on(tmp_path: Path):
     gguf = tmp_path / "model.gguf"
     gguf.write_bytes(b"x")
-    config = {
-        "context_length": 32768,
-        "gpu_layers": 12,
-        "offload_kqv": False,
-        "batch_size": 128,
-        "n_cpu_moe": 12,
-        "flash_attn": True,
-        "load_mode": "none",
-        "mtp": False,
-    }
+    server_args = ("-c", "32768", "-ngl", "12", "--no-kv-offload", "--load-mode", "none")
 
     with patch(
         "server.backend.llama_server.process.resolve_llama_server_binary",
         return_value="/usr/bin/llama-server",
     ):
-        cmd = build_llama_server_command(gguf, config)
+        cmd = build_llama_server_command(gguf, {"mtp": False}, server_args=server_args)
 
     assert cmd[0] == "/usr/bin/llama-server"
     assert "-m" in cmd and str(gguf) in cmd
-    assert "-c" in cmd and "32768" in cmd
-    assert "-ngl" in cmd and "12" in cmd
-    assert "--no-kv-offload" in cmd
-    assert "--n-cpu-moe" in cmd and "12" in cmd
-    assert "--flash-attn" in cmd and "on" in cmd
-    assert cmd[cmd.index("--load-mode") + 1] == "none"
-    # llama.cpp dropped it, passing it stops the server
-    assert "--no-mmap" not in cmd
     assert "--jinja" in cmd
+    assert "--no-webui" in cmd
+    assert cmd[cmd.index("--cors-origins") + 1] == "localhost"
+    assert tuple(cmd[-len(server_args) :]) == server_args
     assert "--spec-type" not in cmd
+
+
+def test_build_llama_server_command_knows_no_setting_by_name(tmp_path: Path):
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+
+    with patch(
+        "server.backend.llama_server.process.resolve_llama_server_binary",
+        return_value="/usr/bin/llama-server",
+    ):
+        cmd = build_llama_server_command(gguf, {"context_length": 32768, "gpu_layers": 12})
+
+    assert "-c" not in cmd
+    assert "-ngl" not in cmd
 
 
 def test_mtp_off_by_default_even_when_head_present(tmp_path: Path):
@@ -370,6 +373,28 @@ def test_ensure_running_restarts_on_config_change(tmp_path: Path):
     # every spawn; the first call is a no-op since no prior process exists).
     assert popen.call_count == 2
     assert stop.call_count == 2
+
+
+def test_ensure_running_restarts_when_the_arguments_change(tmp_path: Path):
+    _reset_process_state()
+    gguf = tmp_path / "model.gguf"
+    gguf.write_bytes(b"x")
+
+    fake_proc = Mock()
+    fake_proc.poll.return_value = None
+
+    with (
+        patch("server.backend.llama_server.process.subprocess.Popen", return_value=fake_proc) as popen,
+        patch("server.backend.llama_server.process.is_server_ready", return_value=True),
+        patch("server.backend.llama_server.process.resolve_llama_server_binary", return_value="llama-server"),
+        patch("server.backend.llama_server.process.stop"),
+    ):
+        ensure_running(gguf, {}, ("-c", "8192"))
+        ensure_running(gguf, {}, ("-c", "8192"))
+        ensure_running(gguf, {}, ("-c", "16384"))
+
+    assert popen.call_count == 2
+    assert popen.call_args_list[1].args[0][-2:] == ["-c", "16384"]
 
 
 def test_ensure_running_restarts_on_engine_change(tmp_path: Path):

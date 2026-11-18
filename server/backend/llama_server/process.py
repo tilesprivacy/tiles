@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -78,19 +79,22 @@ def resolve_llama_server_binary() -> str:
     )
 
 
-def _config_key(llama_config: dict[str, Any], binary: str) -> str:
+def _config_key(llama_config: dict[str, Any], server_args: Sequence[str], binary: str) -> str:
     # a different engine restarts llama-server, like a changed flag
-    return json.dumps({"config": llama_config, "binary": binary}, sort_keys=True, default=str)
+    return json.dumps(
+        {"config": llama_config, "args": list(server_args), "binary": binary},
+        sort_keys=True,
+        default=str,
+    )
 
 
 def build_llama_server_command(
-    gguf_path: Path, llama_config: dict[str, Any], binary: str | None = None
+    gguf_path: Path,
+    llama_config: dict[str, Any],
+    binary: str | None = None,
+    server_args: Sequence[str] = (),
 ) -> list[str]:
-    """Build the llama-server argv from Tiles config.
-
-    Only flags explicitly set in ``llama_config`` are forwarded; unset values
-    are left to llama-server's own defaults.
-    """
+    """Build the llama-server argv, `server_args` are the daemon's flags for the user's settings."""
     binary = binary or resolve_llama_server_binary()
     # Always bind to Tiles' llama-server port (default 18080) so we don't
     # collide with a stock llama-server on 8080.
@@ -103,39 +107,12 @@ def build_llama_server_command(
         "-m",
         str(gguf_path),
         "--jinja",
+        # this server is its only client, no website can call it
+        "--no-webui",
+        "--cors-origins",
+        "localhost",
+        *server_args,
     ]
-
-    context_length = llama_config.get("context_length")
-    if context_length is not None:
-        cmd.extend(["-c", str(int(context_length))])
-
-    batch_size = llama_config.get("batch_size")
-    if batch_size is not None:
-        cmd.extend(["-b", str(int(batch_size))])
-
-    gpu_layers = llama_config.get("gpu_layers")
-    if gpu_layers is not None:
-        cmd.extend(["-ngl", str(int(gpu_layers))])
-
-    offload_kqv = llama_config.get("offload_kqv")
-    if offload_kqv is True:
-        cmd.append("--kv-offload")
-    elif offload_kqv is False:
-        cmd.append("--no-kv-offload")
-
-    n_cpu_moe = llama_config.get("n_cpu_moe")
-    if n_cpu_moe is not None:
-        cmd.extend(["--n-cpu-moe", str(int(n_cpu_moe))])
-
-    flash_attn = llama_config.get("flash_attn")
-    if flash_attn is True:
-        cmd.extend(["--flash-attn", "on"])
-    elif flash_attn is False:
-        cmd.extend(["--flash-attn", "off"])
-
-    load_mode = llama_config.get("load_mode")
-    if load_mode is not None:
-        cmd.extend(["--load-mode", str(load_mode)])
 
     # MTP speculative decoding: opt-in. Enabled only when `mtp = true` is
     # set in config.toml (or passed via `tiles run --mtp`); the presence
@@ -292,7 +269,9 @@ def stop() -> None:
         proc.wait(timeout=5)
 
 
-def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
+def ensure_running(
+    gguf_path: Path, llama_config: dict[str, Any], server_args: Sequence[str] = ()
+) -> list[str]:
     """Start or restart llama-server for the given GGUF and config.
     Returns the warnings recorded during this call's spawn (e.g. MTP
     requested but no head GGUF found).
@@ -302,7 +281,7 @@ def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
     gguf_path = Path(os.path.abspath(gguf_path))
     resolved_gguf = gguf_path.resolve()
     binary = resolve_llama_server_binary()
-    key = _config_key(llama_config, binary)
+    key = _config_key(llama_config, server_args, binary)
     with _ensure_lock:
         # Fresh call: drop warnings from any previous spawn so callers only
         # ever see warnings from this invocation.
@@ -328,7 +307,7 @@ def ensure_running(gguf_path: Path, llama_config: dict[str, Any]) -> list[str]:
                 gpu_layers,
             )
 
-        cmd = build_llama_server_command(gguf_path, llama_config, binary)
+        cmd = build_llama_server_command(gguf_path, llama_config, binary, server_args)
 
         logger.info("Starting llama-server: %s", " ".join(cmd))
         env = os.environ.copy()

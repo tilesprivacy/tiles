@@ -21,6 +21,8 @@ use toml::Table;
 
 use crate::{AccountArgs, AccountCommands};
 
+pub mod config;
+
 const FTUE_VERSION_TITLE: &str = "Tiles";
 const PRODUCT_DESCRIPTION: &str = "A local-first, collaborative AI assistant that works for you. Built with open models and decentralized protocols";
 const FTUE_HEADER: &str = "Initializing local account...";

@@ -15,6 +15,7 @@ use crate::{
         agent::agent_router,
         atproto::atproto_router,
         authz::authz_router,
+        config::config_router,
         engine::engine_router,
         model::model_router,
         net::{NetworkState, network_router, start_network_cli},
@@ -59,6 +60,7 @@ pub mod account;
 pub mod agent;
 pub mod atproto;
 pub mod authz;
+pub mod config;
 pub mod engine;
 mod job;
 pub mod model;
@@ -215,7 +217,7 @@ pub struct ApiJson<T>(pub T);
 #[derive(Serialize, Debug, Deserialize)]
 pub struct ApiResponse<T> {
     status: String,
-    data: T,
+    pub data: T,
 }
 
 impl<T: Serialize> ApiResponse<T> {
@@ -340,6 +342,7 @@ fn tilekit_router() -> Router<Arc<AppState>> {
         .merge(atproto_router())
         .merge(model_router())
         .merge(engine_router())
+        .merge(config_router())
         .merge(authz_router())
         .merge(network_router())
         .route("/v1/tilekit/ui", get(web::ui_state))

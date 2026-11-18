@@ -1,11 +1,11 @@
 import logging
 import os
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import httpx
-from pydantic import BaseModel
 
 logger = logging.getLogger("app")
 
@@ -23,131 +23,74 @@ MEMORY_PATH = os.path.expanduser("~") + "/tiles_memory"
 # Short-lived cache for get_llama_config(). The daemon is authoritative but we
 # avoid a localhost round-trip on every request; config changes propagate within
 # this TTL. Keep small so user edits to config.toml pick up quickly.
-_LLAMA_CONFIG_TTL_S = 1.0
-# the [llama] table and the llama-server path the daemon picked
-_llama_config_cache: tuple[dict[str, Any], str | None] | None = None
-_llama_config_cache_ts: float = 0.0
+_DAEMON_CONFIG_TTL_S = 1.0
+
+
+@dataclass(frozen=True)
+class DaemonConfig:
+    llama: dict[str, Any] = field(default_factory=dict)
+    llama_server_args: tuple[str, ...] = ()
+    llama_server: str | None = None
+
+
+_daemon_config_cache: DaemonConfig | None = None
+_daemon_config_cache_ts: float = 0.0
 # the daemon's last answer, kept when it can't be asked. forgetting it would move a
 # running model onto the bundled build for as long as /config fails
-_llama_server_seen: str | None = None
-
-# Canonical llama config field set. MUST stay in sync with the Rust
-# `LlamaConfig` struct in tiles/src/utils/config.rs. The drift-guard test
-# (tests/test_config.py) asserts this matches the Python model's fields.
-LLAMA_CONFIG_FIELDS = (
-    "context_length",
-    "gpu_layers",
-    "offload_kqv",
-    "batch_size",
-    "mtp",
-    "n_cpu_moe",
-    "flash_attn",
-    "load_mode",
-)
+_daemon_config_seen = DaemonConfig()
 
 
-class LlamaConfig(BaseModel):
-    context_length: int | None = None
-    gpu_layers: int | None = None
-    offload_kqv: bool | None = None
-    batch_size: int | None = None
-    mtp: bool | None = None
-    n_cpu_moe: int | None = None
-    flash_attn: bool | None = None
-    # llama.cpp's --load-mode, in llama.cpp's own names
-    load_mode: Literal["auto", "none", "mmap", "mlock", "mmap+mlock", "dio"] | None = None
+def get_daemon_config() -> DaemonConfig:
+    global _daemon_config_cache, _daemon_config_cache_ts
+    now = time.monotonic()
+    if (
+        _daemon_config_cache is not None
+        and (now - _daemon_config_cache_ts) < _DAEMON_CONFIG_TTL_S
+    ):
+        return _daemon_config_cache
 
-
-def _config_toml_candidates() -> list[Path]:
-    candidates: list[Path] = []
-    if env_path := os.environ.get("TILES_CONFIG"):
-        candidates.append(Path(env_path).expanduser())
-    cwd = Path.cwd()
-    candidates.extend(
-        [
-            cwd / ".tiles_dev/tiles/config.toml",
-            Path.home() / ".config/tiles/config.toml",
-        ]
-    )
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for path in candidates:
-        resolved = path.resolve()
-        if resolved not in seen:
-            seen.add(resolved)
-            unique.append(path)
-    return unique
-
-
-def _read_llama_config_from_toml() -> dict:
-    import tomllib
-
-    for path in _config_toml_candidates():
-        if not path.is_file():
-            continue
-        try:
-            with path.open("rb") as handle:
-                root = tomllib.load(handle)
-        except OSError:
-            continue
-        # First existing config file wins, even when [llama] is absent/empty.
-        # Otherwise a empty .tiles_dev config would leak into ~/.config/tiles.
-        llama = root.get("llama") or {}
-        logger.info("Loaded llama config from %s", path)
-        return LlamaConfig(**llama).model_dump(exclude_none=True)
-    return {}
+    config = _fetch_daemon_config()
+    _daemon_config_cache = config
+    # Capture the timestamp when the fetch completes, not when the call began,
+    # so the TTL window reflects how long ago the cached value was obtained.
+    _daemon_config_cache_ts = time.monotonic()
+    return config
 
 
 def get_llama_config() -> dict:
-    return _cached_config()[0]
+    return get_daemon_config().llama
 
 
 def get_llama_server() -> str | None:
     """The llama-server of the engine the daemon installed, None for the one bundled with Tiles."""
-    return _cached_config()[1]
+    return get_daemon_config().llama_server
 
 
-def _cached_config() -> tuple[dict[str, Any], str | None]:
-    global _llama_config_cache, _llama_config_cache_ts
-    now = time.monotonic()
-    if (
-        _llama_config_cache is not None
-        and (now - _llama_config_cache_ts) < _LLAMA_CONFIG_TTL_S
-    ):
-        return _llama_config_cache
-
-    config = _fetch_llama_config()
-    _llama_config_cache = config
-    # Capture the timestamp when the fetch completes, not when the call began,
-    # so the TTL window reflects how long ago the cached value was obtained.
-    _llama_config_cache_ts = time.monotonic()
-    return config
+def _reset_daemon_config_cache() -> None:
+    """Forget the daemon's config (used by tests)."""
+    global _daemon_config_cache, _daemon_config_cache_ts, _daemon_config_seen
+    _daemon_config_cache = None
+    _daemon_config_cache_ts = 0.0
+    _daemon_config_seen = DaemonConfig()
 
 
-def _reset_llama_config_cache() -> None:
-    """Clear the cached llama config (used by tests)."""
-    global _llama_config_cache, _llama_config_cache_ts, _llama_server_seen
-    _llama_config_cache = None
-    _llama_config_cache_ts = 0.0
-    _llama_server_seen = None
-
-
-def _fetch_llama_config() -> tuple[dict[str, Any], str | None]:
-    global _llama_server_seen
+def _fetch_daemon_config() -> DaemonConfig:
+    global _daemon_config_seen
     try:
         response = httpx.get(f"http://127.0.0.1:{DAEMON_PORT}/config", timeout=2)
         response.raise_for_status()
         config = response.json()
-        # Daemon answered: trust it. Empty/null [llama] means "no overrides",
-        # not "keep looking in ~/.config".
-        llama = config.get("llama") or {}
-        logger.info("Loaded llama config from Tiles daemon")
-        _llama_server_seen = config.get("llama_server")
-        return LlamaConfig(**llama).model_dump(exclude_none=True), _llama_server_seen
     except httpx.HTTPError:
-        pass
+        return _daemon_config_seen
 
-    return _read_llama_config_from_toml(), _llama_server_seen
+    llama = config.get("llama") or {}
+    logger.info("Loaded llama config from Tiles daemon")
+    _daemon_config_seen = DaemonConfig(
+        llama={name: value for name, value in llama.items() if value is not None},
+        llama_server_args=tuple(config.get("llama_server_args") or ()),
+        llama_server=config.get("llama_server"),
+    )
+    return _daemon_config_seen
 
 
 # pid file the server writes for itself once it has PORT. the daemon reads it to
