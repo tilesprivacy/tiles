@@ -27,12 +27,6 @@ use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
 use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
-use rustyline::completion::Completer;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::history::DefaultHistory;
-use rustyline::validate::Validator;
-use rustyline::{Config, Editor, Helper};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self};
@@ -43,6 +37,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
+use tiles_cli::{InputType, create_line_editor, handle_input};
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
 
@@ -121,42 +116,6 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
 }
 
-struct TilesHinter;
-
-impl Hinter for TilesHinter {
-    type Hint = String;
-
-    fn hint(&self, line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<Self::Hint> {
-        if line.is_empty() {
-            Some("Send a message (/help to show available commands)".to_string())
-        } else {
-            None
-        }
-    }
-}
-
-impl Completer for TilesHinter {
-    type Candidate = String;
-}
-
-impl Highlighter for TilesHinter {
-    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
-        std::borrow::Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
-    }
-}
-
-impl Validator for TilesHinter {}
-
-impl Helper for TilesHinter {}
-
-enum InputType {
-    Skip,
-    Command(String),
-    Exit,
-    Prompt,
-    Skill,
-}
-
 struct ReplSession {
     pub session_id: String,
     // if true, we will prepend the resumed session history to the input
@@ -198,90 +157,6 @@ impl ReplSession {
     pub fn set_resumed_session(&mut self, session: String) {
         self.resumed_session = session
     }
-}
-fn handle_input(input: &str) -> InputType {
-    if let Some(cmd) = input.strip_prefix('/') {
-        let keyword = cmd.split_whitespace().next().unwrap_or("");
-        match keyword.to_lowercase().as_str() {
-            "help" | "?" => {
-                show_help();
-                InputType::Skip
-            }
-            "bye" => InputType::Exit,
-            "" => {
-                println!("Empty command. Type /help for available commands.");
-                InputType::Skip
-            }
-            _ => InputType::Command(cmd.to_owned()),
-        }
-    } else if let Some(_skill) = input.strip_prefix('$') {
-        InputType::Skill
-    } else {
-        InputType::Prompt
-    }
-}
-
-fn show_help() {
-    let help_groups = vec![
-        (
-            "Session",
-            vec![
-                (
-                    "/reasoning <effort>",
-                    "Sets the reasoning effort of current model (none, low, medium, high, xhigh)",
-                ),
-                ("/status", "Show the current session state"),
-                ("/sessions", "List all available sessions"),
-                (
-                    "/resume <sessionId>",
-                    "Load and resume a specific session (requires <sessionId>)",
-                ),
-            ],
-        ),
-        (
-            "Sharing",
-            vec![
-                (
-                    "/share",
-                    "Create a shareable link for the current session (via ATProto)",
-                ),
-                (
-                    "/share <sessionId>",
-                    "Create a shareable link for a specific session (via ATProto)",
-                ),
-            ],
-        ),
-        (
-            "Chat",
-            vec![
-                ("/help", "Show this help message"),
-                ("/bye", "Exit the Chat"),
-            ],
-        ),
-        (
-            "Plugins",
-            vec![
-                ("/skills", "List all the available skills"),
-                ("$<skill-name>", "Use the skill directly"),
-            ],
-        ),
-    ];
-
-    println!("Available Commands:");
-
-    for (heading, commands) in help_groups {
-        println!();
-        println!("  {heading}");
-
-        for (command, description) in commands {
-            println!("    {command:<24}{description}");
-        }
-    }
-
-    println!();
-    println!("Documentation: https://tiles.run/book");
-    println!("Report issues: https://github.com/tilesprivacy/tiles/issues");
-    println!();
 }
 
 async fn run_model_with_server(
@@ -335,10 +210,7 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
     println!("Running {}", modelname);
     let current_user = get_current_user(&db_conn.common)?;
 
-    let config = Config::builder().auto_add_history(true).build();
-    let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config)
-        .context("Failed to create editor")?;
-    editor.set_helper(Some(TilesHinter));
+    let mut editor = create_line_editor().context("Failed to create editor")?;
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();

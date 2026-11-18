@@ -6219,7 +6219,6 @@ dependencies = [
  "postcard",
  "reqwest 0.12.28",
  "rusqlite_migration",
- "rustyline",
  "semver",
  "serde",
  "serde_ipld_dagcbor",
@@ -6229,6 +6228,7 @@ dependencies = [
  "tar",
  "tempfile",
  "tilekit",
+ "tiles-cli",
  "tiles-engine",
  "tokio",
  "tokio-rusqlite",
@@ -6239,6 +6239,13 @@ dependencies = [
  "tower-http",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "tiles-cli"
+version = "0.1.0"
+dependencies = [
+ "rustyline",
 ]
 
 [[package]]
