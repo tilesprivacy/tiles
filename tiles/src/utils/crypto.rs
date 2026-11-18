@@ -174,10 +174,9 @@ pub fn decrypt_by_hpke(
 #[cfg(test)]
 mod tests {
 
-    use atrium_api::types::string::Datetime;
     use uuid::Uuid;
 
-    use crate::repl::SharedSession;
+    use crate::utils::lexicons::SessionSnapshotRecord;
 
     use super::*;
 
@@ -197,14 +196,7 @@ mod tests {
 
     #[test]
     fn test_round_trip_shared_session_encryption() {
-        let shared_session = SharedSession {
-            r#type: "run.tiles.session".to_string(),
-            session_id: String::from("session_abc"),
-            name: String::from("super_session"),
-            contents: vec![],
-            created_at: Datetime::now().as_str().to_string(),
-            models_used: vec!["model".to_string()],
-        };
+        let shared_session = SessionSnapshotRecord::new("super_session", "session_abc");
 
         let enc_content = encrypt_to_base64(&serde_json::to_vec(&shared_session).unwrap());
 
@@ -212,7 +204,7 @@ mod tests {
 
         let d_content_b = decrypt_from_base64(enc_content.unwrap()).unwrap();
         let v = serde_json::from_slice(&d_content_b).unwrap();
-        let dec_content: SharedSession = serde_json::from_value(v).unwrap();
+        let dec_content: SessionSnapshotRecord = serde_json::from_value(v).unwrap();
 
         assert_eq!(shared_session.name, dec_content.name);
     }

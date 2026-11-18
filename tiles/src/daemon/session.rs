@@ -12,14 +12,11 @@ use serde::{Deserialize, Serialize};
 use tilekit::modelfile::Role;
 use tokio_rusqlite::rusqlite::Connection;
 
-use crate::{
-    core::{
-        account::local::get_current_user,
-        agent::pi::{self, PiAgent},
-        chats::{self as sessionChats, Chats},
-        storage::db::get_db_conn,
-    },
-    repl::ChatResponse,
+use crate::core::{
+    account::local::get_current_user,
+    agent::pi::{self, PiAgent},
+    chats::{self as sessionChats, ChatResponse, Chats},
+    storage::db::get_db_conn,
 };
 
 use crate::utils::config::{
@@ -318,7 +315,6 @@ fn do_save_chat(
         session_id: save_request.session_id,
         role: save_request.role,
         parent_chat_id: save_request.parent_chat_id,
-        metrics: None,
         model_used: agent_model(&state)?,
     };
     let saved = if session.is_none() {

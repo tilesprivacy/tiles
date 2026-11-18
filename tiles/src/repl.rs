@@ -7,13 +7,16 @@ use crate::core::agent::types::{
 };
 use crate::core::agent::{pi, types};
 use crate::core::chats::{
-    Session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat, save_first_chat,
-    update_snapshot,
+    ChatResponse, Session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat,
+    save_first_chat, update_snapshot,
 };
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::{DBTYPE, Dbconn, get_async_db_conn};
-use crate::daemon::{atproto::sign_in, model::picked_modelfile};
+use crate::daemon::atproto::sign_in;
+use crate::daemon::model::{
+    get_default_modelfile, model_spec, picked_modelfile, resolve_gguf_path,
+};
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
     get_inference_config, get_memory_path, get_model_cache, update_current_model,
@@ -30,7 +33,6 @@ use rustyline::hint::Hinter;
 use rustyline::history::DefaultHistory;
 use rustyline::validate::Validator;
 use rustyline::{Config, Editor, Helper};
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self};
@@ -44,42 +46,11 @@ use tilekit::modelfile::Role;
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct BenchmarkMetrics {
-    ttft_ms: f64,
-    total_tokens: i32,
-    tokens_per_second: f64,
-    total_latency_s: f64,
-}
-
-#[allow(dead_code)]
-impl BenchmarkMetrics {
-    fn update(&mut self, metrics: BenchmarkMetrics) -> &Self {
-        if self.ttft_ms == 0.0 {
-            self.ttft_ms += metrics.ttft_ms;
-        }
-        self.total_tokens += metrics.total_tokens;
-        self.tokens_per_second += metrics.tokens_per_second;
-        self.total_latency_s += metrics.total_latency_s;
-        self
-    }
-}
-
 pub struct RunArgs {
     pub modelfile_path: Option<String>,
     pub relay_count: u32,
     pub llama_config: Option<LlamaConfig>,
     pub remote: Option<String>,
-}
-#[derive(Clone, Debug)]
-pub struct ChatResponse {
-    // text content
-    pub input: String,
-    pub session_id: String,
-    pub role: Role,
-    pub parent_chat_id: Option<String>,
-    pub metrics: Option<BenchmarkMetrics>,
-    pub model_used: String,
 }
 
 enum InputCommandResponse {
@@ -184,23 +155,6 @@ enum InputType {
     Exit,
     Prompt,
     Skill,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SharedSession {
-    #[serde(rename = "$type")]
-    pub r#type: String,
-    pub session_id: String,
-    pub name: String,
-    pub contents: Vec<SharedContent>,
-    pub created_at: String,
-    pub models_used: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SharedContent {
-    role: Role,
-    content: String,
 }
 
 struct ReplSession {
@@ -528,54 +482,6 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
     Ok(())
 }
 
-/// Full `repo:quant` spec used as the model identity across config, Pi and the py server
-pub fn model_spec(modelfile: &Modelfile) -> Result<String> {
-    let from = modelfile
-        .from
-        .clone()
-        .ok_or_else(|| anyhow!("Modelfile missing FROM instruction"))?;
-    Ok(match &modelfile.quant {
-        Some(quant) => format!("{}:{}", from, quant),
-        None => from,
-    })
-}
-
-pub(crate) fn resolve_gguf_path(
-    model_cache_path: &PathBuf,
-    quant: Option<&str>,
-) -> Result<PathBuf> {
-    let Some(quant) = quant else {
-        return Ok(model_cache_path.clone());
-    };
-    let suffix = format!("{}.gguf", quant.to_lowercase());
-    let matches: Vec<PathBuf> = fs::read_dir(model_cache_path)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension().is_some_and(|ext| ext == "gguf")
-                && p.file_name().is_some_and(|n| {
-                    let name = n.to_string_lossy().to_lowercase();
-                    name.ends_with(&suffix) && !name.contains("mmproj") && !name.contains("mtp")
-                })
-        })
-        .collect();
-    match matches.len() {
-        0 => Err(anyhow!(
-            "No gguf matching quant '{}' found in {}",
-            quant,
-            model_cache_path.display()
-        )),
-        1 => Ok(matches[0].clone()),
-        _ => Err(anyhow!(
-            "Multiple gguf files matching quant '{}' in {}: {:?}",
-            quant,
-            model_cache_path.display(),
-            matches
-        )),
-    }
-}
-
 async fn load_model(
     modelfile: &Modelfile,
     default_modelfile: &Modelfile,
@@ -627,11 +533,6 @@ async fn load_model(
     } else {
         Ok(())
     }
-}
-
-pub fn get_default_modelfile(provider: impl ConfigProvider) -> Result<PathBuf> {
-    let path = provider.get_lib_dir()?.join("modelfiles/gemma-4-12b-gguf");
-    Ok(path)
 }
 
 async fn load_model_in_py(
@@ -1169,7 +1070,6 @@ fn save_agent_session(
                         .session_started
                         .then(|| repl_session.last_chat_id.clone())
                         .flatten(),
-                    metrics: None,
                     model_used: repl_session.current_modelname.clone(),
                 };
                 let prompt_chat = if repl_session.session_started {
@@ -1199,7 +1099,6 @@ fn save_agent_session(
         session_id: repl_session.session_id.clone(),
         role: Role::Assistant,
         parent_chat_id: repl_session.last_chat_id.clone(),
-        metrics: None,
         model_used: repl_session.current_modelname.clone(),
     };
     let chat = save_chat(&db_conn.chat, current_user, chat_response)?;
@@ -1334,13 +1233,6 @@ mod tests {
     use crate::core::chats::create_session;
     use crate::core::chats::tests::create_user;
     use tokio_rusqlite::rusqlite::Connection;
-
-    #[test]
-    fn default_modelfile_uses_platform_default() {
-        let path =
-            get_default_modelfile(DefaultProvider).expect("default modelfile should resolve");
-        assert!(path.ends_with("modelfiles/gemma-4-12b-gguf"));
-    }
 
     #[test]
     fn model_load_warnings_extracts_string_list() {
