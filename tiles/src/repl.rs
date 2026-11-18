@@ -7,8 +7,8 @@ use crate::core::agent::types::{
 };
 use crate::core::agent::{pi, types};
 use crate::core::chats::{
-    ChatResponse, Session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat,
-    save_first_chat, update_snapshot,
+    ChatResponse, Session, fetch_chats_by_session_id, fetch_session, save_chat, save_first_chat,
+    update_snapshot,
 };
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
@@ -17,6 +17,7 @@ use crate::daemon::atproto::sign_in;
 use crate::daemon::model::{
     get_default_modelfile, model_spec, picked_modelfile, resolve_gguf_path,
 };
+use crate::daemon::{daemon_client, daemon_url};
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
     get_inference_config, get_memory_path, get_model_cache, update_current_model,
@@ -37,7 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
-use tiles_cli::{InputType, create_line_editor, handle_input};
+use tiles_cli::{DaemonApi, InputType, create_line_editor, handle_input, show_session_list};
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
 
@@ -607,15 +608,10 @@ async fn process_share_session(
     Ok(())
 }
 
-fn show_session_info(db_conn: &Dbconn) -> Result<()> {
-    let sessions = fetch_sessions(&db_conn.chat, None)?;
-
-    let mut count = 0;
-    for session in sessions {
-        count += 1;
-        println!("{}.\t{}\t{}", count, session.id, session.name);
-    }
-    Ok(())
+// the daemon's API, for the commands that go through it
+async fn daemon_api() -> Result<DaemonApi> {
+    let client = daemon_client().await?.clone();
+    Ok(DaemonApi::new(client, daemon_url("")))
 }
 
 fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession) -> Result<()> {
@@ -853,7 +849,10 @@ async fn handle_input_commands(
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Sessions => {
-            show_session_info(db_conn)?;
+            let listed = async { show_session_list(&daemon_api().await?).await };
+            if let Err(err) = listed.await {
+                println!("Failed to list sessions due to {}", err);
+            }
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Resume => {

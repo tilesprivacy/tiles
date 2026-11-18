@@ -6245,7 +6245,13 @@ dependencies = [
 name = "tiles-cli"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
  "rustyline",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]
