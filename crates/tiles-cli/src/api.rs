@@ -1,10 +1,10 @@
 //! Calls to the Tiles daemon
 
-use anyhow::{Context, Result, bail};
-use reqwest::Client;
+use anyhow::{Context, Result, anyhow, bail};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 pub struct DaemonApi {
     client: Client,
@@ -12,9 +12,21 @@ pub struct DaemonApi {
 }
 
 #[derive(Debug, PartialEq, Eq, Deserialize)]
-pub struct Session {
+pub(crate) struct Session {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ShareOutcome {
+    Shared { url: String },
+    NotSignedIn,
+    NoSuchSession,
+}
+
+#[derive(Deserialize)]
+struct SharedLink {
+    url: String,
 }
 
 impl DaemonApi {
@@ -23,59 +35,102 @@ impl DaemonApi {
         Self { client, address }
     }
 
-    pub async fn fetch_sessions(&self) -> Result<Vec<Session>> {
-        self.get_response_data("/v1/tilekit/session/list").await
-    }
-
-    async fn get_response_data<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
+    pub(crate) async fn fetch_sessions(&self) -> Result<Vec<Session>> {
         let res = self
             .client
-            .get(format!("{}{path}", self.address))
+            .get(format!("{}/v1/tilekit/session/list", self.address))
             .send()
             .await
             .context("Could not reach the Tiles daemon")?;
-        let ok = res.status().is_success();
-        let mut body: Value = res
-            .json()
-            .await
-            .context("The Tiles daemon didn't answer in JSON")?;
-        if !ok {
-            bail!(
-                "{}",
-                body["reason"]
-                    .as_str()
-                    .unwrap_or("The Tiles daemon refused it")
-            );
-        }
-        Ok(serde_json::from_value(body["data"].take())?)
+        response_data(res).await
     }
+
+    pub(crate) async fn share_session(
+        &self,
+        session_id: &str,
+        is_private: bool,
+    ) -> Result<ShareOutcome> {
+        let res = self
+            .client
+            .post(self.share_session_url(session_id)?)
+            .json(&json!({ "is_private": is_private }))
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        match res.status() {
+            StatusCode::FORBIDDEN => Ok(ShareOutcome::NotSignedIn),
+            StatusCode::NOT_FOUND => Ok(ShareOutcome::NoSuchSession),
+            _ => {
+                let link: SharedLink = response_data(res).await?;
+                Ok(ShareOutcome::Shared { url: link.url })
+            }
+        }
+    }
+
+    // the id is typed by the user, so it's kept as one part of the path
+    fn share_session_url(&self, session_id: &str) -> Result<Url> {
+        let mut url = Url::parse(&self.address)?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("{} is not an address to call", self.address))?
+            .extend(["v1", "tilekit", "atproto", "share-session", session_id]);
+        Ok(url)
+    }
+
+    pub(crate) fn post_json(&self, path: &str, body: &Value) -> RequestBuilder {
+        self.client
+            .post(format!("{}{path}", self.address))
+            .json(body)
+    }
+}
+
+async fn response_data<T: DeserializeOwned>(res: Response) -> Result<T> {
+    let ok = res.status().is_success();
+    let mut body: Value = res
+        .json()
+        .await
+        .context("The Tiles daemon didn't answer in JSON")?;
+    if !ok {
+        bail!(
+            "{}",
+            body["reason"]
+                .as_str()
+                .unwrap_or("The Tiles daemon refused it")
+        );
+    }
+    Ok(serde_json::from_value(body["data"].take())?)
 }
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{body_json, method, path},
     };
 
     use super::*;
 
-    async fn daemon_answering(status: u16, body: Value) -> (MockServer, DaemonApi) {
+    const SHARE_PATH: &str = "/v1/tilekit/atproto/share-session/abc";
+
+    async fn daemon_answering(verb: &str, route: &str, status: u16, body: Value) -> MockServer {
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v1/tilekit/session/list"))
+        Mock::given(method(verb))
+            .and(path(route))
             .respond_with(ResponseTemplate::new(status).set_body_json(body))
             .mount(&server)
             .await;
-        let api = DaemonApi::new(Client::new(), server.uri());
-        (server, api)
+        server
+    }
+
+    fn api_for(server: &MockServer) -> DaemonApi {
+        DaemonApi::new(Client::new(), server.uri())
     }
 
     #[tokio::test]
     async fn sessions_are_read_from_the_daemons_answer() {
         // as the daemon sends it, with the fields the CLI doesn't use
-        let (_server, api) = daemon_answering(
+        let server = daemon_answering(
+            "GET",
+            "/v1/tilekit/session/list",
             200,
             json!({
                 "status": "success",
@@ -99,7 +154,7 @@ mod tests {
         )
         .await;
 
-        let sessions = api.fetch_sessions().await.unwrap();
+        let sessions = api_for(&server).fetch_sessions().await.unwrap();
 
         assert_eq!(
             sessions,
@@ -118,13 +173,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_refusal_gives_the_daemons_reason() {
-        let (_server, api) = daemon_answering(
+        let server = daemon_answering(
+            "GET",
+            "/v1/tilekit/session/list",
             500,
             json!({ "status": "failed", "reason": "database is locked" }),
         )
         .await;
 
-        let err = api.fetch_sessions().await.unwrap_err();
+        let err = api_for(&server).fetch_sessions().await.unwrap_err();
 
         assert_eq!(err.to_string(), "database is locked");
     }
@@ -136,5 +193,68 @@ mod tests {
         let err = api.fetch_sessions().await.unwrap_err();
 
         assert_eq!(err.to_string(), "Could not reach the Tiles daemon");
+    }
+
+    #[tokio::test]
+    async fn a_share_sends_the_private_choice_and_reads_the_link() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path(SHARE_PATH))
+            .and(body_json(json!({ "is_private": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": { "url": "https://tiles.run/share/abc", "is_private": true }
+            })))
+            .mount(&server)
+            .await;
+
+        let outcome = api_for(&server).share_session("abc", true).await.unwrap();
+
+        assert_eq!(
+            outcome,
+            ShareOutcome::Shared {
+                url: "https://tiles.run/share/abc".to_owned()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_share_without_a_sign_in_or_a_session_is_told_apart() {
+        let refusal = |reason: &str| json!({ "status": "failed", "reason": reason });
+
+        let server = daemon_answering("POST", SHARE_PATH, 403, refusal("Sign in first")).await;
+        let outcome = api_for(&server).share_session("abc", false).await.unwrap();
+        assert_eq!(outcome, ShareOutcome::NotSignedIn);
+
+        let server = daemon_answering("POST", SHARE_PATH, 404, refusal("No chat abc")).await;
+        let outcome = api_for(&server).share_session("abc", false).await.unwrap();
+        assert_eq!(outcome, ShareOutcome::NoSuchSession);
+    }
+
+    #[tokio::test]
+    async fn a_failed_share_gives_the_daemons_reason() {
+        let server = daemon_answering(
+            "POST",
+            SHARE_PATH,
+            500,
+            json!({ "status": "failed", "reason": "The PDS refused the record" }),
+        )
+        .await;
+
+        let err = api_for(&server)
+            .share_session("abc", false)
+            .await
+            .unwrap_err();
+
+        assert_eq!(err.to_string(), "The PDS refused the record");
+    }
+
+    #[test]
+    fn a_typed_session_id_cannot_reach_another_route() {
+        let api = DaemonApi::new(Client::new(), "http://127.0.0.1:1729".to_owned());
+
+        let url = api.share_session_url("../logout").unwrap();
+
+        assert_eq!(url.path(), "/v1/tilekit/atproto/share-session/..%2Flogout");
     }
 }

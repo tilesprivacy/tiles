@@ -26,6 +26,7 @@ use nix::unistd::setsid;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tiles_cli::open_in_browser;
 use tokio::net::TcpListener;
 use tower_http::{
     services::{ServeDir, ServeFile},
@@ -37,10 +38,7 @@ use crate::{
         ApiResponse, AppState, daemon_client, daemon_url, no_route, require_json,
         require_local_host, tilekit_router, wrong_method,
     },
-    utils::{
-        config::{ConfigProvider, DefaultProvider},
-        open_in_browser,
-    },
+    utils::config::{ConfigProvider, DefaultProvider},
 };
 
 pub const UI_PORT: u32 = 1730;

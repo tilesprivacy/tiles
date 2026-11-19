@@ -6246,6 +6246,8 @@ name = "tiles-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "log",
+ "owo-colors",
  "reqwest 0.12.28",
  "rustyline",
  "serde",

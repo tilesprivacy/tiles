@@ -1,4 +1,4 @@
-use crate::core::account::atproto::{fetch_logged_in_data, share_session};
+use crate::core::account::atproto::fetch_logged_in_data;
 use crate::core::account::local::get_current_user;
 use crate::core::agent::pi::{PiAgent, PiWriter};
 use crate::core::agent::types::{
@@ -12,12 +12,11 @@ use crate::core::chats::{
 };
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
-use crate::core::storage::db::{DBTYPE, Dbconn, get_async_db_conn};
-use crate::daemon::atproto::sign_in;
+use crate::core::storage::db::Dbconn;
+use crate::daemon::daemon_api;
 use crate::daemon::model::{
     get_default_modelfile, model_spec, picked_modelfile, resolve_gguf_path,
 };
-use crate::daemon::{daemon_client, daemon_url};
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
     get_inference_config, get_memory_path, get_model_cache, update_current_model,
@@ -31,14 +30,15 @@ use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::io::{self};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
-use tiles_cli::{DaemonApi, InputType, create_line_editor, handle_input, show_session_list};
+use tiles_cli::{
+    InputType, create_line_editor, handle_input, share_session_command, show_session_list,
+};
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
 
@@ -523,97 +523,6 @@ async fn process_command(
     Ok(())
 }
 
-async fn process_share_session(
-    conn: &Dbconn,
-    current_session_id: &str,
-    args: &[&str],
-) -> Result<()> {
-    let args = if let Some((_main_command, sub_commands)) = args.split_first() {
-        sub_commands
-    } else {
-        println!("Not a valid command");
-        return Ok(());
-    };
-
-    let session_id = if args.is_empty() {
-        current_session_id
-    } else {
-        args[0]
-    };
-    // fetch session and the chats for the session_id
-
-    let delta_chats = fetch_chats_by_session_id(&conn.chat, session_id)?;
-
-    if delta_chats.sessions.is_empty() {
-        println!("Session {} not available", session_id);
-    }
-
-    if delta_chats.sessions.is_empty() {
-        println!("Session doesn't exist or not started yet");
-        return Ok(());
-    }
-    let session = &delta_chats.sessions[0];
-    let shared_session: SessionSnapshotRecord = if let Some(snapshot_record) = &session.snapshot {
-        serde_json::from_str(snapshot_record)?
-    } else {
-        eprintln!("Older sessions are not supported");
-        return Ok(());
-    };
-
-    let share_choice_prompt = format!(
-        "{}",
-        "Do you want to share as a private session? (Y/n)".yellow()
-    );
-
-    println!("{}", share_choice_prompt);
-
-    let stdin = io::stdin();
-    let mut input = String::new();
-    stdin.read_line(&mut input)?;
-    let clean_input = input.trim();
-    let is_private = clean_input.is_empty() || clean_input.to_lowercase() == "y";
-
-    let common = get_async_db_conn(&DBTYPE::COMMON)?;
-    match share_session(&common, &shared_session, is_private).await {
-        Err(err) if &err.to_string() == "NOT_LOGGED_IN" => {
-            let login_prompt = format!("{}", "Sharing a chat session requires logging in, as the data is stored on your ATmosphere PDS.\nDo you want to proceed with the login flow? (Y/n)".yellow());
-
-            println!("{}", login_prompt);
-
-            let stdin = io::stdin();
-            let mut input = String::new();
-            stdin.read_line(&mut input)?;
-            let clean_input = input.trim();
-            if clean_input.to_lowercase() == "y" {
-                input.clear();
-                println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
-                stdin.read_line(&mut input)?;
-                // a bad handle is reported, it does not end the session
-                match sign_in(input.trim()).await {
-                    Ok(_) => match share_session(&common, &shared_session, is_private).await {
-                        Ok(url) => println!("successfully posted at {url}"),
-                        Err(err) => eprintln!("Failed to share session due to {:?}", err),
-                    },
-                    Err(err) => eprintln!("Could not sign in: {err}"),
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!("Failed to share session due to {:?}", err)
-        }
-        Ok(url) => {
-            println!("successfully posted at {url}");
-        }
-    }
-    Ok(())
-}
-
-// the daemon's API, for the commands that go through it
-async fn daemon_api() -> Result<DaemonApi> {
-    let client = daemon_client().await?.clone();
-    Ok(DaemonApi::new(client, daemon_url("")))
-}
-
 fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession) -> Result<()> {
     let args = if let Some((_main_command, sub_commands)) = args.split_first() {
         sub_commands
@@ -845,7 +754,11 @@ async fn handle_input_commands(
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Share => {
-            process_share_session(db_conn, &repl_session.session_id, &args).await?;
+            let session_id = args.get(1).copied().unwrap_or(&repl_session.session_id);
+            let shared = async { share_session_command(&daemon_api().await?, session_id).await };
+            if let Err(err) = shared.await {
+                eprintln!("Failed to share session due to {:?}", err);
+            }
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Sessions => {
