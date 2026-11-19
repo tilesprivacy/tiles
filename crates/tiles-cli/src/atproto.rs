@@ -66,12 +66,7 @@ pub async fn sign_in(api: &DaemonApi, handle: &str) -> Result<AtprotoAccount> {
 
 /// `/share`: asks how to share the chat, and offers a sign in when it needs one
 pub async fn share_session_command(api: &DaemonApi, session_id: &str) -> Result<()> {
-    println!(
-        "{}",
-        "Do you want to share as a private session? (Y/n)".yellow()
-    );
-    let answer = read_answer()?;
-    let is_private = answer.is_empty() || answer == "y";
+    let is_private = ask_whether_private()?;
 
     let mut outcome = api.share_session(session_id, is_private).await?;
     if outcome == ShareOutcome::NotSignedIn {
@@ -82,6 +77,24 @@ pub async fn share_session_command(api: &DaemonApi, session_id: &str) -> Result<
     }
     println!("{}", share_outcome_line(&outcome));
     Ok(())
+}
+
+// asks again until the answer is y or n, so a "yes" is never read as a no.
+// enter takes the default the prompt shows
+fn ask_whether_private() -> Result<bool> {
+    loop {
+        println!(
+            "{}",
+            "Do you want to share as a private session? (Y/n)".yellow()
+        );
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        match answer.trim() {
+            "" | "y" | "Y" => return Ok(true),
+            "n" | "N" => return Ok(false),
+            _ => println!("Please answer y or n"),
+        }
+    }
 }
 
 // false when the user says no or the sign in fails
