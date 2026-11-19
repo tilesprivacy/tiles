@@ -17,6 +17,13 @@ pub(crate) struct Session {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShareVisibility {
+    /// Encrypted, with the key only in the link
+    Private,
+    Public,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ShareOutcome {
     Shared { url: String },
@@ -48,8 +55,9 @@ impl DaemonApi {
     pub(crate) async fn share_session(
         &self,
         session_id: &str,
-        is_private: bool,
+        visibility: ShareVisibility,
     ) -> Result<ShareOutcome> {
+        let is_private = visibility == ShareVisibility::Private;
         let res = self
             .client
             .post(self.share_session_url(session_id)?)
@@ -208,7 +216,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let outcome = api_for(&server).share_session("abc", true).await.unwrap();
+        let outcome = api_for(&server)
+            .share_session("abc", ShareVisibility::Private)
+            .await
+            .unwrap();
 
         assert_eq!(
             outcome,
@@ -223,11 +234,17 @@ mod tests {
         let refusal = |reason: &str| json!({ "status": "failed", "reason": reason });
 
         let server = daemon_answering("POST", SHARE_PATH, 403, refusal("Sign in first")).await;
-        let outcome = api_for(&server).share_session("abc", false).await.unwrap();
+        let outcome = api_for(&server)
+            .share_session("abc", ShareVisibility::Public)
+            .await
+            .unwrap();
         assert_eq!(outcome, ShareOutcome::NotSignedIn);
 
         let server = daemon_answering("POST", SHARE_PATH, 404, refusal("No chat abc")).await;
-        let outcome = api_for(&server).share_session("abc", false).await.unwrap();
+        let outcome = api_for(&server)
+            .share_session("abc", ShareVisibility::Public)
+            .await
+            .unwrap();
         assert_eq!(outcome, ShareOutcome::NoSuchSession);
     }
 
@@ -242,7 +259,7 @@ mod tests {
         .await;
 
         let err = api_for(&server)
-            .share_session("abc", false)
+            .share_session("abc", ShareVisibility::Public)
             .await
             .unwrap_err();
 

@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::api::{DaemonApi, ShareOutcome};
+use crate::api::{DaemonApi, ShareOutcome, ShareVisibility};
 use crate::browser::open_in_browser;
 use crate::sse::take_events;
 
@@ -66,22 +66,21 @@ pub async fn sign_in(api: &DaemonApi, handle: &str) -> Result<AtprotoAccount> {
 
 /// `/share`: asks how to share the chat, and offers a sign in when it needs one
 pub async fn share_session_command(api: &DaemonApi, session_id: &str) -> Result<()> {
-    let is_private = ask_whether_private()?;
+    let visibility = ask_share_visibility()?;
 
-    let mut outcome = api.share_session(session_id, is_private).await?;
+    let mut outcome = api.share_session(session_id, visibility).await?;
     if outcome == ShareOutcome::NotSignedIn {
         if !sign_in_to_share(api).await? {
             return Ok(());
         }
-        outcome = api.share_session(session_id, is_private).await?;
+        outcome = api.share_session(session_id, visibility).await?;
     }
     println!("{}", share_outcome_line(&outcome));
     Ok(())
 }
 
-// asks again until the answer is y or n, so a "yes" is never read as a no.
 // enter takes the default the prompt shows
-fn ask_whether_private() -> Result<bool> {
+fn ask_share_visibility() -> Result<ShareVisibility> {
     loop {
         println!(
             "{}",
@@ -90,8 +89,8 @@ fn ask_whether_private() -> Result<bool> {
         let mut answer = String::new();
         io::stdin().read_line(&mut answer)?;
         match answer.trim() {
-            "" | "y" | "Y" => return Ok(true),
-            "n" | "N" => return Ok(false),
+            "" | "y" | "Y" => return Ok(ShareVisibility::Private),
+            "n" | "N" => return Ok(ShareVisibility::Public),
             _ => println!("Please answer y or n"),
         }
     }
