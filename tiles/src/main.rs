@@ -11,9 +11,8 @@ use tiles::{
         service,
     },
     daemon::{
-        atproto::sign_in,
         authz::{create_link_cli, join_request_cli, list_linked_devices_cli, revoke_peers_cli},
-        get_or_set_daemon_port,
+        daemon_api, get_or_set_daemon_port,
         net::{fetch_network_status_cli, start_network_cli, stop_network_cli, sync_with_peer_cli},
         remote_status, share_remote_link, start_cmd, start_server, status_cmd, stop_cmd,
         unshare_remote_link, web,
@@ -712,7 +711,7 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
         },
         Some(Commands::Accounts(AccountCommandsGroup::At(at_args))) => match at_args.command {
             AtCommands::Login { handle } => {
-                let account = sign_in(&handle).await?;
+                let account = tiles_cli::sign_in(&daemon_api().await?, &handle).await?;
                 println!("Logged in successfully as @{}", account.handle);
             }
             AtCommands::Logout => {

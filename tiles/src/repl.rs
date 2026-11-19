@@ -1,4 +1,4 @@
-use crate::core::account::atproto::{fetch_logged_in_data, share_session};
+use crate::core::account::atproto::fetch_logged_in_data;
 use crate::core::account::local::get_current_user;
 use crate::core::agent::pi::{PiAgent, PiWriter};
 use crate::core::agent::types::{
@@ -7,13 +7,13 @@ use crate::core::agent::types::{
 };
 use crate::core::agent::{pi, types};
 use crate::core::chats::{
-    ChatResponse, Session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat,
-    save_first_chat, update_snapshot,
+    ChatResponse, Session, fetch_chats_by_session_id, fetch_session, save_chat, save_first_chat,
+    update_snapshot,
 };
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
-use crate::core::storage::db::{DBTYPE, Dbconn, get_async_db_conn};
-use crate::daemon::atproto::sign_in;
+use crate::core::storage::db::Dbconn;
+use crate::daemon::daemon_api;
 use crate::daemon::model::{
     get_default_modelfile, model_spec, picked_modelfile, resolve_gguf_path,
 };
@@ -27,22 +27,18 @@ use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
 use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
-use rustyline::completion::Completer;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::history::DefaultHistory;
-use rustyline::validate::Validator;
-use rustyline::{Config, Editor, Helper};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{self};
-use std::io::{self};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
+use tiles_cli::{
+    InputType, create_line_editor, handle_input, share_session_command, show_session_list,
+};
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
 
@@ -121,42 +117,6 @@ pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
     run_model_with_server(modelfile, default_modelfile, &run_args, db_conn).await
 }
 
-struct TilesHinter;
-
-impl Hinter for TilesHinter {
-    type Hint = String;
-
-    fn hint(&self, line: &str, _pos: usize, _ctx: &rustyline::Context<'_>) -> Option<Self::Hint> {
-        if line.is_empty() {
-            Some("Send a message (/help to show available commands)".to_string())
-        } else {
-            None
-        }
-    }
-}
-
-impl Completer for TilesHinter {
-    type Candidate = String;
-}
-
-impl Highlighter for TilesHinter {
-    fn highlight_hint<'h>(&self, hint: &'h str) -> std::borrow::Cow<'h, str> {
-        std::borrow::Cow::Owned(format!("\x1b[2m{}\x1b[0m", hint))
-    }
-}
-
-impl Validator for TilesHinter {}
-
-impl Helper for TilesHinter {}
-
-enum InputType {
-    Skip,
-    Command(String),
-    Exit,
-    Prompt,
-    Skill,
-}
-
 struct ReplSession {
     pub session_id: String,
     // if true, we will prepend the resumed session history to the input
@@ -198,90 +158,6 @@ impl ReplSession {
     pub fn set_resumed_session(&mut self, session: String) {
         self.resumed_session = session
     }
-}
-fn handle_input(input: &str) -> InputType {
-    if let Some(cmd) = input.strip_prefix('/') {
-        let keyword = cmd.split_whitespace().next().unwrap_or("");
-        match keyword.to_lowercase().as_str() {
-            "help" | "?" => {
-                show_help();
-                InputType::Skip
-            }
-            "bye" => InputType::Exit,
-            "" => {
-                println!("Empty command. Type /help for available commands.");
-                InputType::Skip
-            }
-            _ => InputType::Command(cmd.to_owned()),
-        }
-    } else if let Some(_skill) = input.strip_prefix('$') {
-        InputType::Skill
-    } else {
-        InputType::Prompt
-    }
-}
-
-fn show_help() {
-    let help_groups = vec![
-        (
-            "Session",
-            vec![
-                (
-                    "/reasoning <effort>",
-                    "Sets the reasoning effort of current model (none, low, medium, high, xhigh)",
-                ),
-                ("/status", "Show the current session state"),
-                ("/sessions", "List all available sessions"),
-                (
-                    "/resume <sessionId>",
-                    "Load and resume a specific session (requires <sessionId>)",
-                ),
-            ],
-        ),
-        (
-            "Sharing",
-            vec![
-                (
-                    "/share",
-                    "Create a shareable link for the current session (via ATProto)",
-                ),
-                (
-                    "/share <sessionId>",
-                    "Create a shareable link for a specific session (via ATProto)",
-                ),
-            ],
-        ),
-        (
-            "Chat",
-            vec![
-                ("/help", "Show this help message"),
-                ("/bye", "Exit the Chat"),
-            ],
-        ),
-        (
-            "Plugins",
-            vec![
-                ("/skills", "List all the available skills"),
-                ("$<skill-name>", "Use the skill directly"),
-            ],
-        ),
-    ];
-
-    println!("Available Commands:");
-
-    for (heading, commands) in help_groups {
-        println!();
-        println!("  {heading}");
-
-        for (command, description) in commands {
-            println!("    {command:<24}{description}");
-        }
-    }
-
-    println!();
-    println!("Documentation: https://tiles.run/book");
-    println!("Report issues: https://github.com/tilesprivacy/tiles/issues");
-    println!();
 }
 
 async fn run_model_with_server(
@@ -335,10 +211,7 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
     println!("Running {}", modelname);
     let current_user = get_current_user(&db_conn.common)?;
 
-    let config = Config::builder().auto_add_history(true).build();
-    let mut editor = Editor::<TilesHinter, DefaultHistory>::with_config(config)
-        .context("Failed to create editor")?;
-    editor.set_helper(Some(TilesHinter));
+    let mut editor = create_line_editor().context("Failed to create editor")?;
 
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
@@ -650,102 +523,6 @@ async fn process_command(
     Ok(())
 }
 
-async fn process_share_session(
-    conn: &Dbconn,
-    current_session_id: &str,
-    args: &[&str],
-) -> Result<()> {
-    let args = if let Some((_main_command, sub_commands)) = args.split_first() {
-        sub_commands
-    } else {
-        println!("Not a valid command");
-        return Ok(());
-    };
-
-    let session_id = if args.is_empty() {
-        current_session_id
-    } else {
-        args[0]
-    };
-    // fetch session and the chats for the session_id
-
-    let delta_chats = fetch_chats_by_session_id(&conn.chat, session_id)?;
-
-    if delta_chats.sessions.is_empty() {
-        println!("Session {} not available", session_id);
-    }
-
-    if delta_chats.sessions.is_empty() {
-        println!("Session doesn't exist or not started yet");
-        return Ok(());
-    }
-    let session = &delta_chats.sessions[0];
-    let shared_session: SessionSnapshotRecord = if let Some(snapshot_record) = &session.snapshot {
-        serde_json::from_str(snapshot_record)?
-    } else {
-        eprintln!("Older sessions are not supported");
-        return Ok(());
-    };
-
-    let share_choice_prompt = format!(
-        "{}",
-        "Do you want to share as a private session? (Y/n)".yellow()
-    );
-
-    println!("{}", share_choice_prompt);
-
-    let stdin = io::stdin();
-    let mut input = String::new();
-    stdin.read_line(&mut input)?;
-    let clean_input = input.trim();
-    let is_private = clean_input.is_empty() || clean_input.to_lowercase() == "y";
-
-    let common = get_async_db_conn(&DBTYPE::COMMON)?;
-    match share_session(&common, &shared_session, is_private).await {
-        Err(err) if &err.to_string() == "NOT_LOGGED_IN" => {
-            let login_prompt = format!("{}", "Sharing a chat session requires logging in, as the data is stored on your ATmosphere PDS.\nDo you want to proceed with the login flow? (Y/n)".yellow());
-
-            println!("{}", login_prompt);
-
-            let stdin = io::stdin();
-            let mut input = String::new();
-            stdin.read_line(&mut input)?;
-            let clean_input = input.trim();
-            if clean_input.to_lowercase() == "y" {
-                input.clear();
-                println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
-                stdin.read_line(&mut input)?;
-                // a bad handle is reported, it does not end the session
-                match sign_in(input.trim()).await {
-                    Ok(_) => match share_session(&common, &shared_session, is_private).await {
-                        Ok(url) => println!("successfully posted at {url}"),
-                        Err(err) => eprintln!("Failed to share session due to {:?}", err),
-                    },
-                    Err(err) => eprintln!("Could not sign in: {err}"),
-                }
-            }
-        }
-        Err(err) => {
-            eprintln!("Failed to share session due to {:?}", err)
-        }
-        Ok(url) => {
-            println!("successfully posted at {url}");
-        }
-    }
-    Ok(())
-}
-
-fn show_session_info(db_conn: &Dbconn) -> Result<()> {
-    let sessions = fetch_sessions(&db_conn.chat, None)?;
-
-    let mut count = 0;
-    for session in sessions {
-        count += 1;
-        println!("{}.\t{}\t{}", count, session.id, session.name);
-    }
-    Ok(())
-}
-
 fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession) -> Result<()> {
     let args = if let Some((_main_command, sub_commands)) = args.split_first() {
         sub_commands
@@ -977,11 +754,18 @@ async fn handle_input_commands(
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Share => {
-            process_share_session(db_conn, &repl_session.session_id, &args).await?;
+            let session_id = args.get(1).copied().unwrap_or(&repl_session.session_id);
+            let shared = async { share_session_command(&daemon_api().await?, session_id).await };
+            if let Err(err) = shared.await {
+                eprintln!("Failed to share session due to {:?}", err);
+            }
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Sessions => {
-            show_session_info(db_conn)?;
+            let listed = async { show_session_list(&daemon_api().await?).await };
+            if let Err(err) = listed.await {
+                println!("Failed to list sessions due to {}", err);
+            }
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Resume => {

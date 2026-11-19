@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 tilekit = {path = "../tilekit"}
 tiles-engine = {path = "../crates/tiles-engine"}
+tiles-cli = {path = "../crates/tiles-cli"}
 clap = { version = "4.5.48", features = ["derive"] }
 reqwest = { version = "0.12", features = ["json", "blocking", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -15,7 +16,6 @@ tokio = { version = "1" , features = ["macros", "process", "rt-multi-thread", "i
 owo-colors = "4"
 futures-util = "0.3"
 indicatif = "0.17"
-rustyline = "18.0"
 toml = "1.0.3"
 semver = "1.0"
 tokio-rusqlite = { version = "0.8.0", features = ["bundled-sqlcipher-vendored-openssl"] }
