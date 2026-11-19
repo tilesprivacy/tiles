@@ -1,4 +1,4 @@
-//! The `/sessions` command
+//! What the slash commands do and print
 
 use anyhow::Result;
 

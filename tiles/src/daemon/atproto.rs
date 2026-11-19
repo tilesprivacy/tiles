@@ -1,6 +1,5 @@
 use std::{convert::Infallible, sync::Arc};
 
-use anyhow::{Context, Result, anyhow};
 use axum::{
     Router,
     extract::{Path, State},
@@ -20,14 +19,11 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     core::{
-        account::atproto::{self, AtprotoAccount, HandleNotFound, LOGIN_TIMEOUT},
+        account::atproto::{self, HandleNotFound, LOGIN_TIMEOUT},
         chats::session_snapshot,
         storage::db::{DBTYPE, call_error, get_async_db_conn, get_db_conn},
     },
-    daemon::{
-        ApiJson, ApiResponse, AppError, AppState, daemon_client, daemon_url, sse::take_events,
-    },
-    utils::open_in_browser,
+    daemon::{ApiJson, ApiResponse, AppError, AppState},
 };
 
 /// A sign in waiting for the browser. Cancelling it frees the callback port
@@ -159,51 +155,6 @@ fn event(name: &str, data: Value) -> Event {
     Event::default().event(name).data(data.to_string())
 }
 
-/// Signs in through the daemon, the same flow every client uses: prints and
-/// opens the url, then waits for the browser to come back
-pub async fn sign_in(handle: &str) -> Result<AtprotoAccount> {
-    let res = daemon_client()
-        .await?
-        .post(daemon_url("/v1/tilekit/atproto/login"))
-        .json(&json!({ "user_handle": handle }))
-        .send()
-        .await
-        .context("Could not reach the Tiles daemon")?;
-
-    if !res.status().is_success() {
-        let body: Value = res.json().await.unwrap_or_default();
-        let reason = body["reason"].as_str().unwrap_or("The sign in failed");
-        return Err(anyhow!(reason.to_owned()));
-    }
-
-    let mut res = res;
-    let mut pending = String::new();
-    while let Some(chunk) = res.chunk().await? {
-        pending.push_str(&String::from_utf8_lossy(&chunk));
-        for (name, data) in take_events(&mut pending) {
-            match name.as_str() {
-                "authorize" => {
-                    let url = data["url"]
-                        .as_str()
-                        .context("The sign in came without a url")?;
-                    println!(
-                        "\nIf the browser doesn't open automatically, open this URL:\n\n{url}\n"
-                    );
-                    open_in_browser(url);
-                }
-                "signed_in" => return Ok(serde_json::from_value(data)?),
-                "error" => {
-                    let reason = data["reason"].as_str().unwrap_or("The sign in failed");
-                    return Err(anyhow!(reason.to_owned()));
-                }
-                _ => {}
-            }
-        }
-    }
-
-    Err(anyhow!("The daemon closed the sign in before it finished"))
-}
-
 pub async fn logout() -> Result<impl IntoResponse, AppError> {
     let user_db_conn = get_db_conn(&crate::core::storage::db::DBTYPE::COMMON)
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
@@ -244,8 +195,10 @@ pub async fn status() -> Result<impl IntoResponse, AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::account::atproto::AtprotoAccount;
     use futures_util::stream;
     use http_body_util::BodyExt;
+    use tiles_cli::take_events;
 
     // the bytes axum sends for these events, so the tests read what a client really gets
     async fn wire(events: Vec<Event>) -> String {
@@ -279,7 +232,8 @@ mod tests {
 
         // the same fields sign_in reads
         assert_eq!(events[0].1["url"], "https://bsky.social/oauth");
-        let signed_in: AtprotoAccount = serde_json::from_value(events[1].1.clone()).unwrap();
+        let signed_in: tiles_cli::AtprotoAccount =
+            serde_json::from_value(events[1].1.clone()).unwrap();
         assert_eq!(signed_in.handle, "alice.bsky.social");
         assert_eq!(signed_in.did, "did:plc:alice");
         assert_eq!(events[2].1["reason"], "The sign in timed out");

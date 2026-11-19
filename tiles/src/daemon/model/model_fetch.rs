@@ -4,9 +4,10 @@ use anyhow::{Context, Result, bail};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
+use tiles_cli::take_events;
 
 use super::{CLIENT_HEADER, DownloadState};
-use crate::daemon::{daemon_client, daemon_url, sse::take_events};
+use crate::daemon::{daemon_client, daemon_url};
 
 pub async fn pull(repo: &str, quant: Option<&str>) -> Result<()> {
     let model = match quant {
