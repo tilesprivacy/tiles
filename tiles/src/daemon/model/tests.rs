@@ -22,12 +22,16 @@ use wiremock::{
 
 use super::{
     CLIENT_HEADER, CurrentModel, DownloadState, ModelDownload, Models, Spec, bundled::BUNDLED,
-    default_or_newest, download::with_draft_head, model_router, modelfile_spec,
+    default_or_newest, download::with_draft_head, get_default_modelfile, model_router,
+    modelfile_spec,
 };
 use crate::{
     core::agent::pi::from_test_command,
     daemon::{AppState, session::ResumedChat},
-    utils::hf_model_downloader::{Hub, repo_dir},
+    utils::{
+        config::DefaultProvider,
+        hf_model_downloader::{Hub, repo_dir},
+    },
 };
 
 const REPO: &str = "org/model-GGUF";
@@ -482,6 +486,12 @@ fn the_modelfiles_folder_has_exactly_the_bundled_models() {
         let spec = modelfile_spec(&modelfiles.join(id)).unwrap();
         assert!(spec.repo.starts_with("unsloth/gemma-4-"), "{id}: {spec}");
     }
+}
+
+#[test]
+fn default_modelfile_uses_platform_default() {
+    let path = get_default_modelfile(DefaultProvider).expect("default modelfile should resolve");
+    assert!(path.ends_with("modelfiles/gemma-4-12b-gguf"));
 }
 
 #[tokio::test]

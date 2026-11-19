@@ -15,7 +15,7 @@ use std::{
     time::SystemTime,
 };
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use axum::{
     Router,
     extract::{Query, State},
@@ -29,12 +29,12 @@ use axum::{
 use futures_util::future::join_all;
 use serde::Deserialize;
 use serde_json::json;
-use tilekit::modelfile::split_model_spec;
+use tilekit::modelfile::{Modelfile, split_model_spec};
 use tokio::sync::broadcast::{self, error::RecvError};
 
-pub use bundled::picked_modelfile;
+pub use bundled::{get_default_modelfile, picked_modelfile};
 pub use download::{DownloadState, ModelChange, ModelDownload};
-pub(crate) use download::{free_space, gb};
+pub(crate) use download::{free_space, gb, resolve_gguf_path};
 pub use model_fetch::pull;
 pub(crate) use model_fetch::{download_bar, finish_bar, response_data};
 
@@ -44,7 +44,6 @@ use crate::{
         server::{ServerState, start_server_daemon, stop_server_daemon},
     },
     daemon::{ApiJson, ApiResponse, AppError, AppState},
-    repl::get_default_modelfile,
     utils::{
         config::{
             ConfigProvider, DefaultProvider, get_current_model, get_or_create_model_download_path,
@@ -288,6 +287,18 @@ fn modelfile_spec(path: &Path) -> anyhow::Result<Spec> {
         .from
         .with_context(|| format!("{} has no FROM", path.display()))?;
     Spec::new(&repo, modelfile.quant.as_deref())
+}
+
+/// Full `repo:quant` spec used as the model identity across config, Pi and the py server
+pub fn model_spec(modelfile: &Modelfile) -> anyhow::Result<String> {
+    let from = modelfile
+        .from
+        .clone()
+        .ok_or_else(|| anyhow!("Modelfile missing FROM instruction"))?;
+    Ok(match &modelfile.quant {
+        Some(quant) => format!("{}:{}", from, quant),
+        None => from,
+    })
 }
 
 #[derive(Deserialize)]

@@ -5,8 +5,11 @@ use crate::{
         pi::{self, PiAgent, handle_graceful_exit},
         types::{CommandType, PiResponse, PiResponseMessage},
     },
-    daemon::{ApiJson, ApiResponse, AppError, AppState, model::picked_modelfile, session},
-    repl::{get_default_modelfile, model_spec},
+    daemon::{
+        ApiJson, ApiResponse, AppError, AppState,
+        model::{get_default_modelfile, model_spec, picked_modelfile},
+        session,
+    },
     utils::config::{ConfigProvider, DefaultProvider, PY_PORT, get_current_model},
 };
 

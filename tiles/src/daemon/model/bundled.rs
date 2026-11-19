@@ -6,6 +6,7 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 
 use super::{Models, Spec, download::ModelStatus, modelfile_spec};
+use crate::utils::config::ConfigProvider;
 
 // the Modelfile and the name the UI shows, smallest first
 pub const BUNDLED: [(&str, &str); 5] = [
@@ -88,4 +89,9 @@ pub fn modelfile_for(modelfiles: &Path, spec: &Spec) -> Option<PathBuf> {
 /// The Modelfile of the model chats should use, when it's one of Tiles' own
 pub fn picked_modelfile(modelfiles: &Path, picked: &str) -> Option<PathBuf> {
     modelfile_for(modelfiles, &Spec::parse(picked).ok()?)
+}
+
+pub fn get_default_modelfile(provider: impl ConfigProvider) -> anyhow::Result<PathBuf> {
+    let path = provider.get_lib_dir()?.join("modelfiles/gemma-4-12b-gguf");
+    Ok(path)
 }

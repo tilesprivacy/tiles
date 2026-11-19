@@ -9,7 +9,6 @@ use std::str::FromStr;
 use crate::core::account::local::User;
 use crate::core::agent::types::{PiMsgContent, PiMsgEvent};
 use crate::core::storage::db::get_db_conn;
-use crate::repl::ChatResponse;
 use crate::utils::get_unix_time_now;
 use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
 use anyhow::{Result, anyhow};
@@ -65,6 +64,16 @@ pub struct Session {
     pub created_at: u64,
     creator_id: String,
     pub snapshot: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ChatResponse {
+    // text content
+    pub input: String,
+    pub session_id: String,
+    pub role: Role,
+    pub parent_chat_id: Option<String>,
+    pub model_used: String,
 }
 
 type Responder<T> = oneshot::Sender<T>;
@@ -537,12 +546,12 @@ pub mod tests {
         core::{
             account::local::{ACCOUNT, User},
             chats::{
-                apply_delta, create_session, decode_delta_from_bytes, encode_delta_to_bytes,
-                fetch_models_used_by_session, fetch_session, get_delta, get_last_row_counter,
-                save_chat, save_first_chat, session_snapshot, update_snapshot,
+                ChatResponse, apply_delta, create_session, decode_delta_from_bytes,
+                encode_delta_to_bytes, fetch_models_used_by_session, fetch_session, get_delta,
+                get_last_row_counter, save_chat, save_first_chat, session_snapshot,
+                update_snapshot,
             },
         },
-        repl::ChatResponse,
         utils::{get_unix_time_now, lexicons::SessionSnapshotRecord, test_logger},
     };
 
@@ -557,7 +566,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let chat = save_chat(&conn, &user, chat_response).expect("chat should be saved");
@@ -585,7 +593,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::Assistant,
             parent_chat_id: Some(parent_chat_id.clone()),
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let chat = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -609,7 +616,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::Assistant,
             parent_chat_id: Some(Uuid::now_v7().to_string()),
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
 
@@ -630,7 +636,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let chat =
@@ -650,7 +655,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let result = save_chat(&conn, &user, chat_response);
@@ -667,7 +671,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let chat = save_chat(&conn, &user, chat_response).expect("chat should be saved");
@@ -698,7 +701,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -721,7 +723,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
 
@@ -742,7 +743,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -764,7 +764,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
@@ -788,7 +787,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
@@ -804,7 +802,6 @@ pub mod tests {
             session_id: String::from("session_def"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -824,7 +821,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -847,7 +843,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -872,7 +867,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
 
@@ -891,7 +885,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role,
             parent_chat_id: parent,
-            metrics: None,
             model_used: model.to_owned(),
         };
         let mut parent = save_first_chat(
@@ -956,7 +949,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gemma".to_owned(),
         };
         save_first_chat(&conn, &user, "hi", prompt).unwrap();
@@ -978,7 +970,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
 
@@ -997,7 +988,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -1025,7 +1015,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -1053,7 +1042,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -1076,7 +1064,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");
@@ -1112,7 +1099,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 =
@@ -1128,7 +1114,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 =
@@ -1229,7 +1214,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 =
@@ -1246,7 +1230,6 @@ pub mod tests {
             session_id: String::from("session_def"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 =
@@ -1368,7 +1351,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
 
@@ -1377,7 +1359,6 @@ pub mod tests {
             session_id: String::from("session_abc"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "kimi".to_owned(),
         };
         create_session(&conn, "session_abc", "sesh", &user.user_id).unwrap();
@@ -1396,7 +1377,6 @@ pub mod tests {
             session_id: String::from("session_def"),
             role: Role::User,
             parent_chat_id: None,
-            metrics: None,
             model_used: "gpt-oss".to_owned(),
         };
         let _chat_1 = save_chat(&conn, &user, chat_response.clone()).expect("chat should be saved");

@@ -6,6 +6,7 @@ use std::{
     sync::Arc,
 };
 
+use anyhow::anyhow;
 use axum::response::sse::Event;
 use futures_util::Stream;
 use nix::sys::statvfs::statvfs;
@@ -19,7 +20,6 @@ use crate::{
         AppError,
         job::{Job, JobState, Running, Speed, is_live},
     },
-    repl::resolve_gguf_path,
     utils::{
         config::get_model_cache,
         hf_model_downloader::{self as hf, DownloadEvent, DownloadOutcome, DownloadPlan, Hub},
@@ -368,6 +368,42 @@ pub(super) fn with_draft_head(gguf: &Path) -> u64 {
         .map(|path| len(&path))
         .sum();
     len(gguf) + heads
+}
+
+pub(crate) fn resolve_gguf_path(
+    model_cache_path: &PathBuf,
+    quant: Option<&str>,
+) -> anyhow::Result<PathBuf> {
+    let Some(quant) = quant else {
+        return Ok(model_cache_path.clone());
+    };
+    let suffix = format!("{}.gguf", quant.to_lowercase());
+    let matches: Vec<PathBuf> = std::fs::read_dir(model_cache_path)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_file()
+                && p.extension().is_some_and(|ext| ext == "gguf")
+                && p.file_name().is_some_and(|n| {
+                    let name = n.to_string_lossy().to_lowercase();
+                    name.ends_with(&suffix) && !name.contains("mmproj") && !name.contains("mtp")
+                })
+        })
+        .collect();
+    match matches.len() {
+        0 => Err(anyhow!(
+            "No gguf matching quant '{}' found in {}",
+            quant,
+            model_cache_path.display()
+        )),
+        1 => Ok(matches[0].clone()),
+        _ => Err(anyhow!(
+            "Multiple gguf files matching quant '{}' in {}: {:?}",
+            quant,
+            model_cache_path.display(),
+            matches
+        )),
+    }
 }
 
 pub(crate) fn free_space(path: &Path) -> nix::Result<u64> {
