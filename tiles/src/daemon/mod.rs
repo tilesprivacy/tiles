@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::OpenOptions;
 use std::sync::Mutex;
+use tiles_cli::DaemonApi;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio::sync::OnceCell;
 use tokio::sync::oneshot::{self, Receiver, Sender};
@@ -67,7 +68,6 @@ pub mod model;
 pub mod net;
 pub mod server;
 pub mod session;
-mod sse;
 pub mod web;
 use crate::{
     core::{
@@ -404,6 +404,12 @@ pub async fn daemon_client() -> Result<&'static Client> {
 pub fn daemon_url(path: &str) -> String {
     let port = get_or_set_daemon_port();
     format!("http://127.0.0.1:{port}{path}")
+}
+
+/// The daemon's API for the commands in `tiles-cli`, once the daemon is up
+pub async fn daemon_api() -> Result<DaemonApi> {
+    let client = daemon_client().await?.clone();
+    Ok(DaemonApi::new(client, daemon_url("")))
 }
 async fn root(State(state): State<Arc<AppState>>) -> String {
     state.vsn.clone()

@@ -7,12 +7,12 @@ use indicatif::{DecimalBytes, ProgressBar};
 use owo_colors::OwoColorize;
 use reqwest::Client;
 use serde_json::{Value, json};
+use tiles_cli::take_events;
 
 use super::InstallState;
 use crate::daemon::{
     daemon_client, daemon_url,
     model::{CLIENT_HEADER, download_bar, finish_bar, response_data},
-    sse::take_events,
 };
 
 /// Asks before downloading. No keeps models on the CPU, by picking it unless the engine was picked by hand

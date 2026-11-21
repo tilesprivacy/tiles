@@ -1,0 +1,18 @@
+[package]
+name = "tiles-cli"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+log = "0.4.29"
+owo-colors = "4"
+reqwest = { version = "0.12", features = ["json"] }
+rustyline = "18.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["process", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6.5"
