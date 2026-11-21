@@ -83,6 +83,20 @@ pub enum LoadMode {
     Dio,
 }
 
+impl LoadMode {
+    /// The name the app shows for it
+    fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::None => "No memory map",
+            Self::Mmap => "Memory map",
+            Self::Mlock => "Lock in RAM",
+            Self::MmapMlock => "Memory map, locked in RAM",
+            Self::Dio => "Direct I/O",
+        }
+    }
+}
+
 impl LlamaConfig {
     /// Fills what's unset with Tiles' defaults. Without a context length llama.cpp uses
     /// the model's maximum and runs out of memory on most machines
@@ -716,12 +730,23 @@ pub fn update_llama_config(config: &LlamaConfig) -> Result<()> {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct LlamaSetting {
     pub name: String,
+    /// The name the app shows for it
+    pub label: String,
     pub value: Option<serde_json::Value>,
     pub default: String,
     pub kind: SettingKind,
+    /// The smallest number a number setting takes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub choices: Vec<String>,
+    pub choices: Vec<SettingChoice>,
     pub help: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SettingChoice {
+    pub value: String,
+    pub label: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -762,6 +787,7 @@ enum ServerArgument {
 
 struct SettingDefinition {
     name: &'static str,
+    label: &'static str,
     setting_type: SettingType,
     default: &'static str,
     help: &'static str,
@@ -771,6 +797,7 @@ struct SettingDefinition {
 const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     SettingDefinition {
         name: "context_length",
+        label: "Context length",
         setting_type: SettingType::Number {
             min: MIN_CONTEXT_LENGTH as i64,
         },
@@ -780,6 +807,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "gpu_layers",
+        label: "GPU layers",
         setting_type: SettingType::Number { min: -1 },
         default: "auto",
         help: "Model layers to run on the GPU",
@@ -787,6 +815,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "offload_kqv",
+        label: "KV cache on the GPU",
         setting_type: SettingType::Flag,
         default: "true",
         help: "Keep the KV cache on the GPU",
@@ -797,6 +826,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "batch_size",
+        label: "Batch size",
         setting_type: SettingType::Number { min: 1 },
         default: "2048",
         help: "Prompt tokens processed at once",
@@ -804,6 +834,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "mtp",
+        label: "MTP speculative decoding",
         setting_type: SettingType::Flag,
         default: "false",
         help: "MTP speculative decoding, for models that come with an MTP head",
@@ -811,6 +842,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "n_cpu_moe",
+        label: "MoE layers on the CPU",
         setting_type: SettingType::Number { min: 0 },
         default: "0",
         help: "MoE models: layers whose expert weights stay on the CPU",
@@ -818,6 +850,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "flash_attn",
+        label: "Flash attention",
         setting_type: SettingType::Flag,
         default: "true",
         help: "Flash attention",
@@ -825,6 +858,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "load_mode",
+        label: "Load mode",
         setting_type: SettingType::LoadMode,
         default: "auto",
         help: "How llama.cpp loads the model",
@@ -832,6 +866,7 @@ const LLAMA_SETTINGS: [SettingDefinition; 9] = [
     },
     SettingDefinition {
         name: "context_checkpoints",
+        label: "Context checkpoints",
         setting_type: SettingType::Number { min: 0 },
         default: "4",
         help: "Chat snapshots kept in RAM, so a reply doesn't re-read the chat",
@@ -865,12 +900,22 @@ pub fn llama_server_arguments(config: &LlamaConfig) -> Vec<String> {
     arguments
 }
 
-fn load_mode_names() -> Vec<String> {
+fn load_mode_choices() -> Vec<SettingChoice> {
     use clap::ValueEnum;
     LoadMode::value_variants()
         .iter()
-        .filter_map(|mode| mode.to_possible_value())
-        .map(|mode| mode.get_name().to_owned())
+        .filter_map(|mode| {
+            let value = mode.to_possible_value()?.get_name().to_owned();
+            let label = mode.label().to_owned();
+            Some(SettingChoice { value, label })
+        })
+        .collect()
+}
+
+fn load_mode_names() -> Vec<String> {
+    load_mode_choices()
+        .into_iter()
+        .map(|choice| choice.value)
         .collect()
 }
 
@@ -900,23 +945,25 @@ fn llama_settings_from_config(config: &LlamaConfig) -> Vec<LlamaSetting> {
     let fields = serde_json::to_value(config).unwrap_or_default();
     LLAMA_SETTINGS
         .iter()
-        .map(|definition| LlamaSetting {
-            name: definition.name.to_owned(),
-            value: fields
-                .get(definition.name)
-                .filter(|v| !v.is_null())
-                .cloned(),
-            default: definition.default.to_owned(),
-            kind: match definition.setting_type {
-                SettingType::Number { .. } => SettingKind::Number,
-                SettingType::Flag => SettingKind::Flag,
-                SettingType::LoadMode => SettingKind::Choice,
-            },
-            choices: match definition.setting_type {
-                SettingType::LoadMode => load_mode_names(),
-                _ => vec![],
-            },
-            help: definition.help.to_owned(),
+        .map(|definition| {
+            let (kind, min, choices) = match definition.setting_type {
+                SettingType::Number { min } => (SettingKind::Number, Some(min), vec![]),
+                SettingType::Flag => (SettingKind::Flag, None, vec![]),
+                SettingType::LoadMode => (SettingKind::Choice, None, load_mode_choices()),
+            };
+            LlamaSetting {
+                name: definition.name.to_owned(),
+                label: definition.label.to_owned(),
+                value: fields
+                    .get(definition.name)
+                    .filter(|v| !v.is_null())
+                    .cloned(),
+                default: definition.default.to_owned(),
+                kind,
+                min,
+                choices,
+                help: definition.help.to_owned(),
+            }
         })
         .collect()
 }
@@ -1176,8 +1223,54 @@ mod tests {
         let gpu_layers = settings.iter().find(|s| s.name == "gpu_layers").unwrap();
         assert_eq!(gpu_layers.value, None);
         assert_eq!(gpu_layers.default, "auto");
-        let load_mode = settings.iter().find(|s| s.name == "load_mode").unwrap();
-        assert_eq!(load_mode.choices, load_mode_names());
+    }
+
+    #[test]
+    fn each_setting_says_how_the_app_should_show_it() {
+        let settings = llama_settings_from_config(&LlamaConfig::default());
+        let setting = |name: &str| settings.iter().find(|s| s.name == name).unwrap();
+
+        for setting in &settings {
+            assert!(!setting.label.is_empty(), "{} has no label", setting.name);
+        }
+        assert_eq!(setting("gpu_layers").label, "GPU layers");
+
+        // only numbers have a smallest value
+        assert_eq!(
+            setting("context_length").min,
+            Some(MIN_CONTEXT_LENGTH as i64)
+        );
+        assert_eq!(setting("gpu_layers").min, Some(-1));
+        assert_eq!(setting("flash_attn").min, None);
+        assert_eq!(setting("load_mode").min, None);
+
+        // a choice is llama.cpp's value with a name to show for it
+        let load_modes = &setting("load_mode").choices;
+        let values: Vec<_> = load_modes.iter().map(|c| c.value.clone()).collect();
+        assert_eq!(values, load_mode_names());
+        let both = load_modes.iter().find(|c| c.value == "mmap+mlock").unwrap();
+        assert_eq!(both.label, "Memory map, locked in RAM");
+        assert!(setting("context_length").choices.is_empty());
+    }
+
+    #[test]
+    fn a_setting_is_sent_without_the_parts_it_doesnt_have() {
+        let settings = llama_settings_from_config(&LlamaConfig::default());
+        let sent = |name: &str| {
+            let setting = settings.iter().find(|s| s.name == name).unwrap();
+            serde_json::to_value(setting).unwrap()
+        };
+
+        let flag = sent("flash_attn");
+        assert_eq!(flag["label"], "Flash attention");
+        assert!(flag.get("min").is_none(), "{flag}");
+        assert!(flag.get("choices").is_none(), "{flag}");
+
+        assert_eq!(sent("batch_size")["min"], 1);
+        assert_eq!(
+            sent("load_mode")["choices"][0],
+            json!({ "value": "auto", "label": "Auto" })
+        );
     }
 
     fn expected_pi_provider_json(model_name: &str, endpoint_base_url: &str) -> Value {

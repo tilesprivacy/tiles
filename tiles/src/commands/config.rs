@@ -65,7 +65,8 @@ pub async fn list_settings_cli() -> Result<()> {
     for setting in &settings {
         let mut help = setting.help.clone();
         if !setting.choices.is_empty() {
-            help = format!("{help}: {}", setting.choices.join(", "));
+            let values: Vec<_> = setting.choices.iter().map(|c| c.value.as_str()).collect();
+            help = format!("{help}: {}", values.join(", "));
         }
         println!(
             "{:name$}  {:value$}  {:default$}  {help}",
