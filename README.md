@@ -42,12 +42,6 @@ A local-first, collaborative AI assistant that works for you. Built with open mo
 
 Download Tiles for macOS or Linux: https://tiles.run/download
 
-Then run the following command to start Tiles:
-
-```bash
-tiles
-```
-
 ## Documentation
 
 Full documentation is available in the Tiles Book: https://tiles.run/book
