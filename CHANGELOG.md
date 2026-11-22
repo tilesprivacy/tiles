@@ -5,6 +5,35 @@ The format is based on https://keepachangelog.com/en/1.1.0/
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-11-22
+
+### Added
+
+- `tiles config` lists, sets and resets the llama.cpp settings, like the context length, without a flag on `tiles run` or editing `config.toml` [#310](https://github.com/tilesprivacy/tiles/pull/310)
+- An Inference tab in the app's settings for the same settings: a slider for the context length, and the rest under Advanced [#318](https://github.com/tilesprivacy/tiles/pull/318) [tiles-ui#10](https://github.com/tilesprivacy/tiles-ui/pull/10)
+- An About Tiles link in the app's settings [tiles-ui#10](https://github.com/tilesprivacy/tiles-ui/pull/10)
+- Chats synced between linked devices are encrypted for the device that receives them [#307](https://github.com/tilesprivacy/tiles/pull/307)
+
+### Changed
+
+- llama.cpp is updated to v1.0.0 [#305](https://github.com/tilesprivacy/tiles/pull/305)
+- The installer and the Mac package ask before removing a 0.4 install
+- The Mac package's last page points to the app instead of the terminal
+- `/share` in `tiles run` shares a chat from before 0.5 as text, where it used to refuse [#316](https://github.com/tilesprivacy/tiles/pull/316)
+
+### Fixed
+
+- `/share` asked whether to share privately and read anything but `y` as no, so typing `yes` shared the chat publicly. It now asks again unless the answer is `y` or `n` [#316](https://github.com/tilesprivacy/tiles/pull/316)
+- A failed `/sessions` or `/share` no longer ends `tiles run` [#316](https://github.com/tilesprivacy/tiles/pull/316)
+- `tiles run` works when the data path was never set
+- `tiles run` waits for the reply again
+- A device can no longer be linked to itself, and unlinking a device removes it [#306](https://github.com/tilesprivacy/tiles/pull/306)
+- Syncing chats between linked devices is more reliable [#307](https://github.com/tilesprivacy/tiles/pull/307)
+
+### Security
+
+- Updated hickory-resolver to a version that patches its security vulnerabilities [#313](https://github.com/tilesprivacy/tiles/pull/313)
+
 ## [0.5.1] - 2026-11-12
 
 ### Changed
