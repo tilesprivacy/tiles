@@ -48,6 +48,8 @@ STEP_VERB=""
 STEP_DETAIL=""
 STEP_CLOCK=""
 STEP_LOG=""
+# the background job of the open step, while it runs
+STEP_JOB=""
 WARNINGS=0
 # true from the header until the install first changes something
 UNTOUCHED="false"
@@ -170,8 +172,18 @@ end_step() {
   STEP_VERB=""
 }
 
+# ctrl-c doesn't reach a background job, it would go on writing files
+stop_step_job() {
+  if [[ -n "${STEP_JOB}" ]]; then
+    kill "${STEP_JOB}" 2>/dev/null || true
+    wait "${STEP_JOB}" 2>/dev/null || true
+    STEP_JOB=""
+  fi
+}
+
 # a step still open when the script exits is the one that failed
 close_open_step() {
+  stop_step_job
   if [[ -n "${STEP_VERB}" ]]; then
     end_step fail
   fi
@@ -251,6 +263,7 @@ run_step_job() {
   shift
   "$@" > "${STEP_LOG}" 2>&1 &
   pid=$!
+  STEP_JOB="${pid}"
   while kill -0 "${pid}" 2>/dev/null; do
     if [[ "${LIVE}" == "true" ]]; then
       draw_running_step "$("${print_detail}")" "${tick}"
@@ -258,6 +271,7 @@ run_step_job() {
     tick=$((tick + 1))
     sleep 0.1
   done
+  STEP_JOB=""
   if wait "${pid}"; then
     return 0
   fi
@@ -715,13 +729,12 @@ done
 
 rm -rf *.tar.xz
 
-run_python_postinstall() {
-  cpython3.13/bin/python cpython3.13/postinstall.py \
-    && app-server/bin/python app-server/postinstall.py
-}
-
+# one job per command, a job has to be the process that gets stopped
 begin_step link "python environment"
-run_step_job print_step_detail run_python_postinstall || err "Couldn't set up the Python environment."
+for layer in cpython3.13 app-server; do
+  run_step_job print_step_detail "${layer}/bin/python" "${layer}/postinstall.py" \
+    || err "Couldn't set up the Python environment."
+done
 end_step ok
 
 rm -rf "${TMPDIR}"
