@@ -9,6 +9,8 @@ use rustyline::{Config, Editor, Helper};
 
 use crate::help::show_help;
 
+/// Shows the greyed hint on an empty prompt line
+#[derive(Debug)]
 pub struct TilesHinter;
 
 impl Hinter for TilesHinter {
@@ -37,6 +39,7 @@ impl Validator for TilesHinter {}
 
 impl Helper for TilesHinter {}
 
+/// The line editor behind the `>>>` prompt, with history and the empty-line hint
 pub fn create_line_editor() -> rustyline::Result<Editor<TilesHinter, DefaultHistory>> {
     let config = Config::builder().auto_add_history(true).build();
     let mut editor = Editor::with_config(config)?;
@@ -44,15 +47,18 @@ pub fn create_line_editor() -> rustyline::Result<Editor<TilesHinter, DefaultHist
     Ok(editor)
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputType {
+    /// Already answered, nothing goes to the agent
     Skip,
+    /// A slash command with its arguments, without the slash
     Command(String),
     Exit,
     Prompt,
     Skill,
 }
 
+/// Sorts a typed line. `/help` and an empty `/` are answered here and come back as a skip
 pub fn handle_input(input: &str) -> InputType {
     if let Some(cmd) = input.strip_prefix('/') {
         let keyword = cmd.split_whitespace().next().unwrap_or("");

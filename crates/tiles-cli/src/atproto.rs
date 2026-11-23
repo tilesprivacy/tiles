@@ -1,19 +1,11 @@
 //! Signing in to an ATmosphere account
 
 use anyhow::{Context, Result, anyhow};
-use serde::Deserialize;
 use serde_json::json;
 
-use crate::api::DaemonApi;
+use crate::api::{AtprotoAccount, DaemonApi};
 use crate::browser::open_in_browser;
 use crate::sse::take_events;
-
-/// The ATmosphere account a sign in ended up with
-#[derive(Debug, Deserialize)]
-pub struct AtprotoAccount {
-    pub handle: String,
-    pub did: String,
-}
 
 /// Signs in through the daemon, the same flow every client uses: prints and
 /// opens the url, then waits for the browser to come back

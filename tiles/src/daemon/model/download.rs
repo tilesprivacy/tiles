@@ -371,11 +371,11 @@ pub(super) fn with_draft_head(gguf: &Path) -> u64 {
 }
 
 pub(crate) fn resolve_gguf_path(
-    model_cache_path: &PathBuf,
+    model_cache_path: &Path,
     quant: Option<&str>,
 ) -> anyhow::Result<PathBuf> {
     let Some(quant) = quant else {
-        return Ok(model_cache_path.clone());
+        return Ok(model_cache_path.to_path_buf());
     };
     let suffix = format!("{}.gguf", quant.to_lowercase());
     let matches: Vec<PathBuf> = std::fs::read_dir(model_cache_path)?

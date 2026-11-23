@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use atrium_api::{
     agent::Agent,
     types::{Unknown, string::Did},
+    xrpc::Error as XrpcError,
 };
 use atrium_common::store::{Store, memory::MemoryStore};
 use atrium_identity::{
@@ -133,6 +134,24 @@ impl std::fmt::Display for HandleNotFound {
 }
 
 impl Error for HandleNotFound {}
+
+/// The saved sign in could not be renewed, the account has to sign in again
+#[derive(Debug)]
+pub struct SignInExpired {
+    pub handle: String,
+}
+
+impl std::fmt::Display for SignInExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The ATmosphere sign in for @{} has expired, sign in again to share",
+            self.handle
+        )
+    }
+}
+
+impl Error for SignInExpired {}
 
 /// A sign in that has its authorize url and is waiting for the browser
 pub struct PendingLogin {
@@ -392,7 +411,7 @@ pub async fn share_session(
 
         let record: Unknown = serde_json::from_value(shared_session_value)?;
 
-        let create_result = agent
+        let created = agent
             .api
             .com
             .atproto
@@ -410,8 +429,36 @@ pub async fn share_session(
                 }
                 .into(),
             )
-            .await?;
+            .await;
 
+        let sign_in_expired = matches!(&created, Err(err) if access_token_was_refused(err));
+        let handle = auth_data.handle.clone();
+        // refresh tokens are single use, renewed one is kept even when the share failed
+        let session = mem_session_store
+            .get(&did_struct)
+            .await?
+            .context("No ATmosphere session was stored for this account")?;
+        let auth_data = AtprotoAuthData {
+            session: serde_json::to_string(&session)?,
+            // expired sign in is signed out, every client asks for a new one
+            is_logged_in: !sign_in_expired,
+            updated_at: get_unix_time_now(),
+            ..auth_data
+        };
+        // the share's own outcome is returned either way
+        if let Err(err) = conn
+            .call(move |conn| upsert_auth_data(conn, &auth_data))
+            .await
+            .map_err(call_error)
+        {
+            warn!("Couldn't save the ATmosphere session after the share: {err:#}");
+        }
+
+        let create_result = match created {
+            Ok(created) => created,
+            Err(_) if sign_in_expired => return Err(SignInExpired { handle }.into()),
+            Err(err) => return Err(err.into()),
+        };
         let url = &create_result.uri;
 
         let base_encoded_at_url = data_encoding::BASE64.encode(url.as_bytes());
@@ -429,35 +476,21 @@ pub async fn share_session(
             shareable_base_url
         };
 
-        // Updating the session token
-        let session = mem_session_store
-            .get(&did_struct)
-            .await?
-            .context("No ATmosphere session was stored for this account")?;
-        let session_string = serde_json::to_string(&session)?;
-
-        let auth_data = AtprotoAuthData {
-            key: did_struct.to_string(),
-            session: session_string,
-            state: "".to_owned(),
-            is_logged_in: true,
-            created_at: get_unix_time_now(),
-            updated_at: get_unix_time_now(),
-            handle: auth_data.handle,
-        };
-
-        // the record is published by now, its link is returned either way
-        if let Err(err) = conn
-            .call(move |conn| upsert_auth_data(conn, &auth_data))
-            .await
-            .map_err(call_error)
-        {
-            warn!("Couldn't save the refreshed ATmosphere session: {err:#}");
-        }
         Ok(shareable_url)
     } else {
         info!("No logged-in user, please login");
         Err(anyhow!("NOT_LOGGED_IN"))
+    }
+}
+
+/// Whether the PDS refused the access token. atrium renews a refused token and tries
+/// once more before it reports this, so by then the sign in can't be renewed
+fn access_token_was_refused<E: Debug>(err: &XrpcError<E>) -> bool {
+    match err {
+        XrpcError::Authentication(challenge) => challenge
+            .to_str()
+            .is_ok_and(|challenge| challenge.contains("error=\"invalid_token\"")),
+        _ => false,
     }
 }
 
@@ -499,7 +532,30 @@ fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atrium_api::xrpc::http::HeaderValue;
     use tokio_rusqlite::rusqlite::Connection;
+
+    #[test]
+    fn a_token_refused_after_renewal_means_the_sign_in_expired() {
+        // what a pds answered a share made with an old sign in
+        let refused = XrpcError::<()>::Authentication(HeaderValue::from_static(
+            r#"DPoP algs="RS256 RS384 RS512 PS256 PS384 PS512 ES256 ES256K ES384 ES512", error="invalid_token""#,
+        ));
+
+        assert!(access_token_was_refused(&refused));
+    }
+
+    #[test]
+    fn other_failures_leave_the_sign_in_alone() {
+        let wants_a_nonce = XrpcError::<()>::Authentication(HeaderValue::from_static(
+            r#"DPoP error="use_dpop_nonce""#,
+        ));
+
+        assert!(!access_token_was_refused(&wants_a_nonce));
+        assert!(!access_token_was_refused(
+            &XrpcError::<()>::UnexpectedResponseType
+        ));
+    }
 
     #[test]
     fn test_add_a_new_auth_entry() {
