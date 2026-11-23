@@ -7,7 +7,7 @@ use crate::utils::shell_path;
 use anyhow::{Context, Result, anyhow, bail};
 use nix::unistd::setsid;
 use serde_json::{Value, json};
-use std::{fs, process::Stdio, time::Duration};
+use std::{fs, path::PathBuf, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use uuid::Uuid;
@@ -36,15 +36,7 @@ pub struct PiReader {
 /// Creates a Pi Agent instance with writer and reader for comms with Pi
 pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> {
     let tiles_lib_dir = DefaultProvider.get_lib_dir()?;
-    let user_data_dir = DefaultProvider.get_user_data_dir()?;
-    let pi_agent_dir = user_data_dir.join("pi/agent/");
-    std::fs::create_dir_all(&pi_agent_dir).context("Failed to create Pi agent directory")?;
-
-    let provider_config_file_path = pi_agent_dir.join("models.json");
-    let endpoint_url = format!("http://127.0.0.1:{}/v1", port);
-    let model_config = create_pi_provider_config(model_name, &endpoint_url)?;
-
-    fs::write(provider_config_file_path, model_config)?;
+    let pi_agent_dir = write_models_json(DefaultProvider, model_name, port)?;
 
     let settings_file_path = pi_agent_dir.join("settings.json");
     handle_pi_settings_config(&settings_file_path)?;
@@ -90,6 +82,23 @@ pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> 
         },
         writer: PiWriter { stdin: pi_stdin },
     })
+}
+
+/// Writes the model and its context window to Pi's models.json and returns Pi's folder.
+/// Pi reads the file when it starts and again with each new session
+pub fn write_models_json(
+    provider: impl ConfigProvider,
+    model_name: &str,
+    port: u32,
+) -> Result<PathBuf> {
+    let pi_agent_dir = provider.get_user_data_dir()?.join("pi/agent/");
+    fs::create_dir_all(&pi_agent_dir).context("Failed to create Pi agent directory")?;
+
+    let endpoint_url = format!("http://127.0.0.1:{}/v1", port);
+    let model_config = create_pi_provider_config(model_name, &endpoint_url)?;
+    fs::write(pi_agent_dir.join("models.json"), model_config)?;
+
+    Ok(pi_agent_dir)
 }
 
 /// Gracefully exit an ongoing Pi agent session.

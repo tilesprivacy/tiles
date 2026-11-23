@@ -81,7 +81,7 @@ async fn create_session(State(state): State<Arc<AppState>>) -> Result<impl IntoR
 async fn do_create_session(
     state: Arc<AppState>,
     create_agent_fn: CreateNewAgentFn,
-    provider: impl ConfigProvider,
+    provider: impl ConfigProvider + Clone,
     picked: impl FnOnce() -> Option<String>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut agent = state.agent.lock().await;
@@ -97,7 +97,7 @@ async fn start_pi_session(
     state: &AppState,
     agent: &mut Option<PiAgent>,
     create_agent_fn: CreateNewAgentFn,
-    provider: impl ConfigProvider,
+    provider: impl ConfigProvider + Clone,
     picked: Option<String>,
 ) -> Result<String, AppError> {
     let running = state
@@ -107,7 +107,7 @@ async fn start_pi_session(
         .clone();
     // keep a running agent whose model isn't known
     let params = if agent.is_none() || running.is_some() {
-        Some(get_agent_start_params(provider, picked)?)
+        Some(get_agent_start_params(provider.clone(), picked)?)
     } else {
         None
     };
@@ -121,6 +121,12 @@ async fn start_pi_session(
     }
     if agent.is_some() {
         log::info!("Pi session already there, create a new session..");
+        // a context window changed since Pi started reaches it here
+        if let Some(model) = &running
+            && let Err(err) = pi::write_models_json(provider, model, PY_PORT)
+        {
+            log::warn!("Couldn't update Pi's models.json: {err:#}");
+        }
         // agent already there, so lets create a new session
         let agent = agent.as_mut().ok_or(AppError::InternalServerError(
             "Failed to get a mutable agent instance".to_string(),
@@ -183,7 +189,7 @@ async fn resume_session(
 async fn do_resume_session(
     state: Arc<AppState>,
     create_agent_fn: CreateNewAgentFn,
-    provider: impl ConfigProvider,
+    provider: impl ConfigProvider + Clone,
     picked: impl FnOnce() -> Option<String>,
     chat: String,
     history: String,
@@ -515,6 +521,53 @@ printf '%s\n' '{"type":"response","id":"'"$id"'","command":"get_state","success"
             state.agent_model.lock().unwrap().as_deref(),
             Some("llama3.2")
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_chat_gives_the_running_agent_the_context_window_set_now() {
+        let tmp_dir = tempdir().unwrap();
+        let mock_provider = MockProvider {
+            tmp_path: tmp_dir.path().to_path_buf(),
+        };
+        fs::create_dir(mock_provider.tmp_path.join("modelfiles")).unwrap();
+        fs::write(
+            mock_provider.tmp_path.join("modelfiles/gemma-4-12b-gguf"),
+            "FROM llama3.2\nSYSTEM hello\n",
+        )
+        .unwrap();
+        // what Pi was started with
+        let models_json = mock_provider.tmp_path.join("pi/agent/models.json");
+        fs::create_dir_all(models_json.parent().unwrap()).unwrap();
+        fs::write(
+            &models_json,
+            r#"{"providers":{"tiles":{"models":[{"contextWindow":1}]}}}"#,
+        )
+        .unwrap();
+        let running = from_test_command(
+            "sh",
+            &[
+                "-c",
+                r#"read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+printf '%s\n' '{"type":"response","id":"'"$id"'","command":"new_session","success":true}'
+read request; id=${request#*'"id":"'}; id=${id%%'"'*}
+printf '%s\n' '{"type":"response","id":"'"$id"'","command":"get_state","success":true,"data":{"sessionId":"kept","model":{"id":"id","name":"old"},"thinkingLevel":"off","isStreaming":false}}'"#,
+            ],
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            agent: AsyncMutex::new(Some(running)),
+            agent_model: Mutex::new(Some("llama3.2".to_owned())),
+            ..AppState::for_tests()
+        });
+
+        let res = do_create_session(state, create_test_agent, mock_provider, || None).await;
+
+        assert_eq!(res.into_response().status(), StatusCode::OK);
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&models_json).unwrap()).unwrap();
+        let model = &written["providers"]["tiles"]["models"][0];
+        assert_eq!(model["id"], "llama3.2");
+        assert_eq!(model["contextWindow"], json!(get_pi_context_window()));
     }
 
     fn create_test_agent(_: &str, _: &str, _: u32) -> Result<PiAgent, anyhow::Error> {
