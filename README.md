@@ -32,17 +32,15 @@
 > **Status: Alpha**  
 > Tiles is currently alpha-quality software. It is usable for everyday tasks, though you may encounter bugs and performance issues.
 
+## Why Tiles
+
+For sensitive knowledge work or personal tasks, your AI shouldn’t require you to trust a third party with your conversations and intellectual property. Run models locally, sync chats peer-to-peer with end-to-end encryption, and use social features, such as sharing chats, built on AT Protocol. Tiles gives you user-owned keys for your digital life with DIDs and UCANs, so your data and identity truly remain yours.
+
 ## Getting Started
 
 A local-first, collaborative AI assistant that works for you. Built with open models and decentralized protocols. Learn more on our [overview](https://www.tiles.run/book/overview) page.
 
 Download Tiles for macOS or Linux: https://tiles.run/download
-
-Then run the following command to start Tiles:
-
-```bash
-tiles
-```
 
 ## Documentation
 
