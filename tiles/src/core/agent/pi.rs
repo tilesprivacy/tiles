@@ -1,11 +1,14 @@
 //! Module that deals with Pi
-use crate::core::agent::types::{CommandType, GetStateData, PiResponse, PiResponseMessage};
+use crate::core::agent::types::{
+    CommandType, GetStateData, PiResponse, PiResponseMessage, ReasoningEffort, Skill,
+};
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, create_pi_provider_config, handle_pi_settings_config,
 };
 use crate::utils::shell_path;
 use anyhow::{Context, Result, anyhow, bail};
 use nix::unistd::setsid;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{fs, path::PathBuf, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
@@ -20,6 +23,8 @@ pub struct PiAgent {
     pub process: Child,
     pub writer: PiWriter,
     pub reader: PiReader,
+    /// The system prompt Pi was started with, it can't be changed afterwards
+    pub system_prompt: String,
 }
 
 #[derive(Debug)]
@@ -81,6 +86,7 @@ pub fn new(model_name: &str, system_prompt: &str, port: u32) -> Result<PiAgent> 
             lines: BufReader::new(pi_stdout).lines(),
         },
         writer: PiWriter { stdin: pi_stdin },
+        system_prompt: system_prompt.to_owned(),
     })
 }
 
@@ -99,6 +105,29 @@ pub fn write_models_json(
     fs::write(pi_agent_dir.join("models.json"), model_config)?;
 
     Ok(pi_agent_dir)
+}
+
+/// Saves the thinking level as Pi's default, so it is still set after Pi restarts.
+/// The other settings in the file are kept
+pub fn save_default_thinking_level(
+    provider: impl ConfigProvider,
+    level: ReasoningEffort,
+) -> Result<()> {
+    let pi_agent_dir = provider.get_user_data_dir()?.join("pi/agent/");
+    let settings_path = pi_agent_dir.join("settings.json");
+
+    let mut settings: Value = match fs::read_to_string(&settings_path) {
+        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|_| json!({})),
+        Err(_) => json!({}),
+    };
+    settings
+        .as_object_mut()
+        .context("settings.json is not a JSON object")?
+        .insert("defaultThinkingLevel".to_owned(), json!(level));
+
+    fs::create_dir_all(&pi_agent_dir).context("Failed to create Pi agent directory")?;
+    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)
+        .context("Failed to write settings.json")
 }
 
 /// Gracefully exit an ongoing Pi agent session.
@@ -167,6 +196,55 @@ impl PiReader {
         self.get_pi_state(writer).await
     }
 
+    /// Sets Pi's thinking level and returns the level Pi is on afterwards. Pi picks
+    /// another one when the model doesn't support the level asked for
+    pub async fn set_thinking_level(
+        &mut self,
+        writer: &mut PiWriter,
+        level: ReasoningEffort,
+    ) -> Result<String> {
+        // Pi holds its answer to this back until the next request, so it isn't waited
+        // for. the state asked for next says which level Pi is on
+        writer
+            .send_to_pi(json!({ "type": CommandType::SetThinkingLevel, "level": level }))
+            .await?;
+        Ok(self.get_pi_state(writer).await?.thinking_level)
+    }
+
+    /// The skills Pi has loaded. Pi lists them among its other commands as `skill:<name>`
+    pub async fn fetch_skills(&mut self, writer: &mut PiWriter) -> Result<Vec<Skill>> {
+        #[derive(Deserialize)]
+        struct PiCommands {
+            commands: Vec<PiCommand>,
+        }
+        #[derive(Deserialize)]
+        struct PiCommand {
+            name: String,
+            // extension commands may come without one
+            #[serde(default)]
+            description: String,
+        }
+
+        let answer = self.ask(writer, CommandType::GetCommands).await?;
+        let data = answer
+            .data
+            .filter(|_| answer.success)
+            .ok_or_else(|| anyhow!("Failed to fetch the commands from Pi"))?;
+        let listed: PiCommands = serde_json::from_value(data)?;
+        let skills = listed
+            .commands
+            .into_iter()
+            .filter_map(|command| {
+                let name = command.name.strip_prefix("skill:")?.to_owned();
+                Some(Skill {
+                    name,
+                    description: command.description.trim().to_owned(),
+                })
+            })
+            .collect();
+        Ok(skills)
+    }
+
     // sends `command` and waits for its answer, skipping anything else Pi prints
     async fn ask(
         &mut self,
@@ -210,6 +288,7 @@ pub fn from_test_command(program: &str, args: &[&str]) -> anyhow::Result<PiAgent
         reader: PiReader {
             lines: BufReader::new(stdout).lines(),
         },
+        system_prompt: String::new(),
     })
 }
 

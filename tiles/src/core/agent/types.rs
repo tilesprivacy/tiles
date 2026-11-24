@@ -1,7 +1,9 @@
 //! Types we use for Agent communication
 
+use anyhow::anyhow;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use std::str::FromStr;
 use tilekit::modelfile::Role;
 
 //TODO: Change this into harness agnostic types in the names
@@ -209,6 +211,12 @@ pub struct Commands {
     pub source: String,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct Skill {
+    pub name: String,
+    pub description: String,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct PiTurnEndEvent {
     message: PiTurnEndEventMsg,
@@ -271,4 +279,26 @@ pub enum ReasoningEffort {
     Medium,
     #[serde(rename = "low")]
     Low,
+}
+
+impl FromStr for ReasoningEffort {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "high" => Ok(ReasoningEffort::High),
+            "medium" => Ok(ReasoningEffort::Medium),
+            "low" => Ok(ReasoningEffort::Low),
+            _ => Err(anyhow!("Invalid Reasoning value, use /help".to_owned())),
+        }
+    }
+}
+
+impl From<ReasoningEffort> for String {
+    fn from(value: ReasoningEffort) -> Self {
+        match value {
+            ReasoningEffort::High => "high".to_owned(),
+            ReasoningEffort::Medium => "medium".to_owned(),
+            ReasoningEffort::Low => "low".to_owned(),
+        }
+    }
 }

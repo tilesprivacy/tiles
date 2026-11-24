@@ -16,7 +16,7 @@ use crate::daemon::model::{
     get_default_modelfile, model_spec, picked_modelfile, resolve_gguf_path,
 };
 use crate::utils::config::{
-    ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
+    DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
     get_inference_config, get_memory_path, get_model_cache, update_current_model,
     update_llama_config,
 };
@@ -25,11 +25,9 @@ use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
 use owo_colors::OwoColorize;
 use reqwest::{Client, StatusCode};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::HashMap;
-use std::fs::{self};
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use tilekit::modelfile::Modelfile;
@@ -52,28 +50,6 @@ enum InputCommandResponse {
     WaitForNextLine,
     ProcessNextInput,
 }
-impl FromStr for ReasoningEffort {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "high" => Ok(ReasoningEffort::High),
-            "medium" => Ok(ReasoningEffort::Medium),
-            "low" => Ok(ReasoningEffort::Low),
-            _ => Err(anyhow!("Invalid Reasoning value, use /help".to_owned())),
-        }
-    }
-}
-
-impl From<ReasoningEffort> for String {
-    fn from(value: ReasoningEffort) -> Self {
-        match value {
-            ReasoningEffort::High => "high".to_owned(),
-            ReasoningEffort::Medium => "medium".to_owned(),
-            ReasoningEffort::Low => "low".to_owned(),
-        }
-    }
-}
-
 pub async fn run(run_args: RunArgs, db_conn: &Dbconn) -> Result<()> {
     let (modelfile, default_modelfile) = if let Some(modelfile_str) = &run_args.modelfile_path {
         let modelfile = match tilekit::modelfile::parse_from_file(modelfile_str.as_str()) {
@@ -477,7 +453,7 @@ async fn process_command(
             match state.thinking_level.parse::<ReasoningEffort>() {
                 Ok(effort) => {
                     repl_session.reasoning = effort;
-                    if let Err(err) = persist_default_thinking_level(&state.thinking_level) {
+                    if let Err(err) = pi::save_default_thinking_level(DefaultProvider, effort) {
                         warn!("Failed to persist thinking level across restarts: {}", err);
                     }
                     println!("Reasoning settings updated successfully")
@@ -933,31 +909,6 @@ async fn set_reasoning_effort(agent_writer: &mut PiWriter, args: &[&str]) -> Res
     });
 
     agent_writer.send_to_pi(pi_cmd).await
-}
-
-/// Persist the reasoning level to Pi's settings.json so it survives restarts.
-/// Startup reads the level back from Pi's state, which Pi seeds from
-/// `defaultThinkingLevel`. Existing settings are preserved.
-fn persist_default_thinking_level(level: &str) -> Result<()> {
-    let user_data_dir = DefaultProvider.get_user_data_dir()?;
-    let settings_path = user_data_dir.join("pi/agent/settings.json");
-
-    let mut settings: Value = match fs::read_to_string(&settings_path) {
-        Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|_| json!({})),
-        Err(_) => json!({}),
-    };
-
-    let obj = settings
-        .as_object_mut()
-        .context("settings.json is not a JSON object")?;
-    obj.insert("defaultThinkingLevel".to_owned(), json!(level));
-
-    if let Some(parent) = settings_path.parent() {
-        fs::create_dir_all(parent).context("Failed to create Pi agent directory")?;
-    }
-    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)
-        .context("Failed to write settings.json")?;
-    Ok(())
 }
 
 #[cfg(test)]
