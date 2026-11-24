@@ -6,6 +6,9 @@ info:
 http:
   method: POST
   url: "{{tilekit_base_url}}/session/new"
+  body:
+    type: json
+    data: "{}"
   auth: inherit
 
 settings:
@@ -14,3 +17,5 @@ settings:
   followRedirects: true
   maxRedirects: 5
   forwardAuthorizationHeader: false
+
+docs: Starts a new chat on the picked model, and the agent when it isn't running. Answers with the chat's `id`

@@ -1,0 +1,23 @@
+info:
+  name: list-skills
+  type: http
+  seq: 5
+
+http:
+  method: GET
+  url: "{{tilekit_base_url}}/agent/skills"
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    The skills the agent has loaded, each with a `name` and a `description`. A prompt runs one with `$name`.
+
+    409 when no agent is running, or while a reply is streaming.
+  type: text/markdown

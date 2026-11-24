@@ -1,0 +1,31 @@
+info:
+  name: create-new-session-from-modelfile
+  type: http
+  seq: 5
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/session/new"
+  body:
+    type: json
+    data: |-
+      {
+        "modelfile": "FROM unsloth/gemma-4-E2B-it-GGUF:Q4_K_M\nSYSTEM You answer in one sentence."
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Starts a new chat on a Modelfile sent as text. The chat runs on its model and system prompt instead of the picked model's.
+
+    The agent restarts when either differs from what it is running on.
+
+    400 when the Modelfile doesn't parse or has no `FROM`.
+  type: text/markdown
