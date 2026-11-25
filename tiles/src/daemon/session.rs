@@ -4,11 +4,13 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    body::Bytes,
     extract::{Path, State},
     response::IntoResponse,
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::error::Category;
 use tilekit::modelfile::Role;
 use tokio_rusqlite::rusqlite::Connection;
 
@@ -44,7 +46,7 @@ pub struct ResumedChat {
     pub pending_history: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct NewSessionRequest {
     /// The text of a Modelfile. The chat runs on its model and system prompt
     /// instead of the picked model's
@@ -88,8 +90,9 @@ pub fn session_router() -> Router<Arc<AppState>> {
 // Creates a new session or starts the agent
 async fn create_session(
     State(state): State<Arc<AppState>>,
-    ApiJson(request): ApiJson<NewSessionRequest>,
+    body: Bytes,
 ) -> Result<impl IntoResponse, AppError> {
+    let request = new_session_request_from_body(&body)?;
     let from_modelfile = request
         .modelfile
         .as_deref()
@@ -103,6 +106,17 @@ async fn create_session(
         from_modelfile,
     )
     .await
+}
+
+// no body is the same as `{}`, the route took none before it took a Modelfile
+fn new_session_request_from_body(body: &[u8]) -> Result<NewSessionRequest, AppError> {
+    if body.trim_ascii().is_empty() {
+        return Ok(NewSessionRequest::default());
+    }
+    serde_json::from_slice(body).map_err(|err| match err.classify() {
+        Category::Data => AppError::CannotProcess(err.to_string()),
+        _ => AppError::BadRequest(err.to_string()),
+    })
 }
 
 async fn do_create_session(
@@ -726,6 +740,47 @@ printf '%s\n' '{"type":"response","id":"'"$id"'","command":"get_state","success"
             do_create_session(state, create_test_agent, provider, || None, from_modelfile).await;
 
         assert_eq!(session_id_in(res).await, "kept");
+    }
+
+    #[test]
+    fn a_new_session_needs_no_body() {
+        for body in ["", "\n", "{}"] {
+            let request = new_session_request_from_body(body.as_bytes()).unwrap();
+            assert!(request.modelfile.is_none(), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn a_new_session_body_still_has_to_be_valid() {
+        let not_json = new_session_request_from_body(b"{").unwrap_err();
+        assert!(matches!(not_json, AppError::BadRequest(_)));
+
+        let wrong_type = new_session_request_from_body(br#"{"modelfile": 1}"#).unwrap_err();
+        assert!(matches!(wrong_type, AppError::CannotProcess(_)));
+    }
+
+    #[tokio::test]
+    async fn a_modelfile_with_a_line_it_cant_read_is_a_bad_request() {
+        let request = Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/v1/tilekit/session/new")
+            .body(Body::new(
+                json!({ "modelfile": "FROM llama3.2\nINVALID instruction\nSYSTEM be brief" })
+                    .to_string(),
+            ))
+            .unwrap();
+
+        let response = session_router()
+            .with_state(Arc::new(AppState::for_tests()))
+            .oneshot(request)
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("INVALID instruction"), "{body}");
     }
 
     #[tokio::test]

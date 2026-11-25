@@ -17,7 +17,7 @@ settings:
 
 docs:
   content: |-
-    The skills the agent has loaded, each with a `name` and a `description`. A prompt runs one with `$name`.
+    The skills the agent has loaded, each with a `name` and a `description`. A prompt runs one with `/skill:name`. `$name` is a shortcut only `tiles run` understands.
 
     409 when no agent is running, or while a reply is streaming.
   type: text/markdown

@@ -10,7 +10,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use nix::unistd::setsid;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{fs, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    fs,
+    path::PathBuf,
+    process::{self, Stdio},
+    time::Duration,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use uuid::Uuid;
@@ -126,8 +131,11 @@ pub fn save_default_thinking_level(
         .insert("defaultThinkingLevel".to_owned(), json!(level));
 
     fs::create_dir_all(&pi_agent_dir).context("Failed to create Pi agent directory")?;
-    fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)
-        .context("Failed to write settings.json")
+    // written beside the file and renamed over it, a reader never sees half a file
+    let tmp_path = pi_agent_dir.join(format!("settings.{}.tmp.json", process::id()));
+    fs::write(&tmp_path, serde_json::to_string_pretty(&settings)?)
+        .context("Failed to write settings.json")?;
+    fs::rename(&tmp_path, &settings_path).context("Failed to write settings.json")
 }
 
 /// Gracefully exit an ongoing Pi agent session.
