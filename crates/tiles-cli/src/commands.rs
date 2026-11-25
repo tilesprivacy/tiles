@@ -1,13 +1,16 @@
 //! What the slash commands do and print
 
+use std::env;
 use std::io;
+use std::path::Path;
 
 use anyhow::Result;
 use owo_colors::OwoColorize;
 
-use crate::api::{DaemonApi, Session, ShareOutcome, ShareVisibility};
+use crate::api::{AtprotoAccount, DaemonApi, Session, ShareOutcome, ShareVisibility};
 use crate::atproto::sign_in;
 
+/// `/sessions`: prints the saved sessions, newest first
 pub async fn show_session_list(api: &DaemonApi) -> Result<()> {
     for line in session_list_lines(&api.fetch_sessions().await?) {
         println!("{line}");
@@ -91,6 +94,66 @@ fn share_outcome_line(outcome: &ShareOutcome) -> String {
     }
 }
 
+/// `/status`: prints the session, model, reasoning level, working directory and ATmosphere
+/// sign in. `session` is `None` until the first message is saved
+pub async fn show_status(
+    api: &DaemonApi,
+    session: Option<&Session>,
+    model: &str,
+    reasoning: &str,
+) -> Result<()> {
+    let cwd = env::current_dir()?;
+    let signed_in = api.fetch_signed_in_account().await?;
+
+    println!("\n");
+    for line in status_lines(&cwd, session, model, reasoning, signed_in.as_ref()) {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+fn status_lines(
+    cwd: &Path,
+    session: Option<&Session>,
+    model: &str,
+    reasoning: &str,
+    signed_in: Option<&AtprotoAccount>,
+) -> Vec<String> {
+    let session_status = match session {
+        Some(session) => format!("{} ({})", session.name.yellow(), session.id.dimmed()),
+        None => "Session not started yet".to_owned(),
+    };
+    let atproto_status = match signed_in {
+        Some(account) => format!(
+            "{}{} ({})",
+            "@".blue(),
+            account.handle.blue(),
+            account.did.dimmed()
+        ),
+        None => "Not logged-in".to_owned(),
+    };
+    let statuses = [
+        ("Session", session_status),
+        ("Model", model.to_owned()),
+        ("Reasoning", reasoning.to_owned()),
+        ("Working Directory", cwd.display().to_string()),
+        ("ATProto", atproto_status),
+    ];
+
+    let label_width = statuses
+        .iter()
+        .map(|(label, _)| label.len())
+        .max()
+        .unwrap_or(0);
+    statuses
+        .into_iter()
+        .map(|(label, status)| {
+            let padding = " ".repeat(label_width - label.len());
+            format!("{label}:{padding}\t{status}")
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,5 +200,51 @@ mod tests {
             share_outcome_line(&ShareOutcome::NoSuchSession),
             "Session doesn't exist or not started yet"
         );
+    }
+
+    #[test]
+    fn status_lines_show_defaults_without_session_or_atproto_login() {
+        let lines = status_lines(Path::new("/tmp/tiles"), None, "model", "low", None);
+
+        assert_eq!(
+            lines,
+            [
+                "Session:          \tSession not started yet",
+                "Model:            \tmodel",
+                "Reasoning:        \tlow",
+                "Working Directory:\t/tmp/tiles",
+                "ATProto:          \tNot logged-in",
+            ]
+        );
+    }
+
+    #[test]
+    fn status_lines_include_session_and_atproto_login() {
+        let session = Session {
+            id: "session-1".to_owned(),
+            name: "First chat".to_owned(),
+        };
+        let signed_in = AtprotoAccount {
+            handle: "alice.test".to_owned(),
+            did: "did:plc:alice".to_owned(),
+        };
+
+        let lines = status_lines(
+            Path::new("/work/tiles"),
+            Some(&session),
+            "llama",
+            "low",
+            Some(&signed_in),
+        );
+
+        assert!(lines[0].starts_with("Session:          \t"), "{lines:?}");
+        assert!(lines[0].contains("First chat"), "{lines:?}");
+        assert!(lines[0].contains("session-1"), "{lines:?}");
+        assert_eq!(lines[1], "Model:            \tllama");
+        assert_eq!(lines[3], "Working Directory:\t/work/tiles");
+        assert!(lines[4].starts_with("ATProto:          \t"), "{lines:?}");
+        assert!(lines[4].contains('@'), "{lines:?}");
+        assert!(lines[4].contains("alice.test"), "{lines:?}");
+        assert!(lines[4].contains("did:plc:alice"), "{lines:?}");
     }
 }

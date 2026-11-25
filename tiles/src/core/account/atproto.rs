@@ -4,6 +4,7 @@ use anyhow::{Context, Result, anyhow};
 use atrium_api::{
     agent::Agent,
     types::{Unknown, string::Did},
+    xrpc::Error as XrpcError,
 };
 use atrium_common::store::{Store, memory::MemoryStore};
 use atrium_identity::{
@@ -133,6 +134,24 @@ impl std::fmt::Display for HandleNotFound {
 }
 
 impl Error for HandleNotFound {}
+
+/// The saved sign in could not be renewed, the account has to sign in again
+#[derive(Debug)]
+pub struct SignInExpired {
+    pub handle: String,
+}
+
+impl std::fmt::Display for SignInExpired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "The ATmosphere sign in for @{} has expired, sign in again to share",
+            self.handle
+        )
+    }
+}
+
+impl Error for SignInExpired {}
 
 /// A sign in that has its authorize url and is waiting for the browser
 pub struct PendingLogin {
@@ -293,6 +312,26 @@ fn upsert_auth_data(conn: &Connection, data: &AtprotoAuthData) -> Result<()> {
     }
 }
 
+// a sign in or sign out that finished during the share is kept
+fn save_session_after_share(
+    conn: &Connection,
+    auth_data: &AtprotoAuthData,
+    session_at_start: &str,
+) -> Result<()> {
+    conn.execute(
+        "update atproto_auth_data set session = ?1, is_logged_in = ?2, updated_at = ?3
+         where key = ?4 and session = ?5 and is_logged_in = true",
+        params![
+            auth_data.session,
+            auth_data.is_logged_in,
+            auth_data.updated_at as f64,
+            auth_data.key,
+            session_at_start
+        ],
+    )?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn fetch_auth_data(conn: &Connection, did: &str) -> Result<AtprotoAuthData> {
     let data = conn.query_row(
@@ -392,7 +431,7 @@ pub async fn share_session(
 
         let record: Unknown = serde_json::from_value(shared_session_value)?;
 
-        let create_result = agent
+        let created = agent
             .api
             .com
             .atproto
@@ -410,8 +449,37 @@ pub async fn share_session(
                 }
                 .into(),
             )
-            .await?;
+            .await;
 
+        let sign_in_expired = matches!(&created, Err(err) if access_token_was_refused(err));
+        let handle = auth_data.handle.clone();
+        // refresh tokens are single use, renewed one is kept even when the share failed
+        let session = mem_session_store
+            .get(&did_struct)
+            .await?
+            .context("No ATmosphere session was stored for this account")?;
+        let session_at_start = auth_data.session;
+        let auth_data = AtprotoAuthData {
+            session: serde_json::to_string(&session)?,
+            // expired sign in is signed out, every client asks for a new one
+            is_logged_in: !sign_in_expired,
+            updated_at: get_unix_time_now(),
+            ..auth_data
+        };
+        // the share's own outcome is returned either way
+        if let Err(err) = conn
+            .call(move |conn| save_session_after_share(conn, &auth_data, &session_at_start))
+            .await
+            .map_err(call_error)
+        {
+            warn!("Couldn't save the ATmosphere session after the share: {err:#}");
+        }
+
+        let create_result = match created {
+            Ok(created) => created,
+            Err(_) if sign_in_expired => return Err(SignInExpired { handle }.into()),
+            Err(err) => return Err(err.into()),
+        };
         let url = &create_result.uri;
 
         let base_encoded_at_url = data_encoding::BASE64.encode(url.as_bytes());
@@ -429,35 +497,21 @@ pub async fn share_session(
             shareable_base_url
         };
 
-        // Updating the session token
-        let session = mem_session_store
-            .get(&did_struct)
-            .await?
-            .context("No ATmosphere session was stored for this account")?;
-        let session_string = serde_json::to_string(&session)?;
-
-        let auth_data = AtprotoAuthData {
-            key: did_struct.to_string(),
-            session: session_string,
-            state: "".to_owned(),
-            is_logged_in: true,
-            created_at: get_unix_time_now(),
-            updated_at: get_unix_time_now(),
-            handle: auth_data.handle,
-        };
-
-        // the record is published by now, its link is returned either way
-        if let Err(err) = conn
-            .call(move |conn| upsert_auth_data(conn, &auth_data))
-            .await
-            .map_err(call_error)
-        {
-            warn!("Couldn't save the refreshed ATmosphere session: {err:#}");
-        }
         Ok(shareable_url)
     } else {
         info!("No logged-in user, please login");
         Err(anyhow!("NOT_LOGGED_IN"))
+    }
+}
+
+/// Whether the PDS refused the access token. atrium renews a refused token and tries
+/// once more before it reports this, so by then the sign in can't be renewed
+fn access_token_was_refused<E: Debug>(err: &XrpcError<E>) -> bool {
+    match err {
+        XrpcError::Authentication(challenge) => challenge
+            .to_str()
+            .is_ok_and(|challenge| challenge.contains("error=\"invalid_token\"")),
+        _ => false,
     }
 }
 
@@ -499,7 +553,98 @@ fn create_oauth_client() -> Result<(TOAuthClient, MemorySessionStore)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use atrium_api::xrpc::http::HeaderValue;
     use tokio_rusqlite::rusqlite::Connection;
+
+    #[test]
+    fn a_token_refused_after_renewal_means_the_sign_in_expired() {
+        // what a pds answered a share made with an old sign in
+        let refused = XrpcError::<()>::Authentication(HeaderValue::from_static(
+            r#"DPoP algs="RS256 RS384 RS512 PS256 PS384 PS512 ES256 ES256K ES384 ES512", error="invalid_token""#,
+        ));
+
+        assert!(access_token_was_refused(&refused));
+    }
+
+    #[test]
+    fn other_failures_leave_the_sign_in_alone() {
+        let wants_a_nonce = XrpcError::<()>::Authentication(HeaderValue::from_static(
+            r#"DPoP error="use_dpop_nonce""#,
+        ));
+
+        assert!(!access_token_was_refused(&wants_a_nonce));
+        assert!(!access_token_was_refused(
+            &XrpcError::<()>::UnexpectedResponseType
+        ));
+    }
+
+    #[test]
+    fn a_share_saves_the_renewed_session() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+
+        let renewed = signed_in_with("renewed session");
+        save_session_after_share(&conn, &renewed, "session at start").unwrap();
+
+        let saved = fetch_auth_data(&conn, "did:plc:wth").unwrap();
+        assert_eq!(saved.session, "renewed session");
+        assert!(saved.is_logged_in);
+    }
+
+    #[test]
+    fn a_share_with_an_expired_sign_in_signs_out() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+
+        let expired = AtprotoAuthData {
+            is_logged_in: false,
+            ..signed_in_with("session at start")
+        };
+        save_session_after_share(&conn, &expired, "session at start").unwrap();
+
+        assert!(fetch_logged_in_data(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_sign_in_finished_during_a_share_is_kept() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+        upsert_auth_data(&conn, &signed_in_with("new sign in")).unwrap();
+
+        let expired = AtprotoAuthData {
+            is_logged_in: false,
+            ..signed_in_with("session at start")
+        };
+        save_session_after_share(&conn, &expired, "session at start").unwrap();
+
+        let saved = fetch_auth_data(&conn, "did:plc:wth").unwrap();
+        assert_eq!(saved.session, "new sign in");
+        assert!(saved.is_logged_in);
+    }
+
+    #[test]
+    fn a_sign_out_during_a_share_is_kept() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+        logout(&conn).unwrap();
+
+        let renewed = signed_in_with("renewed session");
+        save_session_after_share(&conn, &renewed, "session at start").unwrap();
+
+        assert!(fetch_logged_in_data(&conn).unwrap().is_none());
+    }
+
+    fn signed_in_with(session: &str) -> AtprotoAuthData {
+        AtprotoAuthData {
+            key: String::from("did:plc:wth"),
+            session: session.to_owned(),
+            state: "".to_owned(),
+            is_logged_in: true,
+            created_at: get_unix_time_now(),
+            updated_at: get_unix_time_now(),
+            handle: "madcla.ws".to_owned(),
+        }
+    }
 
     #[test]
     fn test_add_a_new_auth_entry() {

@@ -1,4 +1,3 @@
-use crate::core::account::atproto::fetch_logged_in_data;
 use crate::core::account::local::get_current_user;
 use crate::core::agent::pi::{PiAgent, PiWriter};
 use crate::core::agent::types::{
@@ -7,8 +6,7 @@ use crate::core::agent::types::{
 };
 use crate::core::agent::{pi, types};
 use crate::core::chats::{
-    ChatResponse, Session, fetch_chats_by_session_id, fetch_session, save_chat, save_first_chat,
-    update_snapshot,
+    ChatResponse, fetch_chats_by_session_id, save_chat, save_first_chat, update_snapshot,
 };
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
@@ -37,7 +35,8 @@ use std::sync::atomic::AtomicBool;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
 use tiles_cli::{
-    InputType, create_line_editor, handle_input, share_session_command, show_session_list,
+    InputType, Session, create_line_editor, handle_input, share_session_command, show_session_list,
+    show_status,
 };
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
@@ -569,66 +568,12 @@ fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession)
     Ok(())
 }
 
-fn show_status(repl_session: &ReplSession, db_conn: &Dbconn) -> Result<()> {
-    let cwd_pathbuf = std::env::current_dir()?;
-    let cwd = cwd_pathbuf.to_string_lossy();
-    let logged_in_atproto = fetch_logged_in_data(&db_conn.common)?;
-    let session_data: Option<Session> = fetch_session(&db_conn.chat, &repl_session.session_id)
-        .ok()
-        .flatten();
-    let status_lines = build_status_lines(&cwd, session_data, repl_session, logged_in_atproto);
-
-    println!("\n");
-    for line in status_lines {
-        println!("{}", line);
-    }
-    Ok(())
-}
-
-fn build_status_lines(
-    cwd: &str,
-    session_data: Option<Session>,
-    repl_session: &ReplSession,
-    logged_in_atproto: Option<crate::core::account::atproto::AtprotoAuthData>,
-) -> Vec<String> {
-    let mut status_map: Vec<(&str, String)> = vec![];
-    let session_status = if let Some(session) = session_data {
-        format!("{} ({})", session.name.yellow(), session.id.dimmed())
-    } else {
-        "Session not started yet".to_owned()
-    };
-    status_map.push(("Session", session_status));
-    status_map.push(("Model", repl_session.current_modelname.clone()));
-    status_map.push(("Reasoning", String::from(repl_session.reasoning)));
-    status_map.push(("Working Directory", cwd.to_owned()));
-    let at_proto_status = if let Some(at_auth_user) = logged_in_atproto {
-        format!(
-            "{}{} ({})",
-            "@".blue(),
-            at_auth_user.handle.blue(),
-            at_auth_user.key.dimmed()
-        )
-    } else {
-        "Not logged-in".to_owned()
-    };
-    status_map.push(("ATProto", at_proto_status));
-
-    // for padding
-    let max_length = status_map
-        .iter()
-        .fold(0, |acc, x| if x.0.len() > acc { x.0.len() } else { acc });
-
-    status_map
-        .into_iter()
-        .map(|status| {
-            format!(
-                "{}:{}\t{}",
-                status.0,
-                " ".repeat(max_length - status.0.len()),
-                status.1
-            )
-        })
-        .collect()
+// the saved session `/status` shows, none until the first message is saved
+fn started_session(repl_session: &ReplSession) -> Option<Session> {
+    repl_session.session_started.then(|| Session {
+        id: repl_session.session_id.clone(),
+        name: repl_session.session_snapshot.name.clone(),
+    })
 }
 
 fn handle_pi_message_update(msg_update: types::PiMessageUpdate) {
@@ -775,7 +720,14 @@ async fn handle_input_commands(
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Status => {
-            if let Err(err) = show_status(repl_session, db_conn) {
+            let session = started_session(repl_session);
+            let reasoning = String::from(repl_session.reasoning);
+            let shown = async {
+                let api = daemon_api().await?;
+                let model = &repl_session.current_modelname;
+                show_status(&api, session.as_ref(), model, &reasoning).await
+            };
+            if let Err(err) = shown.await {
                 println!("Failed to display status due to {}", err);
             };
             InputCommandResponse::ProcessNextInput
@@ -1014,9 +966,8 @@ mod tests {
     use crate::core::agent::types::{
         GetStateData, PiAgentEndEvent, PiModelInfo, PiMsgContent, PiMsgEvent,
     };
-    use crate::core::chats::create_session;
+    use crate::core::chats::fetch_session;
     use crate::core::chats::tests::create_user;
-    use tokio_rusqlite::rusqlite::Connection;
 
     #[test]
     fn model_load_warnings_extracts_string_list() {
@@ -1037,72 +988,6 @@ mod tests {
         // Non-string entries are skipped, strings are kept.
         let payload = serde_json::json!({"warnings": [42, "valid", null]});
         assert_eq!(model_load_warnings(&payload), vec!["valid".to_owned()]);
-    }
-
-    #[test]
-    fn status_lines_show_defaults_without_session_or_atproto_login() {
-        let state = GetStateData {
-            model: PiModelInfo {
-                id: String::from("model"),
-                name: String::from("model"),
-            },
-            thinking_level: "low".to_string(),
-            is_streaming: true,
-            session_id: "def".to_string(),
-        };
-        let repl_session_b = ReplSession::new(&state);
-        let lines = build_status_lines("/tmp/tiles", None, &repl_session_b, None);
-
-        assert_eq!(
-            lines,
-            vec![
-                "Session:          \tSession not started yet",
-                "Model:            \tmodel",
-                "Reasoning:        \tlow",
-                "Working Directory:\t/tmp/tiles",
-                "ATProto:          \tNot logged-in",
-            ]
-        );
-    }
-
-    #[test]
-    fn status_lines_include_session_and_atproto_login() {
-        let db_conn = setup_db_conn();
-        create_session(&db_conn.chat, "session-1", "First chat", "user-1")
-            .expect("session should be created");
-        insert_atproto_login(&db_conn.common);
-
-        let session = fetch_session(&db_conn.chat, "session-1").ok().flatten();
-        let atproto_login =
-            fetch_logged_in_data(&db_conn.common).expect("login lookup should succeed");
-        let state = GetStateData {
-            model: PiModelInfo {
-                id: String::from("llam"),
-                name: String::from("llama"),
-            },
-            thinking_level: "low".to_string(),
-            is_streaming: true,
-            session_id: "def".to_string(),
-        };
-        let repl_session_b = ReplSession::new(&state);
-        let lines = build_status_lines("/work/tiles", session, &repl_session_b, atproto_login);
-
-        assert!(lines[0].starts_with("Session:          \t"));
-        assert!(lines[0].contains("First chat"));
-        assert!(lines[0].contains("session-1"));
-        assert_eq!(lines[1], "Model:            \tllama");
-        assert_eq!(lines[3], "Working Directory:\t/work/tiles");
-        assert!(lines[4].starts_with("ATProto:          \t"));
-        assert!(lines[4].contains("@"));
-        assert!(lines[4].contains("alice.test"));
-        assert!(lines[4].contains("did:plc:alice"));
-    }
-
-    fn setup_db_conn() -> Dbconn {
-        Dbconn {
-            chat: setup_chat_db(),
-            common: setup_common_db(),
-        }
     }
 
     fn setup_db_conn_v2() -> Dbconn {
@@ -1394,49 +1279,5 @@ mod tests {
             repl_session_b.last_chat_id.unwrap(),
             repl_session.last_chat_id.unwrap()
         );
-    }
-
-    fn setup_chat_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS sessions (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                creator_id TEXT NOT NULL,
-                created_at INTEGER NOT NULL,
-                snapshot TEXT
-            )",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    fn setup_common_db() -> Connection {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS atproto_auth_data(
-                key TEXT PRIMARY KEY,
-                session TEXT,
-                state TEXT,
-                is_logged_in INTEGER NOT NULL,
-                created_at INTEGER NOT NULL,
-                updated_at INTEGER NOT NULL,
-                handle TEXT NOT NULL
-            )",
-            [],
-        )
-        .unwrap();
-        conn
-    }
-
-    fn insert_atproto_login(conn: &Connection) {
-        conn.execute(
-            "INSERT INTO atproto_auth_data(
-                key, session, state, is_logged_in, created_at, updated_at, handle
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            ("did:plc:alice", "{}", "", true, 1_i64, 1_i64, "alice.test"),
-        )
-        .unwrap();
     }
 }

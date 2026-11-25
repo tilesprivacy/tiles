@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     core::{
-        account::atproto::{self, HandleNotFound, LOGIN_TIMEOUT},
+        account::atproto::{self, HandleNotFound, LOGIN_TIMEOUT, SignInExpired},
         chats::session_snapshot,
         storage::db::{DBTYPE, call_error, get_async_db_conn, get_db_conn},
     },
@@ -75,19 +75,23 @@ async fn share_session(
     let common = get_async_db_conn(&DBTYPE::COMMON).map_err(internal)?;
     let url = atproto::share_session(&common, &snapshot, request.is_private)
         .await
-        .map_err(|err| {
-            if err.to_string() == "NOT_LOGGED_IN" {
-                AppError::Forbidden(
-                    "Sign in to an ATmosphere account to share, the chat is stored there"
-                        .to_owned(),
-                )
-            } else {
-                internal(err)
-            }
-        })?;
+        .map_err(app_error_for_failed_share)?;
     Ok(ApiResponse::success(
         json!({ "url": url, "is_private": request.is_private }),
     ))
+}
+
+// 403 when a sign in would fix it, clients offer one on that
+fn app_error_for_failed_share(err: anyhow::Error) -> AppError {
+    if err.to_string() == "NOT_LOGGED_IN" {
+        AppError::Forbidden(
+            "Sign in to an ATmosphere account to share, the chat is stored there".to_owned(),
+        )
+    } else if err.downcast_ref::<SignInExpired>().is_some() {
+        AppError::Forbidden(err.to_string())
+    } else {
+        AppError::InternalServerError(format!("{err:#}"))
+    }
 }
 
 #[debug_handler]
@@ -196,9 +200,34 @@ pub async fn status() -> Result<impl IntoResponse, AppError> {
 mod tests {
     use super::*;
     use crate::core::account::atproto::AtprotoAccount;
+    use anyhow::anyhow;
+    use axum::http::StatusCode;
     use futures_util::stream;
     use http_body_util::BodyExt;
     use tiles_cli::take_events;
+
+    #[tokio::test]
+    async fn an_expired_sign_in_is_answered_like_a_missing_one() {
+        let expired = SignInExpired {
+            handle: "alice.bsky.social".to_owned(),
+        };
+        let response = app_error_for_failed_share(expired.into()).into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("@alice.bsky.social has expired"), "{body}");
+
+        let missing = app_error_for_failed_share(anyhow!("NOT_LOGGED_IN")).into_response();
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn any_other_failed_share_stays_a_server_error() {
+        let response = app_error_for_failed_share(anyhow!("the pds is down")).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     // the bytes axum sends for these events, so the tests read what a client really gets
     async fn wire(events: Vec<Event>) -> String {

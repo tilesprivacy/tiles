@@ -6,15 +6,25 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
+/// The running daemon's HTTP API, as the CLI calls it
+#[derive(Debug, Clone)]
 pub struct DaemonApi {
     client: Client,
     address: String,
 }
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
-pub(crate) struct Session {
+/// Saved chat session
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Session {
     pub id: String,
     pub name: String,
+}
+
+/// The ATmosphere account that is signed in
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct AtprotoAccount {
+    pub handle: String,
+    pub did: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,7 +34,7 @@ pub(crate) enum ShareVisibility {
     Public,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ShareOutcome {
     Shared { url: String },
     NotSignedIn,
@@ -50,6 +60,20 @@ impl DaemonApi {
             .await
             .context("Could not reach the Tiles daemon")?;
         response_data(res).await
+    }
+
+    /// `None` when nobody is signed in
+    pub(crate) async fn fetch_signed_in_account(&self) -> Result<Option<AtprotoAccount>> {
+        let res = self
+            .client
+            .get(format!("{}/v1/tilekit/atproto/status", self.address))
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        response_data(res).await.map(Some)
     }
 
     pub(crate) async fn share_session(
@@ -201,6 +225,29 @@ mod tests {
         let err = api.fetch_sessions().await.unwrap_err();
 
         assert_eq!(err.to_string(), "Could not reach the Tiles daemon");
+    }
+
+    #[tokio::test]
+    async fn the_signed_in_account_is_read_and_nobody_signed_in_is_none() {
+        let route = "/v1/tilekit/atproto/status";
+        let signed_in = json!({
+            "status": "success",
+            "data": { "handle": "alice.test", "did": "did:plc:alice" }
+        });
+        let server = daemon_answering("GET", route, 200, signed_in).await;
+        let account = api_for(&server).fetch_signed_in_account().await.unwrap();
+        assert_eq!(
+            account,
+            Some(AtprotoAccount {
+                handle: "alice.test".to_owned(),
+                did: "did:plc:alice".to_owned(),
+            })
+        );
+
+        let nobody = json!({ "status": "failed", "reason": "Not logged-in" });
+        let server = daemon_answering("GET", route, 404, nobody).await;
+        let account = api_for(&server).fetch_signed_in_account().await.unwrap();
+        assert_eq!(account, None);
     }
 
     #[tokio::test]

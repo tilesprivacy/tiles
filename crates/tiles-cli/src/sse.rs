@@ -2,7 +2,7 @@
 
 use serde_json::Value;
 
-// a block cut off mid chunk waits for the next one
+/// Takes the whole events out of `pending`. One cut off mid chunk waits for the next call
 pub fn take_events(pending: &mut String) -> Vec<(String, Value)> {
     let mut events = vec![];
     while let Some(end) = pending.find("\n\n") {
