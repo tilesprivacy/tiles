@@ -11,7 +11,7 @@ use crate::core::agent::types::{PiMsgContent, PiMsgEvent};
 use crate::core::storage::db::get_db_conn;
 use crate::utils::get_unix_time_now;
 use crate::utils::lexicons::{SessionSnapshotRecord, Turn};
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use log::{info, warn};
 use tilekit::modelfile::Role;
 use tokio::sync::mpsc::{self, Sender};
@@ -134,6 +134,140 @@ pub fn save_first_chat(
     txn.commit()?;
 
     Ok(chat)
+}
+
+// skips duplicates from older clients that still call session/chat
+pub fn save_chat_once(conn: &Connection, user: &User, chat_resp: ChatResponse) -> Result<Chats> {
+    match last_chat_of_session(conn, &chat_resp.session_id)? {
+        Some(last) if last.role == chat_resp.role && last.content == chat_resp.input => Ok(last),
+        _ => save_chat(conn, user, chat_resp),
+    }
+}
+
+fn last_chat_of_session(conn: &Connection, session_id: &str) -> Result<Option<Chats>> {
+    let query = "select id, user_id, content, resp_id, role, context_id, created_at, updated_at , row_counter, session_id, model_name from chats where session_id = ?1 order by id desc limit 1";
+    Ok(fetch_delta_chats(conn, query, vec![("?1", session_id)])?
+        .chats
+        .pop())
+}
+
+/// Turn waiting for its reply
+#[derive(Debug)]
+pub struct OpenTurn {
+    session_id: String,
+    model: String,
+    prompt: String,
+    prompt_chat_id: String,
+}
+
+/// First message also creates the session
+pub fn save_prompt(
+    conn: &Connection,
+    user: &User,
+    session_id: &str,
+    model: &str,
+    prompt: &str,
+) -> Result<OpenTurn> {
+    let last = last_chat_of_session(conn, session_id)?;
+    let chat = ChatResponse {
+        input: prompt.to_owned(),
+        session_id: session_id.to_owned(),
+        role: Role::User,
+        parent_chat_id: last.as_ref().map(|last| last.id.clone()),
+        model_used: model.to_owned(),
+    };
+    let saved = match last {
+        Some(_) => save_chat_once(conn, user, chat)?,
+        None => save_first_chat(conn, user, prompt, chat)?,
+    };
+
+    Ok(OpenTurn {
+        session_id: session_id.to_owned(),
+        model: model.to_owned(),
+        prompt: prompt.to_owned(),
+        prompt_chat_id: saved.id,
+    })
+}
+
+// saves the reply text and adds Pi's messages to the snapshot
+pub fn save_reply(
+    conn: &Connection,
+    user: &User,
+    turn: OpenTurn,
+    mut messages: Vec<PiMsgEvent>,
+) -> Result<()> {
+    let mut snapshot = snapshot_before_turn(conn, &turn)?;
+    // snapshot keeps the typed message
+    if let Some(sent) = messages.iter_mut().find(|msg| msg.role == Role::User) {
+        sent.content = vec![text_content(turn.prompt)];
+    }
+    let reply = reply_text(&messages);
+    snapshot.turns.push(Turn {
+        api: Some("open-responses".to_owned()),
+        provider: Some("tiles".to_owned()),
+        model: turn.model.clone(),
+        messages,
+    });
+
+    let txn = conn.unchecked_transaction()?;
+    if !reply.is_empty() {
+        let chat = ChatResponse {
+            input: reply,
+            session_id: turn.session_id.clone(),
+            role: Role::Assistant,
+            parent_chat_id: Some(turn.prompt_chat_id),
+            model_used: turn.model,
+        };
+        save_chat(&txn, user, chat)?;
+    }
+    update_snapshot(&txn, &turn.session_id, serde_json::to_string(&snapshot)?)?;
+    txn.commit()?;
+
+    Ok(())
+}
+
+// falls back to a snapshot built from older messages
+fn snapshot_before_turn(conn: &Connection, turn: &OpenTurn) -> Result<SessionSnapshotRecord> {
+    let delta = fetch_chats_by_session_id(conn, &turn.session_id)?;
+    let session = delta
+        .sessions
+        .first()
+        .with_context(|| format!("Session {} is missing", turn.session_id))?;
+    if let Some(snapshot) = &session.snapshot {
+        return Ok(serde_json::from_str(snapshot)?);
+    }
+    let earlier = delta
+        .chats
+        .into_iter()
+        .filter(|chat| chat.id < turn.prompt_chat_id);
+    Ok(snapshot_of_chats(session, earlier))
+}
+
+// same text the app shows for the reply
+fn reply_text(messages: &[PiMsgEvent]) -> String {
+    let texts: Vec<String> = messages
+        .iter()
+        .filter(|msg| msg.role == Role::Assistant)
+        .map(|msg| {
+            msg.content
+                .iter()
+                .filter(|part| part.r#type == "text")
+                .filter_map(|part| part.text.as_deref())
+                .collect::<String>()
+        })
+        .filter(|text| !text.is_empty())
+        .collect();
+    texts.join("\n\n")
+}
+
+fn text_content(text: String) -> PiMsgContent {
+    PiMsgContent {
+        r#type: "text".to_owned(),
+        text: Some(text),
+        thinking: None,
+        arguments: None,
+        name: None,
+    }
 }
 
 /// Returns the `id` of the last entry of the given user_id
@@ -491,17 +625,19 @@ pub fn session_snapshot(
     if let Some(snapshot) = &session.snapshot {
         return Ok(Some(serde_json::from_str(snapshot)?));
     }
+    Ok(Some(snapshot_of_chats(session, delta.chats)))
+}
+
+// one turn per prompt
+fn snapshot_of_chats(
+    session: &Session,
+    chats: impl IntoIterator<Item = Chats>,
+) -> SessionSnapshotRecord {
     let mut record = SessionSnapshotRecord::new(&session.name, &session.id);
-    for chat in delta.chats {
+    for chat in chats {
         let message = PiMsgEvent {
             role: chat.role,
-            content: vec![PiMsgContent {
-                r#type: "text".to_owned(),
-                text: Some(chat.content),
-                thinking: None,
-                arguments: None,
-                name: None,
-            }],
+            content: vec![text_content(chat.content)],
             stop_reason: None,
             timestamp: chat.created_at,
             tool_name: None,
@@ -522,7 +658,7 @@ pub fn session_snapshot(
             }),
         }
     }
-    Ok(Some(record))
+    record
 }
 
 pub fn update_snapshot(conn: &Connection, id: &str, snapshot: String) -> Result<Session> {
@@ -1415,6 +1551,201 @@ pub mod tests {
             },
         )
         .expect("saved chat row should exist")
+    }
+
+    fn pi_message(role: Role, content: serde_json::Value) -> super::PiMsgEvent {
+        serde_json::from_value(serde_json::json!({
+            "role": role,
+            "content": content,
+            "timestamp": 1,
+        }))
+        .unwrap()
+    }
+
+    fn saved_contents(conn: &Connection, session_id: &str) -> Vec<(Role, String)> {
+        super::fetch_chats_by_session_id(conn, session_id)
+            .unwrap()
+            .chats
+            .into_iter()
+            .map(|chat| (chat.role, chat.content))
+            .collect()
+    }
+
+    #[test]
+    fn the_first_prompt_creates_the_session_named_after_it() {
+        let conn = setup_db_schema();
+        let user = create_user();
+
+        super::save_prompt(&conn, &user, "s1", "llama", "capital of India?").unwrap();
+
+        let session = fetch_session(&conn, "s1").unwrap().unwrap();
+        assert_eq!(session.name, "capital of India?");
+        assert_eq!(
+            saved_contents(&conn, "s1"),
+            [(Role::User, "capital of India?".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_reply_is_saved_as_its_text_and_the_whole_turn_goes_in_the_snapshot() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let turn = super::save_prompt(&conn, &user, "s1", "llama", "what is in /tmp?").unwrap();
+        let messages = vec![
+            pi_message(
+                Role::User,
+                serde_json::json!([{ "type": "text", "text": "the chat so far, then: what is in /tmp?" }]),
+            ),
+            pi_message(
+                Role::Assistant,
+                serde_json::json!([
+                    { "type": "thinking", "thinking": "I should look" },
+                    { "type": "text", "text": "Let me look." },
+                    { "type": "toolCall", "name": "ls", "arguments": { "path": "/tmp" } },
+                ]),
+            ),
+            pi_message(
+                Role::ToolResult,
+                serde_json::json!([{ "type": "text", "text": "a.txt" }]),
+            ),
+            pi_message(
+                Role::Assistant,
+                serde_json::json!([{ "type": "text", "text": "Only a.txt." }]),
+            ),
+        ];
+
+        super::save_reply(&conn, &user, turn, messages).unwrap();
+
+        assert_eq!(
+            saved_contents(&conn, "s1"),
+            [
+                (Role::User, "what is in /tmp?".to_owned()),
+                (Role::Assistant, "Let me look.\n\nOnly a.txt.".to_owned()),
+            ]
+        );
+        let snapshot = session_snapshot(&conn, "s1").unwrap().unwrap();
+        assert_eq!(snapshot.turns.len(), 1);
+        let saved = &snapshot.turns[0].messages;
+        assert_eq!(saved.len(), 4);
+        // typed message only
+        assert_eq!(
+            saved[0].content[0].text.as_deref(),
+            Some("what is in /tmp?")
+        );
+        assert_eq!(
+            saved[1].content[0].thinking.as_deref(),
+            Some("I should look")
+        );
+        assert_eq!(saved[1].content[2].name.as_deref(), Some("ls"));
+        assert_eq!(snapshot.turns[0].model, "llama");
+    }
+
+    #[test]
+    fn a_chat_saved_without_a_snapshot_keeps_its_earlier_turns() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let earlier = |role, input: &str, parent| ChatResponse {
+            input: input.to_owned(),
+            session_id: "s1".to_owned(),
+            role,
+            parent_chat_id: parent,
+            model_used: "llama".to_owned(),
+        };
+        let asked = save_first_chat(&conn, &user, "hi", earlier(Role::User, "hi", None)).unwrap();
+        save_chat(
+            &conn,
+            &user,
+            earlier(Role::Assistant, "hello", Some(asked.id)),
+        )
+        .unwrap();
+
+        let turn = super::save_prompt(&conn, &user, "s1", "llama", "and you?").unwrap();
+        let reply = pi_message(
+            Role::Assistant,
+            serde_json::json!([{ "type": "text", "text": "fine" }]),
+        );
+        super::save_reply(&conn, &user, turn, vec![reply]).unwrap();
+
+        let snapshot = session_snapshot(&conn, "s1").unwrap().unwrap();
+        let texts: Vec<Vec<Option<&str>>> = snapshot
+            .turns
+            .iter()
+            .map(|turn| {
+                turn.messages
+                    .iter()
+                    .map(|msg| msg.content[0].text.as_deref())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(texts, [vec![Some("hi"), Some("hello")], vec![Some("fine")]]);
+    }
+
+    #[test]
+    fn a_reply_without_text_is_kept_in_the_snapshot_only() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let turn = super::save_prompt(&conn, &user, "s1", "llama", "think").unwrap();
+        let stopped = pi_message(
+            Role::Assistant,
+            serde_json::json!([{ "type": "thinking", "thinking": "hmm" }]),
+        );
+
+        super::save_reply(&conn, &user, turn, vec![stopped]).unwrap();
+
+        assert_eq!(
+            saved_contents(&conn, "s1"),
+            [(Role::User, "think".to_owned())]
+        );
+        let snapshot = session_snapshot(&conn, "s1").unwrap().unwrap();
+        assert_eq!(snapshot.turns[0].messages.len(), 1);
+    }
+
+    #[test]
+    fn a_message_an_older_client_also_saves_is_kept_once() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let from_client = |role, input: &str| ChatResponse {
+            input: input.to_owned(),
+            session_id: "s1".to_owned(),
+            role,
+            parent_chat_id: None,
+            model_used: "llama".to_owned(),
+        };
+        // client saves the message before the daemon and the reply after
+        save_first_chat(&conn, &user, "hi", from_client(Role::User, "hi")).unwrap();
+        let turn = super::save_prompt(&conn, &user, "s1", "llama", "hi").unwrap();
+        let reply = pi_message(
+            Role::Assistant,
+            serde_json::json!([{ "type": "text", "text": "hello" }]),
+        );
+        super::save_reply(&conn, &user, turn, vec![reply]).unwrap();
+        super::save_chat_once(&conn, &user, from_client(Role::Assistant, "hello")).unwrap();
+
+        assert_eq!(
+            saved_contents(&conn, "s1"),
+            [
+                (Role::User, "hi".to_owned()),
+                (Role::Assistant, "hello".to_owned())
+            ]
+        );
+        let snapshot = session_snapshot(&conn, "s1").unwrap().unwrap();
+        assert_eq!(snapshot.turns.len(), 1);
+    }
+
+    #[test]
+    fn the_same_message_after_a_reply_is_a_new_message() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        for _ in 0..2 {
+            let turn = super::save_prompt(&conn, &user, "s1", "llama", "again").unwrap();
+            let reply = pi_message(
+                Role::Assistant,
+                serde_json::json!([{ "type": "text", "text": "ok" }]),
+            );
+            super::save_reply(&conn, &user, turn, vec![reply]).unwrap();
+        }
+
+        assert_eq!(saved_contents(&conn, "s1").len(), 4);
     }
 
     pub fn create_user() -> User {

@@ -6,6 +6,15 @@ info:
 http:
   method: POST
   url: "{{tilekit_base_url}}/session/chat"
+  body:
+    type: json
+    data: |-
+      {
+        "text": "How many states are there in India?",
+        "session_id": "<session id>",
+        "role": "user",
+        "parent_chat_id": null
+      }
   auth: inherit
 
 settings:
@@ -14,3 +23,10 @@ settings:
   followRedirects: true
   maxRedirects: 5
   forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Only for clients that still save each message themselves. `agent/prompt` saves the turn now.
+
+    Messages the daemon already saved are not saved twice. This route will be removed in a later release.
+  type: text/markdown

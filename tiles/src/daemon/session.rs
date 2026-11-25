@@ -397,14 +397,15 @@ fn do_save_chat(
         log::info!("Session doesn't exist, create it");
         sessionChats::save_first_chat(chat_db_conn, &current_user, &session_name, chat_response)
     } else {
-        sessionChats::save_chat(chat_db_conn, &current_user, chat_response)
+        // older clients send what the daemon already saved
+        sessionChats::save_chat_once(chat_db_conn, &current_user, chat_response)
     };
 
     saved.map_err(|e| AppError::InternalServerError(format!("Saving chat failed due to {}", e)))
 }
 
 /// The model the agent runs, or the one it will start with when it isn't running yet
-fn agent_model(state: &AppState) -> Result<String, AppError> {
+pub(super) fn agent_model(state: &AppState) -> Result<String, AppError> {
     let running = state
         .agent_model
         .lock()
