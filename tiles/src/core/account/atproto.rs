@@ -312,6 +312,26 @@ fn upsert_auth_data(conn: &Connection, data: &AtprotoAuthData) -> Result<()> {
     }
 }
 
+// a sign in or sign out that finished during the share is kept
+fn save_session_after_share(
+    conn: &Connection,
+    auth_data: &AtprotoAuthData,
+    session_at_start: &str,
+) -> Result<()> {
+    conn.execute(
+        "update atproto_auth_data set session = ?1, is_logged_in = ?2, updated_at = ?3
+         where key = ?4 and session = ?5 and is_logged_in = true",
+        params![
+            auth_data.session,
+            auth_data.is_logged_in,
+            auth_data.updated_at as f64,
+            auth_data.key,
+            session_at_start
+        ],
+    )?;
+    Ok(())
+}
+
 #[allow(dead_code)]
 fn fetch_auth_data(conn: &Connection, did: &str) -> Result<AtprotoAuthData> {
     let data = conn.query_row(
@@ -438,6 +458,7 @@ pub async fn share_session(
             .get(&did_struct)
             .await?
             .context("No ATmosphere session was stored for this account")?;
+        let session_at_start = auth_data.session;
         let auth_data = AtprotoAuthData {
             session: serde_json::to_string(&session)?,
             // expired sign in is signed out, every client asks for a new one
@@ -447,7 +468,7 @@ pub async fn share_session(
         };
         // the share's own outcome is returned either way
         if let Err(err) = conn
-            .call(move |conn| upsert_auth_data(conn, &auth_data))
+            .call(move |conn| save_session_after_share(conn, &auth_data, &session_at_start))
             .await
             .map_err(call_error)
         {
@@ -555,6 +576,74 @@ mod tests {
         assert!(!access_token_was_refused(
             &XrpcError::<()>::UnexpectedResponseType
         ));
+    }
+
+    #[test]
+    fn a_share_saves_the_renewed_session() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+
+        let renewed = signed_in_with("renewed session");
+        save_session_after_share(&conn, &renewed, "session at start").unwrap();
+
+        let saved = fetch_auth_data(&conn, "did:plc:wth").unwrap();
+        assert_eq!(saved.session, "renewed session");
+        assert!(saved.is_logged_in);
+    }
+
+    #[test]
+    fn a_share_with_an_expired_sign_in_signs_out() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+
+        let expired = AtprotoAuthData {
+            is_logged_in: false,
+            ..signed_in_with("session at start")
+        };
+        save_session_after_share(&conn, &expired, "session at start").unwrap();
+
+        assert!(fetch_logged_in_data(&conn).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_sign_in_finished_during_a_share_is_kept() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+        upsert_auth_data(&conn, &signed_in_with("new sign in")).unwrap();
+
+        let expired = AtprotoAuthData {
+            is_logged_in: false,
+            ..signed_in_with("session at start")
+        };
+        save_session_after_share(&conn, &expired, "session at start").unwrap();
+
+        let saved = fetch_auth_data(&conn, "did:plc:wth").unwrap();
+        assert_eq!(saved.session, "new sign in");
+        assert!(saved.is_logged_in);
+    }
+
+    #[test]
+    fn a_sign_out_during_a_share_is_kept() {
+        let conn = setup_db_schema();
+        upsert_auth_data(&conn, &signed_in_with("session at start")).unwrap();
+        logout(&conn).unwrap();
+
+        let renewed = signed_in_with("renewed session");
+        save_session_after_share(&conn, &renewed, "session at start").unwrap();
+
+        assert!(fetch_logged_in_data(&conn).unwrap().is_none());
+    }
+
+    fn signed_in_with(session: &str) -> AtprotoAuthData {
+        AtprotoAuthData {
+            key: String::from("did:plc:wth"),
+            session: session.to_owned(),
+            state: "".to_owned(),
+            is_logged_in: true,
+            created_at: get_unix_time_now(),
+            updated_at: get_unix_time_now(),
+            handle: "madcla.ws".to_owned(),
+        }
     }
 
     #[test]
