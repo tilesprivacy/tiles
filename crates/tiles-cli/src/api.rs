@@ -20,6 +20,28 @@ pub struct Session {
     pub name: String,
 }
 
+/// Saved session metadata returned alongside its messages
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct SessionDetails {
+    pub id: String,
+    pub name: String,
+    pub snapshot: Option<String>,
+}
+
+/// A saved message in a session
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct ChatMessage {
+    pub id: String,
+    pub content: String,
+}
+
+/// Saved messages and session metadata for `/resume`
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct SessionChats {
+    pub chats: Vec<ChatMessage>,
+    pub sessions: Vec<SessionDetails>,
+}
+
 /// The ATmosphere account that is signed in
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AtprotoAccount {
@@ -60,6 +82,23 @@ impl DaemonApi {
             .await
             .context("Could not reach the Tiles daemon")?;
         response_data(res).await
+    }
+
+    /// `None` when no session with `session_id` exists
+    pub(crate) async fn fetch_session_chats(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionChats>> {
+        let res = self
+            .client
+            .get(self.session_chats_url(session_id)?)
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        if res.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        response_data(res).await.map(Some)
     }
 
     /// `None` when nobody is signed in
@@ -105,6 +144,14 @@ impl DaemonApi {
         url.path_segments_mut()
             .map_err(|_| anyhow!("{} is not an address to call", self.address))?
             .extend(["v1", "tilekit", "atproto", "share-session", session_id]);
+        Ok(url)
+    }
+
+    fn session_chats_url(&self, session_id: &str) -> Result<Url> {
+        let mut url = Url::parse(&self.address)?;
+        url.path_segments_mut()
+            .map_err(|_| anyhow!("{} is not an address to call", self.address))?
+            .extend(["v1", "tilekit", "session", session_id, "chats"]);
         Ok(url)
     }
 
@@ -200,6 +247,50 @@ mod tests {
                     name: "hello".to_owned(),
                 },
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_chats_are_read_and_missing_session_is_none() {
+        let route = "/v1/tilekit/session/abc/chats";
+        let server = daemon_answering(
+            "GET",
+            route,
+            200,
+            json!({
+                "status": "success",
+                "data": {
+                    "chats": [
+                        { "id": "c1", "content": "hi", "role": "user" },
+                        { "id": "c2", "content": "hello", "role": "assistant" }
+                    ],
+                    "sessions": [
+                        { "id": "abc", "name": "hi", "created_at": 1, "creator_id": "did:key:a", "snapshot": "{}" }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+        let loaded = api_for(&server)
+            .fetch_session_chats("abc")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.chats.len(), 2);
+        assert_eq!(loaded.chats[1].id, "c2");
+        assert_eq!(loaded.sessions[0].snapshot.as_deref(), Some("{}"));
+
+        let missing = daemon_answering(
+            "GET",
+            route,
+            404,
+            json!({ "status": "failed", "reason": "No session abc" }),
+        )
+        .await;
+        assert_eq!(
+            api_for(&missing).fetch_session_chats("abc").await.unwrap(),
+            None
         );
     }
 
@@ -318,7 +409,9 @@ mod tests {
         let api = DaemonApi::new(Client::new(), "http://127.0.0.1:1729".to_owned());
 
         let url = api.share_session_url("../logout").unwrap();
-
         assert_eq!(url.path(), "/v1/tilekit/atproto/share-session/..%2Flogout");
+
+        let chats_url = api.session_chats_url("../list").unwrap();
+        assert_eq!(chats_url.path(), "/v1/tilekit/session/..%2Flist/chats");
     }
 }

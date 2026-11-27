@@ -11,6 +11,8 @@ mod sse;
 pub use api::{AtprotoAccount, DaemonApi, Session};
 pub use atproto::sign_in;
 pub use browser::open_in_browser;
-pub use commands::{share_session_command, show_session_list, show_status};
+pub use commands::{
+    LoadedSession, load_session_history, share_session_command, show_session_list, show_status,
+};
 pub use input::{InputType, TilesHinter, create_line_editor, handle_input};
 pub use sse::take_events;

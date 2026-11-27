@@ -4,11 +4,21 @@ use std::env;
 use std::io;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use owo_colors::OwoColorize;
 
-use crate::api::{AtprotoAccount, DaemonApi, Session, ShareOutcome, ShareVisibility};
+use crate::api::{AtprotoAccount, DaemonApi, Session, SessionChats, ShareOutcome, ShareVisibility};
 use crate::atproto::sign_in;
+
+/// A saved session loaded from the daemon for `/resume`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadedSession {
+    pub id: String,
+    pub name: String,
+    pub snapshot: Option<String>,
+    pub history: String,
+    pub last_chat_id: Option<String>,
+}
 
 /// `/sessions`: prints the saved sessions, newest first
 pub async fn show_session_list(api: &DaemonApi) -> Result<()> {
@@ -154,8 +164,52 @@ fn status_lines(
         .collect()
 }
 
+/// `/resume <sessionId>`: fetches a saved session through the daemon, prints its messages,
+/// and returns the loaded session state
+pub async fn load_session_history(api: &DaemonApi, args: &[&str]) -> Result<LoadedSession> {
+    let session_id = parse_resume_session_id(args)?;
+    let Some(delta) = api.fetch_session_chats(session_id).await? else {
+        bail!("Session {session_id} not available");
+    };
+    for chat in &delta.chats {
+        println!("{}", chat.content);
+    }
+    loaded_session_from_chats(session_id, delta)
+}
+
+fn parse_resume_session_id<'a>(args: &[&'a str]) -> Result<&'a str> {
+    let Some((_cmd, rest)) = args.split_first() else {
+        bail!("Not a valid command");
+    };
+    match rest.first().copied().filter(|id| !id.trim().is_empty()) {
+        Some(id) => Ok(id),
+        None => bail!("Please provide sessionId"),
+    }
+}
+
+fn loaded_session_from_chats(session_id: &str, delta: SessionChats) -> Result<LoadedSession> {
+    let Some(saved) = delta.sessions.into_iter().next() else {
+        bail!("Session {session_id} not available");
+    };
+    let last_chat_id = delta.chats.last().map(|chat| chat.id.clone());
+    let history = delta
+        .chats
+        .into_iter()
+        .map(|chat| chat.content)
+        .collect::<String>();
+    Ok(LoadedSession {
+        id: saved.id,
+        name: saved.name,
+        snapshot: saved.snapshot,
+        history,
+        last_chat_id,
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::api::{ChatMessage, SessionDetails};
+
     use super::*;
 
     #[test]
@@ -246,5 +300,39 @@ mod tests {
         assert!(lines[4].contains('@'), "{lines:?}");
         assert!(lines[4].contains("alice.test"), "{lines:?}");
         assert!(lines[4].contains("did:plc:alice"), "{lines:?}");
+    }
+
+    #[test]
+    fn resume_requires_a_session_id_and_builds_history() {
+        assert!(parse_resume_session_id(&["resume"]).is_err());
+        assert_eq!(parse_resume_session_id(&["resume", "abc"]).unwrap(), "abc");
+
+        let loaded = loaded_session_from_chats(
+            "abc",
+            SessionChats {
+                chats: vec![
+                    ChatMessage {
+                        id: "c1".to_owned(),
+                        content: "hi ".to_owned(),
+                    },
+                    ChatMessage {
+                        id: "c2".to_owned(),
+                        content: "there".to_owned(),
+                    },
+                ],
+                sessions: vec![SessionDetails {
+                    id: "abc".to_owned(),
+                    name: "hi".to_owned(),
+                    snapshot: Some("{}".to_owned()),
+                }],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(loaded.id, "abc");
+        assert_eq!(loaded.name, "hi");
+        assert_eq!(loaded.history, "hi there");
+        assert_eq!(loaded.last_chat_id.as_deref(), Some("c2"));
+        assert_eq!(loaded.snapshot.as_deref(), Some("{}"));
     }
 }
