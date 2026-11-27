@@ -3,7 +3,7 @@
 use crate::{
     core::agent::{
         pi::{self, PiAgent, handle_graceful_exit},
-        types::{CommandType, PiResponse, PiResponseMessage},
+        types::{CommandType, PiResponse, PiResponseMessage, ReasoningEffort},
     },
     daemon::{
         ApiJson, ApiResponse, AppError, AppState,
@@ -15,7 +15,7 @@ use crate::{
 
 // use async_stream::stream;
 use axum::{
-    Router,
+    Json, Router,
     extract::State,
     response::{IntoResponse, Sse, sse::Event},
     routing::{get, post},
@@ -23,15 +23,23 @@ use axum::{
 use axum_macros::debug_handler;
 use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use std::convert::Infallible;
 use std::sync::Arc;
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::{
+    MutexGuard,
+    mpsc::{self, Sender},
+};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 #[derive(Deserialize)]
 struct PromptRequest {
     message: String,
+}
+
+#[derive(Deserialize)]
+struct ThinkingLevelRequest {
+    level: ReasoningEffort,
 }
 
 struct SseEvent {
@@ -55,6 +63,8 @@ pub fn agent_router() -> Router<Arc<AppState>> {
         .route("/v1/tilekit/agent/end_session", post(end_current_session))
         .route("/v1/tilekit/agent/state", get(agent_state))
         .route("/v1/tilekit/agent/prompt", post(process_chat_prompt))
+        .route("/v1/tilekit/agent/thinking-level", post(set_thinking_level))
+        .route("/v1/tilekit/agent/skills", get(list_skills))
 }
 
 async fn start_agent(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
@@ -103,6 +113,15 @@ pub fn get_agent_start_params(
     Ok((modelname, system_prompt))
 }
 
+/// The model and system prompt of a Modelfile a client sent as text
+pub fn agent_start_params_from_modelfile(modelfile: &str) -> Result<(String, String), AppError> {
+    let invalid = |reason: String| AppError::BadRequest(format!("Invalid Modelfile: {reason}"));
+    let modelfile = tilekit::modelfile::parse(modelfile).map_err(invalid)?;
+    let modelname = model_spec(&modelfile).map_err(|e| invalid(e.to_string()))?;
+
+    Ok((modelname, modelfile.system.unwrap_or_default()))
+}
+
 #[debug_handler]
 async fn end_current_session(
     State(state): State<Arc<AppState>>,
@@ -147,6 +166,62 @@ async fn agent_state(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
     Ok(ApiResponse::success(
         serde_json::to_value(pi_state).unwrap(),
     ))
+}
+
+/// Sets the agent's thinking level and keeps it as the default for later chats.
+/// Answers with the level the agent is on afterwards
+async fn set_thinking_level(
+    State(state): State<Arc<AppState>>,
+    ApiJson(request): ApiJson<ThinkingLevelRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    set_thinking_level_with(&state, DefaultProvider, request.level).await
+}
+
+async fn set_thinking_level_with(
+    state: &AppState,
+    provider: impl ConfigProvider,
+    level: ReasoningEffort,
+) -> Result<Json<ApiResponse<Value>>, AppError> {
+    let mut agent = lock_idle_agent(state)?;
+    let agent = agent.as_mut().ok_or_else(no_agent_running)?;
+    let level_now = agent
+        .reader
+        .set_thinking_level(&mut agent.writer, level)
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    // Pi falls back to a level of its own when the model lacks the one asked for.
+    // only a level Tiles knows is kept, the settings file can't hold another
+    if let Ok(level) = level_now.parse::<ReasoningEffort>()
+        && let Err(err) = pi::save_default_thinking_level(provider, level)
+    {
+        log::warn!("Couldn't keep the thinking level for later chats: {err:#}");
+    }
+    Ok(ApiResponse::success(json!({ "level": level_now })))
+}
+
+/// Lists the skills the agent has loaded, a prompt runs one with `$name`
+async fn list_skills(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+    let mut agent = lock_idle_agent(&state)?;
+    let agent = agent.as_mut().ok_or_else(no_agent_running)?;
+    let skills = agent
+        .reader
+        .fetch_skills(&mut agent.writer)
+        .await
+        .map_err(|e| AppError::InternalServerError(e.to_string()))?;
+
+    Ok(ApiResponse::success(json!({ "skills": skills })))
+}
+
+// reply holds the agent for as long as it streams
+fn lock_idle_agent(state: &AppState) -> Result<MutexGuard<'_, Option<PiAgent>>, AppError> {
+    state.agent.try_lock().map_err(|_| {
+        AppError::Conflict("A reply is still streaming, wait for it to finish".to_owned())
+    })
+}
+
+fn no_agent_running() -> AppError {
+    AppError::Conflict("No agent is running, start a chat first".to_owned())
 }
 
 #[debug_handler]
@@ -292,16 +367,167 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> PiRead {
 #[cfg(test)]
 mod tests {
 
-    use crate::core::agent::pi::from_test_command;
-    use crate::daemon::{AppState, agent::agent_router, session::ResumedChat};
+    use super::set_thinking_level_with;
+    use crate::core::agent::{pi::from_test_command, types::ReasoningEffort};
+    use crate::daemon::{
+        AppState, account::tests::MockProvider, agent::agent_router, session::ResumedChat,
+    };
+    use axum::response::IntoResponse;
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use reqwest::StatusCode;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
     use tower::ServiceExt;
+
+    // a fake Pi that answers each request it reads with the next of `answers`, where $id is
+    // that request's id
+    fn pi_answering(answers: &[&str]) -> crate::core::agent::pi::PiAgent {
+        let script: String = answers
+            .iter()
+            .map(|answer| {
+                format!(
+                    "read request; id=${{request#*'\"id\":\"'}}; id=${{id%%'\"'*}}\nprintf '%s\\n' {answer}\n"
+                )
+            })
+            .collect();
+        from_test_command("sh", &["-c", &script]).unwrap()
+    }
+
+    // Pi 0.84 changes the level at once but only answers when the next request comes in
+    const LEVEL_CHANGED: &str = r#"'{"type":"thinking_level_changed"}'"#;
+
+    fn late_answer_then_state_on_level(level: &str) -> String {
+        format!(
+            r#"'{{"type":"response","command":"set_thinking_level","success":true}}' '{{"type":"response","id":"'"$id"'","command":"get_state","success":true,"data":{{"sessionId":"s1","model":{{"id":"id","name":"model"}},"thinkingLevel":"{level}","isStreaming":false}}}}'"#
+        )
+    }
+
+    async fn call_agent_route(state: AppState, request: Request<Body>) -> (StatusCode, Value) {
+        let response = agent_router()
+            .with_state(state.into())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let status = response.status();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    fn post_thinking_level(level: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .header("content-type", "application/json")
+            .uri("/v1/tilekit/agent/thinking-level")
+            .body(Body::new(json!({ "level": level }).to_string()))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_thinking_level_is_set_and_kept_for_later_chats() {
+        let tmp_dir = tempdir().unwrap();
+        let settings = tmp_dir.path().join("pi/agent/settings.json");
+        std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+        std::fs::write(&settings, r#"{"compaction":{"enabled":false}}"#).unwrap();
+        let state = AppState {
+            agent: AsyncMutex::new(Some(pi_answering(&[
+                LEVEL_CHANGED,
+                &late_answer_then_state_on_level("high"),
+            ]))),
+            ..AppState::for_tests()
+        };
+        let provider = MockProvider {
+            tmp_path: tmp_dir.path().to_path_buf(),
+        };
+
+        let response = set_thinking_level_with(&state, provider, ReasoningEffort::High)
+            .await
+            .unwrap()
+            .into_response();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"]["level"], "high");
+        let saved: Value =
+            serde_json::from_str(&std::fs::read_to_string(&settings).unwrap()).unwrap();
+        assert_eq!(saved["defaultThinkingLevel"], "high");
+        assert_eq!(saved["compaction"]["enabled"], false, "{saved}");
+    }
+
+    #[tokio::test]
+    async fn a_level_the_model_lacks_is_reported_but_not_kept() {
+        let tmp_dir = tempdir().unwrap();
+        let state = AppState {
+            agent: AsyncMutex::new(Some(pi_answering(&[
+                LEVEL_CHANGED,
+                &late_answer_then_state_on_level("off"),
+            ]))),
+            ..AppState::for_tests()
+        };
+        let provider = MockProvider {
+            tmp_path: tmp_dir.path().to_path_buf(),
+        };
+
+        let response = set_thinking_level_with(&state, provider, ReasoningEffort::High)
+            .await
+            .unwrap()
+            .into_response();
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["data"]["level"], "off");
+        assert!(!tmp_dir.path().join("pi/agent/settings.json").exists());
+    }
+
+    #[tokio::test]
+    async fn a_thinking_level_needs_a_running_agent_and_a_known_level() {
+        let (status, body) =
+            call_agent_route(AppState::for_tests(), post_thinking_level("low")).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["reason"], "No agent is running, start a chat first");
+
+        let (status, _) =
+            call_agent_route(AppState::for_tests(), post_thinking_level("extreme")).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn a_modelfile_gives_the_model_and_system_prompt_to_start_with() {
+        let (model, system_prompt) = super::agent_start_params_from_modelfile(
+            "FROM org/custom-GGUF:Q4_K_M\nSYSTEM be brief\n",
+        )
+        .unwrap();
+        assert_eq!(model, "org/custom-GGUF:Q4_K_M");
+        assert_eq!(system_prompt, "be brief");
+
+        let (_, system_prompt) =
+            super::agent_start_params_from_modelfile("FROM org/custom-GGUF:Q4_K_M\n").unwrap();
+        assert_eq!(system_prompt, "");
+    }
+
+    #[tokio::test]
+    async fn skills_are_listed_by_name_without_pis_other_commands() {
+        let commands = r#"'{"type":"response","id":"'"$id"'","command":"get_commands","success":true,"data":{"commands":[{"name":"session-name","source":"extension"},{"name":"fix-tests","description":"Fix failing tests","source":"prompt"},{"name":"skill:brave-search","description":"Web search","source":"skill"}]}}'"#;
+        let state = AppState {
+            agent: AsyncMutex::new(Some(pi_answering(&[commands]))),
+            ..AppState::for_tests()
+        };
+        let request = Request::builder()
+            .uri("/v1/tilekit/agent/skills")
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, body) = call_agent_route(state, request).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body["data"]["skills"],
+            json!([{ "name": "brave-search", "description": "Web search" }])
+        );
+    }
+
     #[tokio::test]
     async fn test_process_chat_prompt_success_ok() {
         let state = AppState::for_tests();

@@ -1152,7 +1152,11 @@ mod tests {
 
     #[tokio::test]
     async fn state_changing_agent_routes_refuse_get() {
-        for path in ["/v1/tilekit/agent/start", "/v1/tilekit/agent/end_session"] {
+        for path in [
+            "/v1/tilekit/agent/start",
+            "/v1/tilekit/agent/end_session",
+            "/v1/tilekit/agent/thinking-level",
+        ] {
             let (status, body) = call("GET", path, None).await;
             assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED, "{path}");
             assert_eq!(body["status"], "failed");

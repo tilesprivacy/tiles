@@ -308,7 +308,11 @@ pub fn parse_from_file(path: &str) -> Result<Modelfile, String> {
 
 pub fn parse(input: &str) -> Result<Modelfile, String> {
     match parse_file(input) {
-        Ok((_rest, parsed_data)) => create_modelfile(parsed_data.clone()),
+        // the parser stops at the first line it can't read
+        Ok((rest, parsed_data)) => match rest.trim().lines().next() {
+            Some(unread) => Err(format!("Modelfile failed to parse at `{unread}`")),
+            None => create_modelfile(parsed_data.clone()),
+        },
         Err(err) => Err(format!("Modelfile failed to parse due to {:?}", err)),
     }
 }
@@ -595,6 +599,13 @@ mod tests {
         // There should be 8 tokens in the modelfile including comments
         assert_eq!(modelfile.data.len(), 8);
         Ok(())
+    }
+
+    #[test]
+    fn a_line_the_parser_cant_read_fails_the_modelfile() {
+        let err = parse("FROM llama3.2\nINVALID instruction\nSYSTEM be brief").unwrap_err();
+
+        assert_eq!(err, "Modelfile failed to parse at `INVALID instruction`");
     }
 
     #[test]

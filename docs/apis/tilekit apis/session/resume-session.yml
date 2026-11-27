@@ -1,0 +1,31 @@
+info:
+  name: resume-session
+  type: http
+  seq: 6
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/session/resume"
+  body:
+    type: json
+    data: |-
+      {
+        "session_id": "<session id>"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Goes on with an old chat. The next prompt carries the chat so far, and `agent/state` reports the chat's own id from then on.
+
+    Takes an optional `modelfile`, as `session/new` does.
+
+    404 when there is no such chat, and 409 while a reply is streaming.
+  type: text/markdown

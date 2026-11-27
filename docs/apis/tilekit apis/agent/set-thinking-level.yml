@@ -1,0 +1,31 @@
+info:
+  name: set-thinking-level
+  type: http
+  seq: 4
+
+http:
+  method: POST
+  url: "{{tilekit_base_url}}/agent/thinking-level"
+  body:
+    type: json
+    data: |-
+      {
+        "level": "low"
+      }
+  auth: inherit
+
+settings:
+  encodeUrl: true
+  timeout: 0
+  followRedirects: true
+  maxRedirects: 5
+  forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Sets the agent's thinking level to `low`, `medium` or `high`, and keeps it as the default for later chats.
+
+    Answers with the `level` the agent is on afterwards. It differs from the one sent when the model doesn't support it.
+
+    409 when no agent is running, or while a reply is streaming.
+  type: text/markdown
