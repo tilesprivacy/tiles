@@ -569,6 +569,35 @@ if [[ "${DEV}" == "false" ]]; then
   run_step_job print_download_progress curl -fsSL -D "${TMPDIR}/headers" -o "${TMPDIR}/tiles.tar.gz" "${TAR_URL}" \
     || err "Couldn't download ${RELEASE_ASSET}."
   end_step ok "${RELEASE_ASSET} $(($(wc -c < "${TMPDIR}/tiles.tar.gz") / 1048576))M"
+
+  CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${RELEASE_TAG}/checksums.txt"
+  begin_step verify "${RELEASE_ASSET}"
+  if curl -fsSL -o "${TMPDIR}/checksums.txt" "${CHECKSUMS_URL}" 2>/dev/null; then
+    EXPECTED_SHA="$(awk -v asset="${RELEASE_ASSET}" '$2 == asset { print $1; exit }' "${TMPDIR}/checksums.txt")"
+    if [[ -n "${EXPECTED_SHA}" ]]; then
+      if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL_SHA="$(sha256sum "${TMPDIR}/tiles.tar.gz" | awk '{ print $1 }')"
+      elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL_SHA="$(shasum -a 256 "${TMPDIR}/tiles.tar.gz" | awk '{ print $1 }')"
+      else
+        err "Neither sha256sum nor shasum is installed to verify ${RELEASE_ASSET}."
+      fi
+      if [[ "${ACTUAL_SHA}" != "${EXPECTED_SHA}" ]]; then
+        err "Checksum mismatch for ${RELEASE_ASSET}: expected ${EXPECTED_SHA}, got ${ACTUAL_SHA}."
+      fi
+      end_step ok "sha256"
+    elif [[ "${OS}" == "linux" ]]; then
+      err "checksums.txt has no entry for ${RELEASE_ASSET}."
+    else
+      end_step warn
+      print_step_note "no checksum published for ${RELEASE_ASSET}; skipping verification"
+    fi
+  elif [[ "${OS}" == "linux" ]]; then
+    err "Couldn't download checksums.txt for ${RELEASE_TAG}."
+  else
+    end_step warn
+    print_step_note "checksums.txt not available for ${RELEASE_TAG}; skipping verification"
+  fi
 else
   if [[ -n "${TILES_DEV_TARBALL:-}" ]]; then
     LOCAL_TARBALL="${TILES_DEV_TARBALL}"

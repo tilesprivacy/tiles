@@ -62,23 +62,39 @@ impl ContentKey {
 
 /// Uses the chachapoly1305 `ContentKey` to encrypt the content
 pub fn encrypt_by_content_key(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
-    let key = content_key.key.as_slice().into();
-    let nonce = content_key.nonce.as_slice().into();
-    let cipher = XChaCha20Poly1305::new(key);
+    let key_bytes: [u8; 32] = content_key
+        .key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid content key length: expected 32 bytes"))?;
+    let nonce_bytes: [u8; 24] = content_key
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid content nonce length: expected 24 bytes"))?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(&key_bytes));
 
     cipher
-        .encrypt(nonce, content.as_ref())
+        .encrypt(XNonce::from_slice(&nonce_bytes), content)
         .map_err(|_e| anyhow!("Encryption failed for ciphertext"))
 }
 
 /// Uses the chachapoly1305 `ContentKey` to decrypt the content
 pub fn decrypt_by_content_key(content: &[u8], content_key: &ContentKey) -> Result<Vec<u8>> {
-    let key = Key::from_slice(&content_key.key);
-    let cipher = XChaCha20Poly1305::new(key);
-    let nonce = XNonce::from_slice(&content_key.nonce);
+    let key_bytes: [u8; 32] = content_key
+        .key
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid content key length: expected 32 bytes"))?;
+    let nonce_bytes: [u8; 24] = content_key
+        .nonce
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("Invalid content nonce length: expected 24 bytes"))?;
+    let cipher = XChaCha20Poly1305::new(Key::from_slice(&key_bytes));
 
     cipher
-        .decrypt(nonce, content.as_ref())
+        .decrypt(XNonce::from_slice(&nonce_bytes), content)
         .map_err(|_e| anyhow!("Failed to decrypt"))
 }
 
@@ -227,5 +243,22 @@ mod tests {
             decrypt_by_hpke(bob_sk, encapped_key, enc_content, common_domain, &aad).unwrap();
 
         assert_eq!(alice_data, String::from_utf8_lossy(&og_content))
+    }
+
+    #[test]
+    fn content_key_with_wrong_lengths_returns_error_instead_of_panicking() {
+        let short_key = ContentKey {
+            key: vec![0u8; 16],
+            nonce: vec![0u8; 24],
+        };
+        assert!(encrypt_by_content_key(b"hi", &short_key).is_err());
+        assert!(decrypt_by_content_key(b"hi", &short_key).is_err());
+
+        let short_nonce = ContentKey {
+            key: vec![0u8; 32],
+            nonce: vec![0u8; 12],
+        };
+        assert!(encrypt_by_content_key(b"hi", &short_nonce).is_err());
+        assert!(decrypt_by_content_key(b"hi", &short_nonce).is_err());
     }
 }

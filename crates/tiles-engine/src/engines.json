@@ -1,5 +1,5 @@
 {
-  "tag": "b12359",
+  "tag": "b12774",
   "engines": [
     {
       "engine": "cuda-12",
@@ -7,16 +7,16 @@
       "version": "12.8",
       "files": [
         {
-          "name": "llama-b12359-bin-ubuntu-cuda-12.8-x64.tar.gz",
-          "size": 199223370,
-          "unpacked": 259205120,
-          "sha256": "50c937bec5bbd9f74c99138034f7403283ee21f1943f2429d7b1e4c079eafc11"
+          "name": "llama-b12774-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 220356732,
+          "unpacked": 282562560,
+          "sha256": "0b21de91989e04e7cca05a320b1c075046ce427b59256ba51038df61e52bd5fe"
         },
         {
-          "name": "cudart-llama-b12359-bin-ubuntu-cuda-12.8-x64.tar.gz",
-          "size": 594371571,
+          "name": "cudart-llama-b12774-bin-ubuntu-cuda-12.8-x64.tar.gz",
+          "size": 594377009,
           "unpacked": 868904960,
-          "sha256": "75a12d227f44a391608992329241765343bd143ee9445b90dc62e154ee726e5d"
+          "sha256": "b8fd3ce0bf1a3f437bcd2b2df81e635828d58f3c9f0606faddbe813d56589590"
         }
       ]
     },
@@ -26,16 +26,16 @@
       "version": "13.5",
       "files": [
         {
-          "name": "llama-b12359-bin-ubuntu-cuda-13.5-x64.tar.gz",
-          "size": 178419847,
-          "unpacked": 244838400,
-          "sha256": "9440f417615bed0e191acef03bff0249117d2be74335358265a6d28475a9baf0"
+          "name": "llama-b12774-bin-ubuntu-cuda-13.5-x64.tar.gz",
+          "size": 225744161,
+          "unpacked": 294717440,
+          "sha256": "15ffe2e6ab20d9383d22ce96e1376a05966b343c3b23e8b4294a602318b5274f"
         },
         {
-          "name": "cudart-llama-b12359-bin-ubuntu-cuda-13.5-x64.tar.gz",
-          "size": 444078822,
+          "name": "cudart-llama-b12774-bin-ubuntu-cuda-13.5-x64.tar.gz",
+          "size": 444078957,
           "unpacked": 609751040,
-          "sha256": "976a9146bb8a487a6ea701224d7fb14b05e494ab3c8f5c1799ffc4e5805d640c"
+          "sha256": "bf83f2f5c3a0885fd99b3910cf69997d62976fd6b81b9a8e1230d6f698306bf5"
         }
       ]
     },
@@ -44,10 +44,10 @@
       "arch": "x86_64",
       "files": [
         {
-          "name": "llama-b12359-bin-ubuntu-vulkan-x64.tar.gz",
-          "size": 36153377,
-          "unpacked": 100096000,
-          "sha256": "19b60f00395a3f4954e46a5037695bc1d843404fc9d3124f82a612ecd8fbe9f0"
+          "name": "llama-b12774-bin-ubuntu-vulkan-x64.tar.gz",
+          "size": 37166104,
+          "unpacked": 104314880,
+          "sha256": "75b7044df1232bd5bc78ffc753f14a5a44d9f3b5c67228b6103705c57084d02d"
         }
       ]
     },
@@ -56,10 +56,10 @@
       "arch": "x86_64",
       "files": [
         {
-          "name": "llama-b12359-bin-ubuntu-x64.tar.gz",
-          "size": 23311084,
-          "unpacked": 58777600,
-          "sha256": "0bc1f091e8916102b6d8f2cf944233a620e90a0f856c72d0ce41150c65c2e72e"
+          "name": "llama-b12774-bin-ubuntu-x64.tar.gz",
+          "size": 23454685,
+          "unpacked": 60231680,
+          "sha256": "ab5837cca2317cfb7ecb5f85b550934e7355cd9df74cdde6e106581457034dbb"
         }
       ]
     },
@@ -69,16 +69,16 @@
       "version": "13.5",
       "files": [
         {
-          "name": "llama-b12359-bin-ubuntu-cuda-13.5-arm64.tar.gz",
-          "size": 173529798,
-          "unpacked": 223477760,
-          "sha256": "e12fd3ca9a599349cac5ec767825e17f8cab9dc2dab8d8e5b85d50ce21ef6d7d"
+          "name": "llama-b12774-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "size": 220732422,
+          "unpacked": 273049600,
+          "sha256": "3f654b5d2043a6706af30a506fe732dd8a13e01dcb006a0ba54bf767df7fcca9"
         },
         {
-          "name": "cudart-llama-b12359-bin-ubuntu-cuda-13.5-arm64.tar.gz",
-          "size": 559874231,
+          "name": "cudart-llama-b12774-bin-ubuntu-cuda-13.5-arm64.tar.gz",
+          "size": 559874054,
           "unpacked": 726599680,
-          "sha256": "998f62318999710d398dad40821d1d037731f360791e41628d9dfcde207909d1"
+          "sha256": "1037bcd9fafa31d1d348cba306af4150da2fdb642fe2535c776a1e89bfac744e"
         }
       ]
     },
@@ -87,10 +87,10 @@
       "arch": "aarch64",
       "files": [
         {
-          "name": "llama-b12359-bin-ubuntu-vulkan-arm64.tar.gz",
-          "size": 29435221,
-          "unpacked": 77260800,
-          "sha256": "3f8ae812a58ac92e5a596ca9fbc988f52854d147c5a7fe1264dddc90c1d085b4"
+          "name": "llama-b12774-bin-ubuntu-vulkan-arm64.tar.gz",
+          "size": 30138118,
+          "unpacked": 80547840,
+          "sha256": "e5023727501802ee7692396cf2a018790bb2f0acf989d8c8964bb44ea2b25c7b"
         }
       ]
     },
@@ -99,10 +99,10 @@
       "arch": "aarch64",
       "files": [
         {
-          "name": "llama-b12359-bin-ubuntu-arm64.tar.gz",
-          "size": 18949862,
-          "unpacked": 43786240,
-          "sha256": "dc7aa17a67884619b7223870aca9fd6addbc01717713b04a714add1c31137359"
+          "name": "llama-b12774-bin-ubuntu-arm64.tar.gz",
+          "size": 19014279,
+          "unpacked": 44953600,
+          "sha256": "068e15b27cfaf2733855c313baad26fbce84952cbb770500e806073c41aa4214"
         }
       ]
     }
