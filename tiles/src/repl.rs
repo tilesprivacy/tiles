@@ -5,9 +5,7 @@ use crate::core::agent::types::{
     ReasoningEffort,
 };
 use crate::core::agent::{pi, types};
-use crate::core::chats::{
-    ChatResponse, fetch_chats_by_session_id, save_chat, save_first_chat, update_snapshot,
-};
+use crate::core::chats::{ChatResponse, save_chat, save_first_chat, update_snapshot};
 use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::Dbconn;
@@ -33,8 +31,8 @@ use std::sync::atomic::AtomicBool;
 use tilekit::modelfile::Modelfile;
 use tilekit::modelfile::Role;
 use tiles_cli::{
-    InputType, Session, create_line_editor, handle_input, share_session_command, show_session_list,
-    show_status,
+    InputType, LoadedSession, Session, create_line_editor, handle_input, load_session_history,
+    share_session_command, show_session_list, show_status,
 };
 
 const MAX_LOAD_MODEL_RETRIES: u8 = 3;
@@ -224,7 +222,7 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
         }
 
         // Process the user input in the repl
-        match handle_input(&input.to_lowercase()) {
+        match handle_input(&input) {
             InputType::Skip => continue,
             InputType::Exit => {
                 handle_repl_exit(&mut pi_agent.writer).await?;
@@ -240,8 +238,7 @@ async fn start_repl(modelfile: &Modelfile, run_args: &RunArgs, db_conn: &Dbconn)
             }
             InputType::Command(cmd) => {
                 let res =
-                    handle_input_commands(cmd, &mut repl_session, db_conn, &mut pi_agent.writer)
-                        .await?;
+                    handle_input_commands(cmd, &mut repl_session, &mut pi_agent.writer).await?;
 
                 if let InputCommandResponse::ProcessNextInput = res {
                     continue;
@@ -498,48 +495,21 @@ async fn process_command(
     Ok(())
 }
 
-fn load_session(db_conn: &Dbconn, args: &[&str], repl_session: &mut ReplSession) -> Result<()> {
-    let args = if let Some((_main_command, sub_commands)) = args.split_first() {
-        sub_commands
-    } else {
-        return Err(anyhow!("Not a valid command"));
-    };
+async fn load_session(args: &[&str], repl_session: &mut ReplSession) -> Result<()> {
+    let loaded = load_session_history(&daemon_api().await?, args).await?;
+    apply_loaded_session(repl_session, loaded)
+}
 
-    let session_id = if args.is_empty() {
-        println!("Please provide sessionId");
-        return Err(anyhow!("Please provide sessionId"));
-    } else {
-        args[0]
-    };
-
-    // fetch session and the chats for the session_id
-
-    let delta_chats = fetch_chats_by_session_id(&db_conn.chat, session_id)?;
-
-    if delta_chats.sessions.is_empty() {
-        println!("Session {} not available", session_id);
-    }
-
-    //TODO: we will later implement a decent compaction based on Pi's for
-    // history
-    // https://github.com/badlogic/pi-mono/blob/182d4ceea33beabe7c4712b04f1f5459e613de44/packages/coding-agent/docs/compaction.md
-
-    let mut chat_history: String = "".to_owned();
-    for chat in &delta_chats.chats {
-        chat_history.push_str(&chat.content);
-        println!("{}", chat.content);
-    }
-    let last_chat_id = delta_chats.chats.last().map(|chat| chat.id.clone());
-    let saved_session = delta_chats.sessions[0].clone();
-    repl_session.session_id = session_id.to_string();
+fn apply_loaded_session(repl_session: &mut ReplSession, loaded: LoadedSession) -> Result<()> {
+    repl_session.session_id = loaded.id.clone();
     repl_session.set_pending_resume_session(true);
-    repl_session.set_resumed_session(chat_history);
-    repl_session.last_chat_id = last_chat_id;
+    repl_session.set_resumed_session(loaded.history);
+    repl_session.last_chat_id = loaded.last_chat_id;
     repl_session.session_started = true;
-    repl_session.session_snapshot = if let Some(snapshot_record) = saved_session.snapshot {
+    repl_session.session_snapshot = if let Some(snapshot_record) = loaded.snapshot {
         serde_json::from_str(&snapshot_record)?
     } else {
-        SessionSnapshotRecord::new(&saved_session.name, &saved_session.id)
+        SessionSnapshotRecord::new(&loaded.name, &loaded.id)
     };
     Ok(())
 }
@@ -657,10 +627,9 @@ async fn handle_input_prompt(
 async fn handle_input_commands(
     cmd: String,
     repl_session: &mut ReplSession,
-    db_conn: &Dbconn,
     agent_writer: &mut PiWriter,
 ) -> Result<InputCommandResponse> {
-    let args: Vec<&str> = cmd.split(" ").collect();
+    let args: Vec<&str> = cmd.split_whitespace().collect();
     let main_cmd = args.first().expect("Main command should be there");
 
     let cmd_json = json!(main_cmd.to_lowercase());
@@ -690,7 +659,7 @@ async fn handle_input_commands(
             InputCommandResponse::ProcessNextInput
         }
         CommandType::Resume => {
-            if let Err(err) = load_session(db_conn, &args, repl_session) {
+            if let Err(err) = load_session(&args, repl_session).await {
                 println!("{}", err)
             };
             InputCommandResponse::ProcessNextInput
@@ -917,8 +886,8 @@ mod tests {
     use crate::core::agent::types::{
         GetStateData, PiAgentEndEvent, PiModelInfo, PiMsgContent, PiMsgEvent,
     };
-    use crate::core::chats::fetch_session;
     use crate::core::chats::tests::create_user;
+    use crate::core::chats::{fetch_chats_by_session_id, fetch_session};
 
     #[test]
     fn model_load_warnings_extracts_string_list() {
@@ -1224,7 +1193,16 @@ mod tests {
             .is_ok()
         );
 
-        assert!(load_session(&db_conn, &["resume", "abc"], &mut repl_session_b).is_ok());
+        let delta = fetch_chats_by_session_id(&db_conn.chat, "abc").unwrap();
+        let saved = &delta.sessions[0];
+        let loaded = LoadedSession {
+            id: saved.id.clone(),
+            name: saved.name.clone(),
+            snapshot: saved.snapshot.clone(),
+            history: delta.chats.iter().map(|c| c.content.as_str()).collect(),
+            last_chat_id: delta.chats.last().map(|c| c.id.clone()),
+        };
+        assert!(apply_loaded_session(&mut repl_session_b, loaded).is_ok());
 
         assert_eq!(
             repl_session_b.last_chat_id.unwrap(),
