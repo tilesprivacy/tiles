@@ -1,4 +1,4 @@
-//! Signing in to an ATmosphere account
+//! Signing in and out of an ATmosphere account
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::json;
@@ -51,4 +51,9 @@ pub async fn sign_in(api: &DaemonApi, handle: &str) -> Result<AtprotoAccount> {
     }
 
     Err(anyhow!("The daemon closed the sign in before it finished"))
+}
+
+/// Signs out the current ATmosphere account through the daemon
+pub async fn sign_out(api: &DaemonApi) -> Result<AtprotoAccount> {
+    api.logout_atproto().await
 }
