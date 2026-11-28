@@ -218,7 +218,7 @@ pub fn save_reply(
             parent_chat_id: Some(turn.prompt_chat_id),
             model_used: turn.model,
         };
-        save_chat(&txn, user, chat)?;
+        save_chat_once(&txn, user, chat)?;
     }
     update_snapshot(&txn, &turn.session_id, serde_json::to_string(&snapshot)?)?;
     txn.commit()?;
@@ -1720,6 +1720,37 @@ pub mod tests {
         );
         super::save_reply(&conn, &user, turn, vec![reply]).unwrap();
         super::save_chat_once(&conn, &user, from_client(Role::Assistant, "hello")).unwrap();
+
+        assert_eq!(
+            saved_contents(&conn, "s1"),
+            [
+                (Role::User, "hi".to_owned()),
+                (Role::Assistant, "hello".to_owned())
+            ]
+        );
+        let snapshot = session_snapshot(&conn, "s1").unwrap().unwrap();
+        assert_eq!(snapshot.turns.len(), 1);
+    }
+
+    #[test]
+    fn a_reply_an_older_client_saves_first_is_kept_once() {
+        let conn = setup_db_schema();
+        let user = create_user();
+        let turn = super::save_prompt(&conn, &user, "s1", "llama", "hi").unwrap();
+        let from_client = ChatResponse {
+            input: "hello".to_owned(),
+            session_id: "s1".to_owned(),
+            role: Role::Assistant,
+            parent_chat_id: None,
+            model_used: "llama".to_owned(),
+        };
+        // client saves the reply before the daemon runs save_reply
+        super::save_chat_once(&conn, &user, from_client).unwrap();
+        let reply = pi_message(
+            Role::Assistant,
+            serde_json::json!([{ "type": "text", "text": "hello" }]),
+        );
+        super::save_reply(&conn, &user, turn, vec![reply]).unwrap();
 
         assert_eq!(
             saved_contents(&conn, "s1"),
