@@ -1,18 +1,24 @@
 //! Tilekit apis related to networking
 
+use std::convert::Infallible;
+use std::os::raw::c_long;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::core::account::local::{UserQueryOptions, fetch_users, get_current_user};
-use crate::core::network::{self as core_network, create_endpoint};
+use crate::core::network::inference::connect;
+use crate::core::network::{self as core_network, create_endpoint, inference};
 use crate::core::storage::db::get_db_conn;
 use crate::daemon::{
     ApiJson, ApiResponse, AppError, AppState, SimpleResponse, daemon_client, daemon_url,
+    sse::take_events,
 };
 use anyhow::{Context, Result, anyhow};
-// use axum::extract::Path;
+use axum::response::Sse;
+use axum::response::sse::{Event, KeepAlive};
 use axum::{Router, extract::State, response::IntoResponse, routing::post};
 use axum_macros::debug_handler;
+use futures_util::StreamExt;
 use iroh::Endpoint;
 use iroh_blobs::store::mem::MemStore;
 use iroh_gossip::Gossip;
@@ -20,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_rusqlite::rusqlite::Connection;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_util::sync::CancellationToken;
 
 pub const API_TIMEOUT: u16 = 30;
 #[derive(Debug, Clone)]
@@ -29,6 +37,8 @@ pub struct NetworkState {
     pub endpoint: Endpoint,
     pub gossip: Gossip,
     pub blob_mem_store: MemStore,
+    // Token to cancel the consuming of remote inference
+    pub disconnect_remote_inference_token: Option<CancellationToken>,
 }
 
 /// Events emitted as part of other tile's processes communicating with the main network
@@ -65,6 +75,15 @@ pub struct SyncParams {
     /// Handle to identify the device. It can be DID (did:key:z6Mk) or AT proto handle (@) or nickname given by user during linking
     handle: String,
 }
+
+#[derive(Serialize, Deserialize)]
+pub struct ConnectRemoteInferenceParams {
+    // TODO: this could be optional later
+    token: String,
+    // TODO: later add an optional  DID of the renter (or dial by nickname, if linked)
+    //TODO: maybe add optionl port
+}
+
 pub fn network_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/v1/tilekit/net/start-network", post(start_network))
@@ -72,6 +91,14 @@ pub fn network_router() -> Router<Arc<AppState>> {
         .route("/v1/tilekit/net/status", post(get_network_status))
         .route("/v1/tilekit/net/link-device", post(link_device))
         .route("/v1/tilekit/net/sync-with-device", post(sync_with_device))
+        .route(
+            "/v1/tilekit/net/inference/connect",
+            post(connect_remote_inference),
+        )
+        .route(
+            "/v1/tilekit/net/inference/disconnect",
+            post(disconnect_remote_inference),
+        )
 }
 
 /// Starts a p2p iroh endpoint and creates a gossip network for the device over which all the message based communication btw peers happen
@@ -124,6 +151,7 @@ async fn do_start_network(
                 endpoint: endpoint_clone.clone(),
                 gossip,
                 blob_mem_store: mem_store,
+                disconnect_remote_inference_token: None,
             });
 
             Ok(ApiResponse::success(SimpleResponse {
@@ -173,10 +201,12 @@ pub async fn get_network_status(
     let network_state = state.network_state.read().await;
 
     let is_running = if let Some(net_state) = network_state.as_ref() {
+        log::info!("Endpoint addr: {:?}", net_state.endpoint.addr());
         net_state.is_endpoint_running
     } else {
         false
     };
+
     Ok(ApiResponse::success(NetworkStatusResponse {
         is_network_running: is_running,
     }))
@@ -258,6 +288,66 @@ pub async fn sync_with_device(
             "Failed to get the network state".to_string(),
         ))
     }
+}
+
+pub async fn connect_remote_inference(
+    State(state): State<Arc<AppState>>,
+    ApiJson(params): ApiJson<ConnectRemoteInferenceParams>,
+) -> Result<impl IntoResponse, AppError> {
+    let endpoint_running = state
+        .network_state
+        .read()
+        .await
+        .as_ref()
+        .map(|s| s.is_endpoint_running);
+
+    if endpoint_running.is_none() || endpoint_running.is_some_and(|x| x == false) {
+        return Err(AppError::ServiceUnavailable(
+            "Network not up, please start network".to_string(),
+        ));
+    }
+
+    if let Some(net_state) = state.network_state.write().await.as_mut() {
+        let endpoint = net_state.endpoint.clone();
+
+        let disconnect_token = CancellationToken::new();
+        let token = params.token.clone();
+        // create a channel for streaming response
+        let (tx, rx) = mpsc::channel::<Event>(10);
+        let disconnect_token_clone = disconnect_token.clone();
+        // start a task, and start connect
+        tokio::spawn(connect(token, endpoint, disconnect_token_clone, tx));
+        net_state.disconnect_remote_inference_token = Some(disconnect_token.clone());
+        let cancel_on_close = disconnect_token.drop_guard();
+
+        let stream = async_stream::stream! {
+            let _cancel_on_close = cancel_on_close;
+            let mut events = ReceiverStream::new(rx);
+            while let Some(event) = events.next().await {
+                yield Ok::<_, Infallible>(event);
+            }
+        };
+
+        Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    } else {
+        Err(AppError::CannotProcess(
+            "Failed to fetch the network state".to_string(),
+        ))
+    }
+}
+
+pub async fn disconnect_remote_inference(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AppError> {
+    if let Some(net_state) = state.network_state.write().await.as_mut() {
+        if let Some(token) = net_state.disconnect_remote_inference_token.take() {
+            token.cancel();
+        }
+    }
+
+    Ok(ApiResponse::success(SimpleResponse {
+        message: "Remote inference disconnected".to_string(),
+    }))
 }
 
 fn get_did_from_device_handle(handle: String, common_db_conn: &Connection) -> Result<String> {
@@ -377,6 +467,89 @@ pub async fn sync_with_peer_cli(handle: String) -> Result<()> {
         )
     }
     Ok(())
+}
+
+/// Connect through the daemon and keep its event stream open until the REPL exits.
+pub async fn connect_remote_inference_cli(token: &str) -> Result<tokio::task::JoinHandle<()>> {
+    let response = daemon_client()
+        .await?
+        .post(daemon_url("/v1/tilekit/net/inference/connect"))
+        .json(&ConnectRemoteInferenceParams {
+            token: token.to_owned(),
+        })
+        .send()
+        .await
+        .context("Could not reach the Tiles daemon")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(anyhow!(
+            "Remote inference connection failed ({status}): {body}"
+        ));
+    }
+
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<Result<()>>();
+    let task = tokio::spawn(async move {
+        let mut response = response;
+        let mut pending = String::new();
+        let mut ready_tx = Some(ready_tx);
+
+        loop {
+            match response.chunk().await {
+                Ok(Some(chunk)) => {
+                    pending.push_str(&String::from_utf8_lossy(&chunk));
+                    for (name, data) in take_events(&mut pending) {
+                        match name.as_str() {
+                            "connected" => {
+                                if let Some(tx) = ready_tx.take() {
+                                    let _ = tx.send(Ok(()));
+                                }
+                            }
+                            "error" => {
+                                let reason =
+                                    data["reason"].as_str().unwrap_or("Remote inference failed");
+                                let detail = data["detail"].as_str().unwrap_or_default();
+                                let message = if detail.is_empty() {
+                                    reason.to_owned()
+                                } else {
+                                    format!("{reason}: {detail}")
+                                };
+                                if let Some(tx) = ready_tx.take() {
+                                    let _ = tx.send(Err(anyhow!(message)));
+                                    return;
+                                } else {
+                                    eprintln!("Remote inference: {message}");
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Ok(None) => {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(Err(anyhow!(
+                            "The daemon closed remote inference before connecting"
+                        )));
+                    }
+                    return;
+                }
+                Err(err) => {
+                    if let Some(tx) = ready_tx.take() {
+                        let _ = tx.send(Err(err.into()));
+                    } else {
+                        eprintln!("Remote inference event stream failed: {err}");
+                    }
+                    return;
+                }
+            }
+        }
+    });
+
+    ready_rx
+        .await
+        .context("Remote inference event task stopped before connecting")??;
+    Ok(task)
 }
 
 #[cfg(test)]

@@ -155,7 +155,7 @@ pub async fn login(
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
-fn event(name: &str, data: Value) -> Event {
+pub fn event(name: &str, data: Value) -> Event {
     Event::default().event(name).data(data.to_string())
 }
 

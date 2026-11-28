@@ -10,10 +10,9 @@ use crate::core::chats::{
     Session, fetch_chats_by_session_id, fetch_session, fetch_sessions, save_chat, save_first_chat,
     update_snapshot,
 };
-use crate::core::network;
 use crate::core::server::{start_server_daemon, stop_server_daemon};
 use crate::core::storage::db::{DBTYPE, Dbconn, get_async_db_conn};
-use crate::daemon::{atproto::sign_in, model::picked_modelfile};
+use crate::daemon::{atproto::sign_in, model::picked_modelfile, net::connect_remote_inference_cli};
 use crate::utils::config::{
     ConfigProvider, DefaultProvider, LlamaConfig, PY_PORT, REMOTE_BOUND_PORT, get_current_model,
     get_inference_config, get_memory_path, get_model_cache, update_current_model,
@@ -341,18 +340,15 @@ async fn run_model_with_server(
     if let Some(llama_config) = &run_args.llama_config {
         update_llama_config(llama_config).context("Failed to update llama config")?;
     }
-    //TODO: Remove this remote infy code, refactor it
     // If remote inference mode then no need to load or leverage local server
     if let Some(ticket) = run_args.remote.clone() {
-        tokio::spawn(async move {
-            let _ = network::connect(&ticket)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
-            Result::<()>::Ok(())
-        });
-        start_repl(&modelfile, run_args, db_conn)
+        let remote_events = connect_remote_inference_cli(&ticket).await?;
+        let repl_result = start_repl(&modelfile, run_args, db_conn)
             .await
-            .map_err(|e| anyhow!(e))
+            .map_err(|e| anyhow!(e));
+        remote_events.abort();
+        let _ = remote_events.await;
+        repl_result
     } else {
         if !cfg!(debug_assertions) {
             // start waits until the server answers

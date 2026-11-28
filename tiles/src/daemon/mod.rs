@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    core::agent::pi::PiAgent,
+    core::{agent::pi::PiAgent, network::inference::RemoteInference},
     daemon::{
         account::account_router,
         agent::agent_router,
@@ -72,7 +72,7 @@ pub mod web;
 use crate::{
     core::{
         account::{atproto::AtCallbackParams, local::get_current_user},
-        network::{self, create_endpoint, share},
+        network::{self, create_endpoint, inference::share},
         service,
         storage::db::get_db_conn,
     },
@@ -320,7 +320,6 @@ fn router(state: Arc<AppState>) -> Router {
         .route("/remote-share", post(share_remote_inference))
         .route("/remote-unshare", post(unshare_remote_inference))
         .route("/remote-status", get(show_remote_status))
-        .route("/connect-remote", post(connect_remote_inference))
         .merge(tilekit_router())
         .route_layer(middleware::from_fn(require_json))
         .fallback(no_route)
@@ -840,10 +839,12 @@ async fn share_remote_inference(State(state): State<Arc<AppState>>) -> Result<St
     let endpoint = create_endpoint(&user).await.map_err(|e| {
         AppError::InternalServerError(format!("Failed to create the endpoint: {e}"))
     })?;
-    endpoint.set_alpns(vec![ALPN.to_vec()]);
+    endpoint.set_alpns(vec![RemoteInference::get_alpn().to_vec()]);
     endpoint.online().await;
     let addr = endpoint.addr();
+    info!("Endpoint addr: {:?}", addr);
     let ticket = EndpointTicket::from(addr).to_string();
+
     info!("Sharing remote inference, waiting for connections");
     // ok we create the endpoint and ticket here, then pass the endpoint to share fn
     let (sendx, recvx) = oneshot::channel();
@@ -968,19 +969,6 @@ pub async fn remote_status() -> Result<String> {
     }
 }
 
-async fn connect_remote_inference(
-    State(_state): State<Arc<AppState>>,
-    Query(params): Query<RemoteConnectParams>,
-) -> Result<(), StatusCode> {
-    tokio::spawn(async move {
-        let _ = network::connect(&params.ticket)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
-        Result::<()>::Ok(())
-    });
-    Ok(())
-}
-
 pub async fn connect_remote(ticket: &str) -> Result<()> {
     let res = daemon_client()
         .await?
@@ -995,14 +983,6 @@ pub async fn connect_remote(ticket: &str) -> Result<()> {
         Ok(_response) => Ok(()),
     }
 }
-
-// async fn handle_timeout_error(err: BoxError) -> AppError {
-//     if err.is::<timeout::error::Elapsed>() {
-//         AppError::RequestTimeout
-//     } else {
-//         AppError::InternalServerError("Something unexpected happened".to_string())
-//     }
-// }
 
 #[cfg(test)]
 mod tests {
