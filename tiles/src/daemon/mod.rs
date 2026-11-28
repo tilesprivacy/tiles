@@ -100,6 +100,8 @@ pub struct AppState {
     pub resumed_chat: Mutex<Option<session::ResumedChat>>,
     /// Off in tests, which must never stop a model server the user is running
     pub can_stop_model_server: bool,
+    /// Off in tests to keep real chats untouched
+    pub saves_turns: bool,
     pub web_ui: web::WebUiState,
     pub models: model::Models,
     pub engines: Arc<engine::Engines>,
@@ -125,6 +127,7 @@ impl AppState {
             login: None.into(),
             resumed_chat: Mutex::new(None),
             can_stop_model_server: false,
+            saves_turns: false,
             web_ui: web::WebUiState::Serving {
                 url: format!("http://127.0.0.1:{}", web::UI_PORT),
             },
@@ -529,6 +532,7 @@ pub async fn start_server(port: Option<u32>) -> Result<()> {
         login: None.into(),
         resumed_chat: Mutex::new(None),
         can_stop_model_server: true,
+        saves_turns: true,
         web_ui: web_ui_state,
         models,
         engines,

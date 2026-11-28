@@ -1,9 +1,17 @@
 //! APIs for communication with Agent harness (Pi)
 
 use crate::{
-    core::agent::{
-        pi::{self, PiAgent, handle_graceful_exit},
-        types::{CommandType, PiResponse, PiResponseMessage, ReasoningEffort},
+    core::{
+        account::local::{User, get_current_user},
+        agent::{
+            pi::{self, PiAgent, handle_graceful_exit},
+            types::{
+                CommandType, PiAgentEndEvent, PiMsgEvent, PiResponse, PiResponseMessage,
+                ReasoningEffort,
+            },
+        },
+        chats::{self, OpenTurn},
+        storage::db::{DBTYPE, call_error, get_async_db_conn},
     },
     daemon::{
         ApiJson, ApiResponse, AppError, AppState,
@@ -14,6 +22,7 @@ use crate::{
 };
 
 // use async_stream::stream;
+use anyhow::anyhow;
 use axum::{
     Json, Router,
     extract::State,
@@ -30,6 +39,7 @@ use tokio::sync::{
     MutexGuard,
     mpsc::{self, Sender},
 };
+use tokio_rusqlite::rusqlite;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 #[derive(Deserialize)]
@@ -152,16 +162,7 @@ async fn agent_state(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
         .get_pi_state(&mut agent.writer)
         .await
         .map_err(|e| AppError::InternalServerError(e.to_string()))?;
-    // a resumed chat keeps its own id, Pi's session for it is an inner detail
-    if let Some(resumed) = state
-        .resumed_chat
-        .lock()
-        .expect("resumed chat lock")
-        .as_ref()
-        && resumed.pi_session_id == pi_state.session_id
-    {
-        pi_state.session_id = resumed.chat_id.clone();
-    }
+    pi_state.session_id = chat_id_of_pi_session(&state, pi_state.session_id);
 
     Ok(ApiResponse::success(
         serde_json::to_value(pi_state).unwrap(),
@@ -213,6 +214,19 @@ async fn list_skills(State(state): State<Arc<AppState>>) -> Result<impl IntoResp
     Ok(ApiResponse::success(json!({ "skills": skills })))
 }
 
+// resumed chats keep their own id instead of Pi's session id
+fn chat_id_of_pi_session(state: &AppState, pi_session_id: String) -> String {
+    match state
+        .resumed_chat
+        .lock()
+        .expect("resumed chat lock")
+        .as_ref()
+    {
+        Some(resumed) if resumed.pi_session_id == pi_session_id => resumed.chat_id.clone(),
+        _ => pi_session_id,
+    }
+}
+
 // reply holds the agent for as long as it streams
 fn lock_idle_agent(state: &AppState) -> Result<MutexGuard<'_, Option<PiAgent>>, AppError> {
     state.agent.try_lock().map_err(|_| {
@@ -229,54 +243,26 @@ async fn process_chat_prompt(
     State(state): State<Arc<AppState>>,
     ApiJson(payload): ApiJson<PromptRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let t_state = state.clone();
     let (tx, rx) = mpsc::channel::<SseEvent>(32);
     let cancel_token = CancellationToken::new();
-    let t_cancel = cancel_token.clone();
-    let _handle = tokio::spawn(async move {
-        let mut agent = t_state.agent.lock().await;
-        let agent = if let Some(agent) = agent.as_mut() {
-            agent
-        } else {
-            let err_str = "Failed to get a mutable agent instance";
-            handle_pi_errors(err_str.to_owned(), &tx).await;
-            return;
-        };
-
-        let history = t_state
-            .resumed_chat
-            .lock()
-            .expect("resumed chat lock")
-            .as_mut()
-            .and_then(|resumed| resumed.pending_history.take());
-        let message = match &history {
-            Some(history) => session::prompt_with_history(history, &payload.message),
-            None => payload.message,
-        };
-        let payload = json!({
-            "type": "prompt",
-            "message": message
-        });
-        if let Err(err) = agent.writer.send_to_pi(payload).await {
-            // Pi never got it, the next prompt carries the history instead
-            keep_history(&t_state, history);
-            let err_str = format!("Failed to send the payload to Pi due to {:?}", err);
-            handle_pi_errors(err_str.to_owned(), &tx).await;
-            return;
+    let store = if state.saves_turns {
+        match open_chat_store().await {
+            Ok(store) => Some(store),
+            Err(err) => {
+                report_failed_save(err, &tx).await;
+                None
+            }
         }
-        let read = tokio::select! {
-                _ = t_cancel.cancelled() => {
-                    log::info!("Will cancel the agent process");
-                    let _ = handle_graceful_exit(&mut agent.writer).await;
-                    // To read the rest of stdout after aborting the current request
-                    read_from_pi(agent, &tx).await
-                 },
-                read = read_from_pi(agent, &tx) => read
-        };
-        if read == PiRead::Refused {
-            keep_history(&t_state, history);
-        }
-    });
+    } else {
+        None
+    };
+    let _handle = tokio::spawn(run_prompt(
+        state.clone(),
+        payload.message,
+        tx,
+        cancel_token.clone(),
+        store,
+    ));
 
     let mut sse_stream = ReceiverStream::new(rx)
         .map(|msg| Ok::<_, Infallible>(Event::default().event(msg.event).data(msg.data)));
@@ -291,6 +277,146 @@ async fn process_chat_prompt(
     };
 
     Ok(Sse::new(guarded_stream))
+}
+
+// sends the prompt to Pi and streams the reply into tx
+async fn run_prompt(
+    state: Arc<AppState>,
+    typed: String,
+    tx: Sender<SseEvent>,
+    cancel: CancellationToken,
+    store: Option<ChatStore>,
+) {
+    let mut agent = state.agent.lock().await;
+    let agent = if let Some(agent) = agent.as_mut() {
+        agent
+    } else {
+        let err_str = "Failed to get a mutable agent instance";
+        handle_pi_errors(err_str.to_owned(), &tx).await;
+        return;
+    };
+
+    // failed save doesn't stop the reply
+    let saving = match store {
+        Some(store) => match save_prompt(&state, agent, store, typed.clone()).await {
+            Ok(saving) => Some(saving),
+            Err(err) => {
+                report_failed_save(err, &tx).await;
+                None
+            }
+        },
+        None => None,
+    };
+
+    let history = state
+        .resumed_chat
+        .lock()
+        .expect("resumed chat lock")
+        .as_mut()
+        .and_then(|resumed| resumed.pending_history.take());
+    let message = match &history {
+        Some(history) => session::prompt_with_history(history, &typed),
+        None => typed,
+    };
+    let payload = json!({
+        "type": "prompt",
+        "message": message
+    });
+    if let Err(err) = agent.writer.send_to_pi(payload).await {
+        // Pi never got it, the next prompt carries the history instead
+        keep_history(&state, history);
+        let err_str = format!("Failed to send the payload to Pi due to {:?}", err);
+        handle_pi_errors(err_str.to_owned(), &tx).await;
+        return;
+    }
+    // shared by both reads below
+    let mut turn_messages = vec![];
+    let read = tokio::select! {
+            _ = cancel.cancelled() => {
+                log::info!("Will cancel the agent process");
+                let _ = handle_graceful_exit(&mut agent.writer).await;
+                // To read the rest of stdout after aborting the current request
+                read_from_pi(agent, &tx, &mut turn_messages).await
+             },
+            read = read_from_pi(agent, &tx, &mut turn_messages) => read
+    };
+    if read == PiRead::Refused {
+        keep_history(&state, history);
+    }
+    if let Some(saving) = saving
+        && !turn_messages.is_empty()
+        && let Err(err) = save_reply(saving, turn_messages).await
+    {
+        report_failed_save(err, &tx).await;
+    }
+}
+
+// chats db and the account that owns the turn
+struct ChatStore {
+    chats: tokio_rusqlite::Connection,
+    user: User,
+}
+
+async fn open_chat_store() -> anyhow::Result<ChatStore> {
+    let user = get_async_db_conn(&DBTYPE::COMMON)?
+        .call(|conn| get_current_user(conn))
+        .await
+        .map_err(call_error)
+        .map_err(|err| match err.downcast_ref::<rusqlite::Error>() {
+            Some(rusqlite::Error::QueryReturnedNoRows) => {
+                anyhow!("No local account, create one first")
+            }
+            _ => err,
+        })?;
+
+    Ok(ChatStore {
+        chats: get_async_db_conn(&DBTYPE::CHAT)?,
+        user,
+    })
+}
+
+struct SavingTurn {
+    store: ChatStore,
+    turn: OpenTurn,
+}
+
+// saves to the chat Pi is in
+async fn save_prompt(
+    state: &AppState,
+    agent: &mut PiAgent,
+    store: ChatStore,
+    prompt: String,
+) -> anyhow::Result<SavingTurn> {
+    let pi_state = agent.reader.get_pi_state(&mut agent.writer).await?;
+    let chat_id = chat_id_of_pi_session(state, pi_state.session_id);
+    let model = session::agent_model(state).map_err(|err| anyhow!(err.parts().1))?;
+
+    let user = store.user.clone();
+    let turn = store
+        .chats
+        .call(move |conn| chats::save_prompt(conn, &user, &chat_id, &model, &prompt))
+        .await
+        .map_err(call_error)?;
+    Ok(SavingTurn { store, turn })
+}
+
+async fn save_reply(saving: SavingTurn, messages: Vec<PiMsgEvent>) -> anyhow::Result<()> {
+    let SavingTurn { store, turn } = saving;
+    let ChatStore { chats, user } = store;
+    chats
+        .call(move |conn| chats::save_reply(conn, &user, turn, messages))
+        .await
+        .map_err(call_error)
+}
+
+// separate from the error event
+async fn report_failed_save(err: anyhow::Error, tx: &Sender<SseEvent>) {
+    log::error!("Couldn't save the chat: {err:#}");
+    let event = SseEvent {
+        event: "save_failed".to_owned(),
+        data: json!({ "type": "save_failed", "reason": format!("{err:#}") }).to_string(),
+    };
+    let _ = tx.send(event).await.map_err(|e| log::error!("{:?}", e));
 }
 
 async fn handle_pi_errors(err_str: String, tx: &Sender<SseEvent>) {
@@ -324,7 +450,12 @@ enum PiRead {
     Stopped,
 }
 
-async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> PiRead {
+// streams Pi's lines into tx and collects the agent_end messages
+async fn read_from_pi(
+    agent: &mut PiAgent,
+    tx: &Sender<SseEvent>,
+    turn_messages: &mut Vec<PiMsgEvent>,
+) -> PiRead {
     let mut last_event = String::from("");
     while let Ok(Some(line)) = agent.reader.next_line().await {
         let response = if let Ok(response) = serde_json::from_str::<PiResponse>(&line) {
@@ -344,6 +475,8 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> PiRead {
         let _ = tx.send(sse_event).await.map_err(|e| log::error!("{:?}", e));
 
         match response {
+            // retries send agent_end more than once
+            PiResponse::AgentEnd(PiAgentEndEvent { messages }) => turn_messages.extend(messages),
             PiResponse::AgentSettled => {
                 log::info!("reading ended with last event {last_event}");
                 return PiRead::Settled;
@@ -367,8 +500,9 @@ async fn read_from_pi(agent: &mut PiAgent, tx: &Sender<SseEvent>) -> PiRead {
 #[cfg(test)]
 mod tests {
 
-    use super::set_thinking_level_with;
+    use super::{ChatStore, run_prompt, set_thinking_level_with};
     use crate::core::agent::{pi::from_test_command, types::ReasoningEffort};
+    use crate::core::chats;
     use crate::daemon::{
         AppState, account::tests::MockProvider, agent::agent_router, session::ResumedChat,
     };
@@ -380,6 +514,9 @@ mod tests {
     use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio::sync::Mutex as AsyncMutex;
+    use tokio::sync::mpsc;
+    use tokio_rusqlite::rusqlite;
+    use tokio_util::sync::CancellationToken;
     use tower::ServiceExt;
 
     // a fake Pi that answers each request it reads with the next of `answers`, where $id is
@@ -641,6 +778,86 @@ mod tests {
         let sse_events = String::from_utf8(body_bytes.to_vec()).unwrap();
 
         assert!(sse_events.contains("event: error"));
+    }
+
+    const STATE_IN_PI_SESSION_S1: &str = r#"'{"type":"response","id":"'"$id"'","command":"get_state","success":true,"data":{"sessionId":"s1","model":{"id":"id","name":"model"},"thinkingLevel":"off","isStreaming":false}}'"#;
+
+    // user message carries the resume history
+    const A_TURN_ENDING_IN_HELLO: &str = r#"'{"type":"agent_start"}' '{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"the chat so far, then: hi"}],"timestamp":1},{"role":"assistant","content":[{"type":"thinking","thinking":"a greeting"},{"type":"text","text":"hello"}],"timestamp":2}]}' '{"type":"agent_settled"}'"#;
+
+    fn state_with_pi_in_resumed_chat(chat_id: &str) -> AppState {
+        AppState {
+            agent: AsyncMutex::new(Some(pi_answering(&[
+                STATE_IN_PI_SESSION_S1,
+                A_TURN_ENDING_IN_HELLO,
+            ]))),
+            agent_model: Mutex::new(Some("llama3.2".to_owned())),
+            resumed_chat: Mutex::new(Some(ResumedChat {
+                pi_session_id: "s1".to_owned(),
+                chat_id: chat_id.to_owned(),
+                pending_history: Some("User: earlier".to_owned()),
+            })),
+            ..AppState::for_tests()
+        }
+    }
+
+    async fn events_of_prompt(state: AppState, store: ChatStore) -> Vec<String> {
+        let (tx, mut rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+        run_prompt(state.into(), "hi".to_owned(), tx, cancel, Some(store)).await;
+        let mut events = vec![];
+        while let Some(event) = rx.recv().await {
+            events.push(event.event);
+        }
+        events
+    }
+
+    #[tokio::test]
+    async fn a_turn_is_saved_to_the_chat_pi_is_in() {
+        let chats = tokio_rusqlite::Connection::from(crate::core::chats::tests::setup_db_schema());
+        let store = ChatStore {
+            chats: chats.clone(),
+            user: crate::core::chats::tests::create_user(),
+        };
+
+        let events = events_of_prompt(state_with_pi_in_resumed_chat("old"), store).await;
+
+        assert_eq!(events, ["agent_start", "agent_end", "agent_settled"]);
+        let (saved, snapshot) = chats
+            .call(|conn| {
+                let saved = chats::fetch_chats_by_session_id(conn, "old")?.chats;
+                let snapshot = chats::session_snapshot(conn, "old")?;
+                anyhow::Ok((saved, snapshot))
+            })
+            .await
+            .unwrap();
+        let saved: Vec<&str> = saved.iter().map(|chat| chat.content.as_str()).collect();
+        assert_eq!(saved, ["hi", "hello"]);
+        let turn = &snapshot.unwrap().turns[0];
+        assert_eq!(turn.model, "llama3.2");
+        assert_eq!(turn.messages[0].content[0].text.as_deref(), Some("hi"));
+        assert_eq!(
+            turn.messages[1].content[0].thinking.as_deref(),
+            Some("a greeting")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_turn_that_cant_be_saved_is_reported_and_still_answered() {
+        // db without tables
+        let chats =
+            tokio_rusqlite::Connection::from(rusqlite::Connection::open_in_memory().unwrap());
+        let store = ChatStore {
+            chats,
+            user: crate::core::chats::tests::create_user(),
+        };
+
+        let events = events_of_prompt(state_with_pi_in_resumed_chat("old"), store).await;
+
+        assert_eq!(
+            events,
+            ["save_failed", "agent_start", "agent_end", "agent_settled"]
+        );
     }
 
     #[tokio::test]

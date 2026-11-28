@@ -20,3 +20,14 @@ settings:
   followRedirects: true
   maxRedirects: 5
   forwardAuthorizationHeader: false
+
+docs:
+  content: |-
+    Sends a message to the chat the agent is in and streams the reply as server-sent events. The stream ends once the turn is over.
+
+    The daemon saves the turn. Your message is saved before the first event, and the first message creates the session and names it. The reply text is saved at the end of the turn. Thinking and tool calls go into the snapshot that share publishes. Replies with no text, like one stopped early, only go into the snapshot.
+
+    `save_failed` comes with a `reason` if the turn could not be saved. The reply still streams.
+
+    `error` means the agent could not answer.
+  type: text/markdown
