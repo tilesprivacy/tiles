@@ -78,7 +78,7 @@ async fn sign_in_to_share(api: &DaemonApi) -> Result<bool> {
     println!("Please enter your ATmosphere handle (ex: john.bsky.team)");
     let mut handle = String::new();
     io::stdin().read_line(&mut handle)?;
-    // a bad handle is reported, it does not end the session
+    // bad handle is reported, it does not end the session
     match sign_in(api, handle.trim()).await {
         Ok(_) => Ok(true),
         Err(err) => {

@@ -1,10 +1,12 @@
 //! Calls to the Tiles daemon
 
+use std::fmt;
+
 use anyhow::{Context, Result, anyhow, bail};
-use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header::CONTENT_TYPE};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// The running daemon's HTTP API, as the CLI calls it
 #[derive(Debug, Clone)]
@@ -66,6 +68,54 @@ pub(crate) enum ShareOutcome {
 #[derive(Deserialize)]
 struct SharedLink {
     url: String,
+}
+
+/// One llama.cpp setting reported by the daemon
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub(crate) struct LlamaSetting {
+    pub name: String,
+    pub value: Option<Value>,
+    pub default: String,
+    #[serde(default)]
+    pub choices: Vec<SettingChoice>,
+    pub help: String,
+}
+
+/// One allowed value for a choice setting
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct SettingChoice {
+    pub value: String,
+}
+
+#[derive(Deserialize)]
+struct SettingsResponse {
+    settings: Vec<LlamaSetting>,
+}
+
+/// What starting or stopping the inference server did
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ServerState {
+    Started,
+    AlreadyRunning,
+    Stopped,
+    NotRunning,
+}
+
+impl fmt::Display for ServerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Started => "Inference server started",
+            Self::AlreadyRunning => "Inference server is already running",
+            Self::Stopped => "Inference server stopped",
+            Self::NotRunning => "Inference server is not running",
+        })
+    }
+}
+
+#[derive(Deserialize)]
+struct ServerStateResponse {
+    state: ServerState,
 }
 
 impl DaemonApi {
@@ -155,10 +205,86 @@ impl DaemonApi {
         Ok(url)
     }
 
+    pub(crate) async fn fetch_llama_settings(&self) -> Result<Vec<LlamaSetting>> {
+        let res = self
+            .client
+            .get(format!("{}/v1/tilekit/config/llama", self.address))
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        let response: SettingsResponse = response_data(res).await?;
+        Ok(response.settings)
+    }
+
+    pub(crate) async fn set_llama_settings(
+        &self,
+        values: &Map<String, Value>,
+    ) -> Result<Vec<LlamaSetting>> {
+        let res = self
+            .post_json("/v1/tilekit/config/llama/set", &json!({ "values": values }))
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        let response: SettingsResponse = response_data(res).await?;
+        Ok(response.settings)
+    }
+
+    pub(crate) async fn reset_llama_settings(
+        &self,
+        names: &[String],
+        all: bool,
+    ) -> Result<Vec<LlamaSetting>> {
+        let res = self
+            .post_json(
+                "/v1/tilekit/config/llama/reset",
+                &json!({ "names": names, "all": all }),
+            )
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        let response: SettingsResponse = response_data(res).await?;
+        Ok(response.settings)
+    }
+
+    pub(crate) async fn logout_atproto(&self) -> Result<AtprotoAccount> {
+        let res = self
+            .post_empty("/v1/tilekit/atproto/logout")
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        response_data(res).await
+    }
+
+    pub(crate) async fn start_server(&self) -> Result<ServerState> {
+        let res = self
+            .post_empty("/v1/tilekit/server/start")
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        let response: ServerStateResponse = response_data(res).await?;
+        Ok(response.state)
+    }
+
+    pub(crate) async fn stop_server(&self) -> Result<ServerState> {
+        let res = self
+            .post_empty("/v1/tilekit/server/stop")
+            .send()
+            .await
+            .context("Could not reach the Tiles daemon")?;
+        let response: ServerStateResponse = response_data(res).await?;
+        Ok(response.state)
+    }
+
     pub(crate) fn post_json(&self, path: &str, body: &Value) -> RequestBuilder {
         self.client
             .post(format!("{}{path}", self.address))
             .json(body)
+    }
+
+    fn post_empty(&self, path: &str) -> RequestBuilder {
+        self.client
+            .post(format!("{}{path}", self.address))
+            .header(CONTENT_TYPE, "application/json")
     }
 }
 
@@ -183,7 +309,7 @@ async fn response_data<T: DeserializeOwned>(res: Response) -> Result<T> {
 mod tests {
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, method, path},
+        matchers::{body_json, header, method, path},
     };
 
     use super::*;
@@ -413,5 +539,196 @@ mod tests {
 
         let chats_url = api.session_chats_url("../list").unwrap();
         assert_eq!(chats_url.path(), "/v1/tilekit/session/..%2Flist/chats");
+    }
+
+    #[tokio::test]
+    async fn llama_settings_are_read_from_the_daemons_answer() {
+        let server = daemon_answering(
+            "GET",
+            "/v1/tilekit/config/llama",
+            200,
+            json!({
+                "status": "success",
+                "data": {
+                    "settings": [
+                        {
+                            "name": "context_length",
+                            "label": "Context length",
+                            "value": 65536,
+                            "default": "65536",
+                            "kind": "number",
+                            "min": 4096,
+                            "help": "Max context size"
+                        },
+                        {
+                            "name": "load_mode",
+                            "label": "Load mode",
+                            "value": null,
+                            "default": "auto",
+                            "kind": "choice",
+                            "choices": [
+                                { "value": "auto", "label": "Auto" },
+                                { "value": "mmap", "label": "Memory map" }
+                            ],
+                            "help": "How the model is loaded"
+                        }
+                    ]
+                }
+            }),
+        )
+        .await;
+
+        let settings = api_for(&server).fetch_llama_settings().await.unwrap();
+
+        assert_eq!(
+            settings,
+            vec![
+                LlamaSetting {
+                    name: "context_length".to_owned(),
+                    value: Some(json!(65536)),
+                    default: "65536".to_owned(),
+                    choices: vec![],
+                    help: "Max context size".to_owned(),
+                },
+                LlamaSetting {
+                    name: "load_mode".to_owned(),
+                    value: None,
+                    default: "auto".to_owned(),
+                    choices: vec![
+                        SettingChoice {
+                            value: "auto".to_owned(),
+                        },
+                        SettingChoice {
+                            value: "mmap".to_owned(),
+                        },
+                    ],
+                    help: "How the model is loaded".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_and_reset_llama_settings_send_their_bodies() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tilekit/config/llama/set"))
+            .and(body_json(json!({ "values": { "flash_attn": "false" } })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": {
+                    "settings": [{
+                        "name": "flash_attn",
+                        "value": false,
+                        "default": "true",
+                        "help": "Flash attention"
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/tilekit/config/llama/reset"))
+            .and(body_json(json!({ "names": ["flash_attn"], "all": false })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": {
+                    "settings": [{
+                        "name": "flash_attn",
+                        "value": null,
+                        "default": "true",
+                        "help": "Flash attention"
+                    }]
+                }
+            })))
+            .mount(&server)
+            .await;
+
+        let mut values = Map::new();
+        values.insert("flash_attn".to_owned(), json!("false"));
+        let updated = api_for(&server).set_llama_settings(&values).await.unwrap();
+        assert_eq!(updated[0].value, Some(json!(false)));
+
+        let reset = api_for(&server)
+            .reset_llama_settings(&["flash_attn".to_owned()], false)
+            .await
+            .unwrap();
+        assert_eq!(reset[0].value, None);
+    }
+
+    #[tokio::test]
+    async fn atproto_logout_sends_json_content_type_and_reads_account() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tilekit/atproto/logout"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": { "handle": "alice.test", "did": "did:plc:alice" }
+            })))
+            .mount(&server)
+            .await;
+
+        let account = api_for(&server).logout_atproto().await.unwrap();
+        assert_eq!(
+            account,
+            AtprotoAccount {
+                handle: "alice.test".to_owned(),
+                did: "did:plc:alice".to_owned(),
+            }
+        );
+
+        let not_signed_in = daemon_answering(
+            "POST",
+            "/v1/tilekit/atproto/logout",
+            404,
+            json!({ "status": "failed", "reason": "No ATmosphere account is signed in" }),
+        )
+        .await;
+        let err = api_for(&not_signed_in).logout_atproto().await.unwrap_err();
+        assert_eq!(err.to_string(), "No ATmosphere account is signed in");
+    }
+
+    #[tokio::test]
+    async fn server_start_and_stop_send_json_content_type_and_read_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tilekit/server/start"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": { "state": "already_running" }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tilekit/server/stop"))
+            .and(header("content-type", "application/json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": "success",
+                "data": { "state": "stopped" }
+            })))
+            .mount(&server)
+            .await;
+
+        assert_eq!(
+            api_for(&server).start_server().await.unwrap(),
+            ServerState::AlreadyRunning
+        );
+        assert_eq!(
+            api_for(&server).stop_server().await.unwrap(),
+            ServerState::Stopped
+        );
+
+        let port_in_use = daemon_answering(
+            "POST",
+            "/v1/tilekit/server/start",
+            409,
+            json!({ "status": "failed", "reason": "Port 6969 is in use by another process" }),
+        )
+        .await;
+        let err = api_for(&port_in_use).start_server().await.unwrap_err();
+        assert_eq!(err.to_string(), "Port 6969 is in use by another process");
     }
 }
