@@ -41,7 +41,8 @@ def _resolve_model_path(model_spec: str, model_cache_path: str | None) -> Path:
         return Path(model_cache_path)
 
     response = httpx.get(
-        f"http://127.0.0.1:{DAEMON_PORT}/model-cache-path?model_name={model_spec}",
+        f"http://127.0.0.1:{DAEMON_PORT}/model-cache-path",
+        params={"model_name": model_spec},
         timeout=10,
     )
     if response.status_code != 200:

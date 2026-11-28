@@ -426,18 +426,22 @@ async fn wrong_method(method: Method, uri: Uri) -> AppError {
     AppError::MethodNotAllowed(format!("{} is not allowed on {}", method, uri.path()))
 }
 
-// the app's webview and the vite dev server are on other origins
-fn cors_layer() -> CorsLayer {
-    let origins = [
-        "tauri://localhost",
-        "http://tauri.localhost",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ]
-    .map(HeaderValue::from_static);
+// the app's webview and (in debug builds) the vite dev server are on other origins
+fn cors_origins(debug: bool) -> Vec<HeaderValue> {
+    let mut origins = vec![
+        HeaderValue::from_static("tauri://localhost"),
+        HeaderValue::from_static("http://tauri.localhost"),
+    ];
+    if debug {
+        origins.push(HeaderValue::from_static("http://localhost:5173"));
+        origins.push(HeaderValue::from_static("http://127.0.0.1:5173"));
+    }
+    origins
+}
 
+fn cors_layer() -> CorsLayer {
     CorsLayer::new()
-        .allow_origin(origins)
+        .allow_origin(cors_origins(cfg!(debug_assertions)))
         .allow_methods([Method::GET, Method::POST])
         .allow_headers([CONTENT_TYPE])
 }
@@ -672,6 +676,7 @@ pub async fn start_internal_server(
     let shared_state = Arc::new(state);
     let app = Router::new()
         .route("/callback", get(callback))
+        .layer(middleware::from_fn(require_local_host))
         .with_state(shared_state.clone());
 
     let addr = format!("127.0.0.1:{}", dyn_port);
@@ -708,7 +713,7 @@ async fn callback(
     State(state): State<Arc<InternalAppState>>,
     Query(params): Query<AtCallbackParams>,
 ) -> &'static str {
-    info!("callback reached {:?}", params);
+    info!("OAuth callback reached");
     let mut callback_sender = state
         .callback_sender
         .lock()
@@ -1285,5 +1290,19 @@ mod tests {
         shutdown_tx.send(true).unwrap();
         let result = tokio::time::timeout(Duration::from_secs(5), served).await;
         assert!(result.expect("waited for the grace").unwrap().is_ok());
+    }
+
+    #[test]
+    fn release_cors_excludes_vite_dev_origins() {
+        let release = super::cors_origins(false);
+        assert_eq!(release.len(), 2);
+        assert!(
+            !release
+                .iter()
+                .any(|origin| origin.as_bytes().ends_with(b":5173"))
+        );
+
+        let debug = super::cors_origins(true);
+        assert_eq!(debug.len(), 4);
     }
 }

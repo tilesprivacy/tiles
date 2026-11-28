@@ -70,10 +70,11 @@ pub async fn create_identity(app: &str) -> Result<Identity> {
 /// - `did` - The `Identity` of the service
 pub fn get_secret_key(app: &str, did: &str) -> Result<SecretKey> {
     let entry = keyring_entry(app, did)?;
-    let mut bytes: [u8; 64] = [0u8; 64];
     let secret_pair = entry.get_secret()?;
-
-    bytes[..64].copy_from_slice(secret_pair.as_slice());
+    let bytes: [u8; 64] = secret_pair
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid keypair length in keyring: expected 64 bytes"))?;
     let signing_key = SigningKey::from_keypair_bytes(&bytes)?;
     Ok(SecretKey::from_bytes(&signing_key.to_bytes()))
 }
@@ -87,10 +88,11 @@ pub fn get_secret_key(app: &str, did: &str) -> Result<SecretKey> {
 pub fn get_signing_key(app: &str, did: &str) -> Result<SigningKey> {
     info!("secure did {}", &did);
     let entry = keyring_entry(app, did)?;
-    let mut bytes: [u8; 64] = [0u8; 64];
     let secret_pair = entry.get_secret()?;
-
-    bytes[..64].copy_from_slice(secret_pair.as_slice());
+    let bytes: [u8; 64] = secret_pair
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Invalid keypair length in keyring: expected 64 bytes"))?;
 
     let signing_key = SigningKey::from_keypair_bytes(&bytes)?;
     Ok(signing_key)
@@ -169,5 +171,16 @@ mod tests {
         let did = "did:plc:mbk6wgmxiatotzy5b3q57naw";
 
         assert!(get_public_key_from_did(did).is_err());
+    }
+
+    #[test]
+    fn test_corrupt_keyring_secret_returns_error() -> Result<()> {
+        use_sample_keyring_store()?;
+        let entry = keyring_entry("tiles_corrupt_test", "did:key:corrupt")?;
+        entry.set_secret(&[1u8; 16])?;
+
+        assert!(get_secret_key("tiles_corrupt_test", "did:key:corrupt").is_err());
+        assert!(get_signing_key("tiles_corrupt_test", "did:key:corrupt").is_err());
+        Ok(())
     }
 }

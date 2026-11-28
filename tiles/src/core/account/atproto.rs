@@ -254,6 +254,8 @@ pub fn logout(conn: &Connection) -> Result<String> {
     if let Some(auth_user) = fetch_logged_in_data(conn)? {
         let succes_str = format!("Logged out successfully as @{}", auth_user.handle);
         let logout_user = AtprotoAuthData {
+            session: String::new(),
+            state: String::new(),
             is_logged_in: false,
             ..auth_user
         };
@@ -271,10 +273,8 @@ async fn resolve_handle_to_did(handle: &str) -> Result<String> {
     let client_builder = Client::builder().timeout(Duration::from_secs(5));
     let client = client_builder.build()?;
     let response = client
-        .get(format!(
-            "https://bsky.social/xrpc/com.atproto.identity.resolveHandle?handle={}",
-            handle
-        ))
+        .get("https://bsky.social/xrpc/com.atproto.identity.resolveHandle")
+        .query(&[("handle", handle)])
         .send()
         .await;
 
@@ -294,7 +294,7 @@ fn upsert_auth_data(conn: &Connection, data: &AtprotoAuthData) -> Result<()> {
     let mut stmt = conn.prepare(
         "insert into atproto_auth_data(key, session, state, is_logged_in, created_at, updated_at, handle) values (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          on conflict(key)
-         do update set session = ?2, updated_at = ?6, is_logged_in = ?4
+         do update set session = ?2, state = ?3, updated_at = ?6, is_logged_in = ?4
          ",
     )?;
 
@@ -729,6 +729,29 @@ mod tests {
         let auth_data_2 = fetch_logged_in_data(&conn).unwrap();
 
         assert!(auth_data_2.is_none())
+    }
+
+    #[test]
+    fn test_logout_clears_session_tokens() {
+        let conn = setup_db_schema();
+
+        let auth_data = AtprotoAuthData {
+            key: String::from("did:plc:wth"),
+            session: String::from("{\"access_token\":\"secret\"}"),
+            state: String::from("oauth_state"),
+            is_logged_in: true,
+            created_at: get_unix_time_now(),
+            updated_at: get_unix_time_now(),
+            handle: "madcla.ws".to_owned(),
+        };
+
+        upsert_auth_data(&conn, &auth_data).unwrap();
+        logout(&conn).unwrap();
+
+        let after = fetch_auth_data(&conn, "did:plc:wth").unwrap();
+        assert!(!after.is_logged_in);
+        assert!(after.session.is_empty());
+        assert!(after.state.is_empty());
     }
     fn setup_db_schema() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

@@ -21,17 +21,11 @@ logger = logging.getLogger("app")
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    try:
-        body = await request.json()
-    except Exception:
-        body = None
-
     logger.info(
         {
             "method": request.method,
-            "url": str(request.url),
-            "client": request.client.host,
-            "body": body,
+            "path": request.url.path,
+            "client": request.client.host if request.client else None,
         }
     )
 
