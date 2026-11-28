@@ -6,7 +6,6 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use tiles::{
     core::{
         self,
-        account::atproto::logout,
         plugin::{self, install, uninstall},
         service,
     },
@@ -24,10 +23,7 @@ use tiles::{
     },
 };
 
-use crate::commands::{
-    config::{get_setting_cli, list_settings_cli, reset_settings_cli, set_settings_cli},
-    set_inference_config_to_daemon,
-};
+use crate::commands::set_inference_config_to_daemon;
 
 mod commands;
 
@@ -615,8 +611,8 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
             commands::check_health().await?;
         }
         Some(Commands::System(SystemCommands::Server(server))) => match server.command {
-            ServerCommands::Start => commands::start_server().await,
-            ServerCommands::Stop => commands::stop_server().await,
+            ServerCommands::Start => tiles_cli::start_server(&daemon_api().await?).await?,
+            ServerCommands::Stop => tiles_cli::stop_server(&daemon_api().await?).await?,
             ServerCommands::Daemon { flag } => {
                 set_inference_config_to_daemon(flag.unwrap_or(false))?
             }
@@ -715,18 +711,26 @@ pub async fn main() -> Result<(), Box<dyn Error>> {
                 println!("Logged in successfully as @{}", account.handle);
             }
             AtCommands::Logout => {
-                logout(&db_conn.common)?;
+                let account = tiles_cli::sign_out(&daemon_api().await?).await?;
+                println!("Logged out successfully as @{}", account.handle);
             }
         },
         Some(Commands::Uninstall { .. } | Commands::NvidiaProbe) => {
             unreachable!("run before core::init")
         }
-        Some(Commands::System(SystemCommands::Config(config_args))) => match config_args.command {
-            None => list_settings_cli().await?,
-            Some(ConfigCommands::Set { values }) => set_settings_cli(&values).await?,
-            Some(ConfigCommands::Get { name }) => get_setting_cli(&name).await?,
-            Some(ConfigCommands::Reset { names, all }) => reset_settings_cli(names, all).await?,
-        },
+        Some(Commands::System(SystemCommands::Config(config_args))) => {
+            let api = daemon_api().await?;
+            match config_args.command {
+                None => tiles_cli::list_settings(&api).await?,
+                Some(ConfigCommands::Set { values }) => {
+                    tiles_cli::set_settings(&api, &values).await?
+                }
+                Some(ConfigCommands::Get { name }) => tiles_cli::get_setting(&api, &name).await?,
+                Some(ConfigCommands::Reset { names, all }) => {
+                    tiles_cli::reset_settings(&api, names, all).await?
+                }
+            }
+        }
         Some(Commands::System(SystemCommands::Network(network_args))) => {
             match network_args.command {
                 NetworkCommands::Start => {

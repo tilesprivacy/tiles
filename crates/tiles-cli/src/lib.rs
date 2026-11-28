@@ -9,8 +9,10 @@ mod input;
 mod sse;
 
 pub use api::{AtprotoAccount, DaemonApi, Session};
-pub use atproto::sign_in;
+pub use atproto::{sign_in, sign_out};
 pub use browser::open_in_browser;
-pub use commands::{share_session_command, show_session_list, show_status};
+pub use commands::config::{get_setting, list_settings, reset_settings, set_settings};
+pub use commands::repl::{share_session_command, show_session_list, show_status};
+pub use commands::server::{start_server, stop_server};
 pub use input::{InputType, TilesHinter, create_line_editor, handle_input};
 pub use sse::take_events;

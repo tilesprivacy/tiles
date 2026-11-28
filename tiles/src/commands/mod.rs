@@ -7,7 +7,7 @@ use owo_colors::OwoColorize;
 use tiles::core::account::local::{
     RootUser, create_root_account, get_root_user_details, save_root_account, set_nickname,
 };
-use tiles::core::server::{ping, start_server_daemon, stop_server_daemon};
+use tiles::core::server::ping;
 use tiles::daemon::{ping as ping_daemon, stop_cmd};
 use tiles::utils::config::{
     ConfigProvider, DefaultProvider, InferenceConfig, get_inference_config, get_or_create_config,
@@ -20,8 +20,6 @@ use tiles::{core::health, repl::RunArgs};
 use toml::Table;
 
 use crate::{AccountArgs, AccountCommands};
-
-pub mod config;
 
 const FTUE_VERSION_TITLE: &str = "Tiles";
 const PRODUCT_DESCRIPTION: &str = "A local-first, collaborative AI assistant that works for you. Built with open models and decentralized protocols";
@@ -250,20 +248,6 @@ pub fn set_data(path: &str) {
 }
 pub async fn check_health() -> Result<()> {
     health::check_health().await
-}
-
-pub async fn start_server() {
-    match start_server_daemon().await {
-        Ok(state) => println!("{state}"),
-        Err(err) => eprintln!("{err}"),
-    }
-}
-
-pub async fn stop_server() {
-    match stop_server_daemon().await {
-        Ok(msg) => println!("{msg}"),
-        Err(err) => eprintln!("{err}"),
-    }
 }
 
 pub async fn uninstall_tiles(all: bool) -> Result<()> {
